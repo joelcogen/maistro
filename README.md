@@ -155,6 +155,11 @@ To create a new board inside an AppFlowy page, run:
 maistro -c ~/.config/maistro/config.toml create-board 'https://appflowy.com/app/WORKSPACE_ID/PAGE_ID'
 ```
 
+Use the page URL copied from AppFlowy. The workspace ID must be a UUID; the
+page ID is preserved as supplied and may contain letters, digits, hyphens and
+underscores, including IDs longer than a UUID. Query strings and fragments do
+not change the target page.
+
 This explicitly authorizes creation of a child database named `Board`, grouped by
 its `Status` select field. It uses the configured coordinator and AppFlowy MCP
 server, through a setup guard that permits one creation under the supplied page and

@@ -42,13 +42,20 @@ pub fn page_ids(input: &str) -> Result<(String, String)> {
         parts.len() == 3 && parts[0] == "app",
         "expected an AppFlowy page URL with workspace and page IDs"
     );
+    // Page route identifiers are opaque: browser links need not contain UUIDs.
+    // Keep the supplied identifier intact rather than truncating or repairing it.
+    ensure!(
+        !parts[2].is_empty()
+            && parts[2]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')),
+        "invalid page ID: expected letters, digits, hyphens or underscores"
+    );
     Ok((
         uuid::Uuid::parse_str(parts[1])
             .context("invalid workspace ID")?
             .to_string(),
-        uuid::Uuid::parse_str(parts[2])
-            .context("invalid page ID")?
-            .to_string(),
+        parts[2].to_owned(),
     ))
 }
 
@@ -344,6 +351,34 @@ mod tests {
             assert!(page_ids(invalid).is_err(), "{invalid}");
         }
     }
+    #[test]
+    fn preserves_opaque_page_identifiers_from_browser_links() {
+        let workspace = "f757bab8-f38b-49a2-9338-6a524d0646e2";
+        for page in [
+            "c80255e3-0f92-4e64-a938-6762304941a37",
+            "Page_ABC-123",
+            "C80255E3-0F92-4E64-A938-6762304941A3",
+        ] {
+            let url = format!("https://appflowy.com/app/{workspace}/{page}");
+            for suffix in ["", "?view=board#section"] {
+                assert_eq!(
+                    page_ids(&format!("{url}{suffix}")).unwrap(),
+                    (workspace.to_owned(), page.to_owned())
+                );
+            }
+        }
+        for page in [
+            "",
+            "%2F",
+            "%20",
+            "page%0Ainstruction",
+            "page/name",
+            "page.name",
+        ] {
+            assert!(page_ids(&format!("https://appflowy.com/app/{workspace}/{page}")).is_err());
+        }
+    }
+
     #[test]
     fn requires_successful_creation_and_final_exact_options() {
         let (board, parent, evidence) = fixture();
