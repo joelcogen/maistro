@@ -39,6 +39,9 @@ test "$2" = "$HOME/.config/maistro/config.toml" || exit 92
 test "$MAISTRO_GITHUB_TOKEN" = ghp_test_123 || exit 93
 grep -q '# edited' "$2" || exit 94
 printf 'validate\n' >> "$HOME/events"
+if [ "${FAIL_VALIDATE:-0}" != 0 ]; then
+    printf 'incomplete board read or unreadable fields\n' >&2
+fi
 exit "${FAIL_VALIDATE:-0}"
 """)
         self.tool("editor", """
@@ -106,6 +109,8 @@ printf '\n# edited\n' >> "$2"
                 self.assertEqual(result.returncode, code)
                 self.assertEqual((self.home / "events").read_text(), events)
                 self.assertNotIn("Installation and validation succeeded", result.stdout)
+                if variable == "FAIL_VALIDATE":
+                    self.assertIn("incomplete board read or unreadable fields", result.stderr)
 
     def test_empty_or_shell_input_is_rejected_and_eof_stops(self):
         result = self.run_install("\n$(touch should-not-exist)\n")

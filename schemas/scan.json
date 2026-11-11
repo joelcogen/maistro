@@ -8,13 +8,16 @@
       "type": "string"
     },
     "board_id": {
-      "type": "string"
+      "type": "string",
+      "description": "The database UUID: the id of the matching list_databases entry, used as database_id for row and field tools. Never the board view UUID."
     },
     "view_id": {
-      "type": "string"
+      "type": "string",
+      "description": "The board view UUID from the matched database entry's views, distinct from board_id."
     },
     "matches": {
-      "type": "integer"
+      "type": "integer",
+      "description": "Number of database/board candidates matching the configured URL or page name. Exactly one for an unambiguous board. This is never a count of stories, rows, statuses or tools."
     },
     "complete": {
       "type": "boolean"
@@ -73,6 +76,26 @@
           },
           "reason": {
             "type": "string"
+          },
+          "reference_pages": {
+            "type": "array",
+            "description": "AppFlowy reference documents used by this story, including linked pages and uniquely resolved named guides. Read every listed page with get_page_markdown. These are context, not additional task boards.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "workspace_id": {
+                  "type": "string"
+                },
+                "page_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "workspace_id",
+                "page_id"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -84,7 +107,8 @@
           "dependencies",
           "acceptance_criteria",
           "decision",
-          "reason"
+          "reason",
+          "reference_pages"
         ],
         "additionalProperties": false
       }

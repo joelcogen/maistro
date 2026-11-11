@@ -6,6 +6,18 @@ use crate::{
 use anyhow::{Context, Result, ensure};
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+fn excerpt(text: &str) -> String {
+    const LIMIT: usize = 12_000;
+    if text.len() <= LIMIT {
+        return text.to_owned();
+    }
+    let mut start = text.len() - LIMIT;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!("[earlier output omitted]\n{}", &text[start..])
+}
 pub async fn tests(
     config: &Config,
     p: &Project,
@@ -27,19 +39,43 @@ pub async fn tests(
     for (i, args) in p.test_commands.iter().enumerate() {
         let mut c = sandbox::command(p, &r.worktree, true, false)?;
         c.arg("--").args(args);
-        let o = process::run(
+        let outcome = process::run(
             c,
             "",
             Duration::from_secs(config.orchestrator.process_timeout_seconds),
             cancel,
             Some(&dir.join(format!("{i}.stdout"))),
         )
-        .await?;
+        .await;
+        let o = match outcome {
+            Ok(output) => output,
+            Err(error) => {
+                if cancel.is_cancelled()
+                    || error
+                        .downcast_ref::<process::UnconfirmedTermination>()
+                        .is_some()
+                {
+                    return Err(error);
+                }
+                let stdout =
+                    std::fs::read_to_string(dir.join(format!("{i}.stdout"))).unwrap_or_default();
+                let stderr =
+                    std::fs::read_to_string(dir.join(format!("{i}.stderr"))).unwrap_or_default();
+                anyhow::bail!(
+                    "Test command {args:?} could not complete: {error}\nSTDOUT:\n{}\nSTDERR:\n{}",
+                    excerpt(&stdout),
+                    excerpt(&stderr)
+                );
+            }
+        };
         ensure!(
             o.code == 0,
-            "deterministic test {} failed (exit {}); inspect {}",
+            "Deterministic test {} failed (exit {}). Command: {:?}. Workdir: /work. Network: isolated.\nSTDOUT:\n{}\nSTDERR:\n{}\nFull logs retained at {}",
             i,
             o.code,
+            args,
+            excerpt(&o.stdout),
+            excerpt(&o.stderr),
             dir.display()
         );
         summary.push_str(&format!("Command {args:?}: exit 0\n"));

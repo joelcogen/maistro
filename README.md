@@ -78,6 +78,11 @@ Test commands are argument arrays, such as `["cargo", "test", "--locked",
 They must exit successfully without changing source files; ignore build outputs
 in Git.
 
+When a check fails, Maistro sends the command and its stdout/stderr to the coding
+agent, which diagnoses the failure, repairs the code and reruns the checks.
+Repairs remain bounded by `max_attempts`. Rust projects also get a compiler and
+linker check inside the sandbox before stories are dispatched.
+
 Use `toolchain_paths` to expose specific toolchains and caches read-only. For
 Cargo, mount a registry directory such as `/home/jole/.cargo/registry`. Maistro
 also exposes it as the worker's Cargo registry. A mounted directory with a `bin`
@@ -95,11 +100,10 @@ Use a **personal access token (classic)** for this version. Maistro reads the
 Checks API, which GitHub doesn't currently support with fine-grained personal
 access tokens.
 
-Use a dedicated GitHub account with Write access to the managed repositories and
-no protection-bypass role. Maistro currently rejects accounts with repository
-Admin access, even when their token has limited scopes. A token created by the
-owner of a personal repository will therefore fail validation. This is a current
-Maistro restriction.
+The account needs Write access to the managed repositories. You can use your
+repository-owner account while `github.auto_merge = false`. Automatic merging
+requires a non-administrator account with no protection-bypass role. This check
+uses the account's repository role, not the token's `admin:*` scope checkboxes.
 
 1. Sign in as that account and open [Create a classic personal access token](https://github.com/settings/tokens/new).
 2. Set **Note** to `Maistro` and choose an expiration, for example 30 days.
@@ -142,10 +146,19 @@ Use these board statuses: Backlog, Ready, In Progress, Review, Done, Blocked and
 Cancelled. The `Status` select field must match `projects.statuses`. You can map
 Ready to an existing label such as To Do.
 
-Only Ready authorizes work. Give each story a description and observable
-acceptance criteria. Dependencies refer to row IDs on the same board. Maistro
-waits for them to become Done and explains the wait in a comment. Unclear
-requirements become Blocked.
+Only Ready authorizes work. Describe the outcome you want; observable requirements
+in prose are enough. The agent chooses ordinary implementation and design details
+using repository conventions and reasonable defaults. Examples, mockups and exact
+output formats are optional. Luna blocks a story only when a concrete obstacle
+prevents meaningful progress, and explains why the agent cannot resolve it.
+
+Dependencies refer to row IDs on the same board. Maistro waits for them to become
+Done and explains the wait in a comment.
+
+Stories and human comments may reference other AppFlowy pages. Luna reads linked
+documents and resolves named guides through the workspace folder. Rust includes
+the fetched text in the worker's context and revision checks. Only stories on the
+configured board authorize work; reference documents do not create extra tasks.
 
 Optional fields are `Execution ID`, `PR URL`, `Last error` and `Retry count`.
 Maistro fills these in; underscore spellings also work. See the
@@ -157,7 +170,14 @@ pilot uses `required_checks = ["test"]`. Verify its first GitHub run after pushi
 the repository. Other projects need their own check names.
 
 Keep `github.auto_merge = false` for the first trial. Maistro can open and review
-PRs while you handle merging. To enable automatic squash merges, it also needs
+PRs while you handle merging. When the base branch advances, it updates the PR
+branch and asks the coding agent to resolve text conflicts within the repair
+budget. It reruns local checks and independent review before pushing to the same
+PR, then checks CI for the new commit. This also works with automatic merging
+disabled and never uses a force push. Conflicts in protected files or files the
+agent cannot safely edit require human handling.
+
+To enable automatic squash merges, it also needs
 read access to branch protection and rulesets, strict up-to-date required checks,
 protection enforced for administrators, and no force pushes, deletions or bypass
 actors. Token scopes don't grant access the account itself lacks. If protection

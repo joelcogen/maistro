@@ -115,7 +115,11 @@ impl Guard {
                 for (k, v) in cells {
                     ensure!(
                         self.fields.get(k) == Some(v),
-                        "field/value outside committed projection"
+                        "field/value outside committed projection: field {k}, expected {}",
+                        self.fields
+                            .get(k)
+                            .map(Value::to_string)
+                            .unwrap_or_else(|| "no permitted value".into())
                     );
                 }
             }

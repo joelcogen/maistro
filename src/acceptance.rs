@@ -25,15 +25,25 @@ fn git(dir: &Path, args: &[&str]) -> String {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     String::from_utf8(o.stdout).unwrap().trim().into()
 }
+const SOURCE_FIXTURE: &str = r#"
+def emit_sources(scan):
+ def emit(tool,args,value):
+  print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','status':'completed','tool':tool,'arguments':args,'result':{'content':[{'type':'text','text':json.dumps(value)}]}}}))
+ for story in scan['stories']:
+  args={'workspace_id':scan['workspace_id'],'database_id':scan['board_id'],'with_doc':True}
+  emit('get_database_row_details',args,{'id':story['story_id'],'cells':{'Title':story['title'],'Acceptance criteria':'\n'.join(story['acceptance_criteria'])},'has_doc':True,'doc':story['description']})
+  emit('list_comments',{'workspace_id':scan['workspace_id'],'target_type':'row','target_id':story['story_id']},{'comments':[],'has_more':False})
+"#;
 fn fake_codex(path: &Path, scan: &crate::model::Scan, fail: &Path) {
     let script = format!(
         r#"#!/usr/bin/python3
 import json,sys,uuid,re,pathlib
+{source_fixture}
 args=sys.argv
 schema=json.loads(pathlib.Path(args[args.index('--output-schema')+1]).read_text())['properties']
 out=pathlib.Path(args[args.index('-o')+1]); prompt=sys.stdin.read(); evidence={{}}
 if 'stories' in schema:
- result=json.loads({scan:?}); evidence=result
+ result=json.loads({scan:?}); evidence=result; emit_sources(result)
 elif 'applied' in schema:
  if pathlib.Path({fail:?}).exists(): sys.exit(9)
  result={{'story_id':json.loads({scan:?})['stories'][0]['story_id'],'applied':True}}; evidence={{'updated':True}}
@@ -42,13 +52,19 @@ elif 'applied' in schema:
 elif 'approved' in schema:
  result={{'head_sha':re.search(r'exactly ([0-9a-f]+)',prompt).group(1),'approved':True,'blocking':[],'nonblocking':[]}}
 else:
- pathlib.Path('/work/feature.txt').write_text('implemented\n')
+ repair=prompt.split('REPAIR FEEDBACK=',1)[-1]
+ if 'Rust prepared a merge' in repair:
+  assert '<<<<<<<' in pathlib.Path('/work/feature.txt').read_text()
+  pathlib.Path('/work/feature.txt').write_text('implemented\nupstream\n')
+ else: pathlib.Path('/work/feature.txt').write_text('implemented\n')
+ if 'fixture compiler: missing generated file' in repair: pathlib.Path('/work/repaired.txt').write_text('fixed from actual stderr\n')
  result={{'summary':'Implemented assigned fixture','uncertainties':[]}}
 out.write_text(json.dumps(result))
 print(json.dumps({{'type':'thread.started','thread_id':str(uuid.uuid4())}}))
 if evidence: print(json.dumps({{'type':'item.completed','item':{{'type':'mcp_tool_call','status':'completed','result':evidence}}}}))
 print(json.dumps({{'type':'turn.completed'}}))
 "#,
+        source_fixture = SOURCE_FIXTURE,
         scan = serde_json::to_string(scan).unwrap(),
         fail = fail.to_str().unwrap()
     );
@@ -62,6 +78,7 @@ async fn green_merge_once_recovery_and_appflowy_outage_end_to_end() {
     let mut config = fixtures::config(t.path());
     config.projects.truncate(1);
     config.github.auto_merge = true;
+    config.projects[0].test_commands = vec![vec!["sh".into(), "-c".into(), "test -f repaired.txt || { printf 'fixture compiler: missing generated file\\n' >&2; exit 1; }".into()]];
     let p = config.projects[0].clone();
     git(&p.repo, &["init", "-b", "main"]);
     std::fs::write(p.repo.join("README.md"), "fixture\n").unwrap();
@@ -222,8 +239,8 @@ async fn green_merge_once_recovery_and_appflowy_outage_end_to_end() {
     assert_eq!(waiting.state, State::WaitingCi);
     assert_eq!(*mutations.lock().unwrap(), (1, 0));
     assert_eq!(
-        waiting.attempt, 2,
-        "CI failure must trigger a bounded repair"
+        waiting.attempt, 3,
+        "local stderr and CI failure must each trigger a successful bounded repair"
     );
     store.set_control("paused", "false").unwrap();
     let mut changed = scan.clone();
@@ -255,7 +272,7 @@ async fn green_merge_once_recovery_and_appflowy_outage_end_to_end() {
     engine.flush(&cancel).await.unwrap();
     assert!(store.pending().unwrap().is_empty());
     assert_eq!(store.runs().unwrap().len(), 1);
-    assert_eq!(store.get(&run.id).unwrap().agent_sessions.len(), 4);
+    assert_eq!(store.get(&run.id).unwrap().agent_sessions.len(), 5);
     assert_eq!(*mutations.lock().unwrap(), (1, 1));
     assert_eq!(
         std::fs::read_to_string(p.repo.join("README.md")).unwrap(),
@@ -309,12 +326,14 @@ async fn two_projects_validate_and_poll_independent_boards() {
     let script = format!(
         r#"#!/usr/bin/python3
 import json,sys,pathlib
+{source_fixture}
 args=sys.argv; prompt=sys.stdin.read();project=json.loads(prompt.split('PROJECT CONFIG (trusted routing only): ')[1])
-scans=json.loads({scans:?}); result=scans[project['id']]
+scans=json.loads({scans:?}); result=scans[project['id']]; emit_sources(result)
 pathlib.Path(args[args.index('-o')+1]).write_text(json.dumps(result))
 print(json.dumps({{'type':'item.completed','item':{{'type':'mcp_tool_call','status':'completed','result':result}}}}))
 print(json.dumps({{'type':'turn.completed'}}))
 "#,
+        source_fixture = SOURCE_FIXTURE,
         scans = serde_json::to_string(&scans).unwrap()
     );
     std::fs::write(&executable, script).unwrap();
@@ -336,7 +355,10 @@ print(json.dumps({{'type':'turn.completed'}}))
     });
     let github = Github::fixture(server.url.clone());
     for p in &config.projects {
-        github.validate(&p.github_repo).await.unwrap();
+        github
+            .validate(&p.github_repo, config.github.auto_merge)
+            .await
+            .unwrap();
     }
     let store = Store::open(&config.orchestrator.state_db).unwrap();
     store.sync_config(&config).unwrap();
@@ -442,4 +464,188 @@ async fn reviewer_rejection_exhausts_pipeline_budget() {
     assert_eq!(run.attempt, 3);
     assert_eq!(run.agent_sessions.len(), 6);
     assert!(run.pr.is_none());
+}
+
+#[tokio::test]
+#[ignore = "requires host namespaces; real conflicting Git branches, fixture model and GitHub"]
+async fn manual_merge_mode_repairs_conflicts_and_rechecks_the_same_pr() {
+    let t = tempfile::tempdir().unwrap();
+    let mut config = fixtures::config(t.path());
+    config.projects.truncate(1);
+    config.github.auto_merge = false;
+    config.projects[0].test_commands = vec![vec!["python3".into(), "-c".into(),
+        r#"from pathlib import Path; assert Path('feature.txt').read_text() == 'implemented\nupstream\n'"#.into()]];
+    let p = config.projects[0].clone();
+    let commit = |repo: &Path, message: &str| {
+        git(repo, &["add", "--all"]);
+        git(
+            repo,
+            &[
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-m",
+                message,
+            ],
+        );
+    };
+    git(&p.repo, &["init", "-b", "main"]);
+    std::fs::write(p.repo.join("feature.txt"), "original\n").unwrap();
+    commit(&p.repo, "base");
+    let remote = t.path().join("remote.git");
+    git(
+        t.path(),
+        &[
+            "clone",
+            "--bare",
+            p.repo.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+    git(
+        &p.repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let scan = fixtures::scan(&p, vec![fixtures::story(Status::Review)]);
+    config.agents.codex = t.path().join("fake-codex");
+    fake_codex(&config.agents.codex, &scan, &t.path().join("no-outage"));
+    config.agents.codex_home = t.path().join("codex-home");
+    std::fs::create_dir(&config.agents.codex_home).unwrap();
+    std::fs::write(config.agents.codex_home.join("auth.json"), "{}").unwrap();
+    std::fs::write(
+        config.agents.codex_home.join("config.toml"),
+        "[mcp_servers.appflowy]\ncommand='/bin/true'\n",
+    )
+    .unwrap();
+    let store = Store::open(&config.orchestrator.state_db).unwrap();
+    store.sync_config(&config).unwrap();
+    let mut ready = scan.clone();
+    ready.stories[0].status = Status::Ready;
+    store
+        .ingest(&p, &ready, &config.orchestrator.worktree_root)
+        .unwrap();
+    let mut run = store.runs().unwrap().remove(0);
+    store.claim(&mut run, &p, 1).unwrap();
+    crate::git::prepare(&p, &mut run, &config.orchestrator.worktree_root)
+        .await
+        .unwrap();
+    std::fs::write(run.worktree.join("feature.txt"), "implemented\n").unwrap();
+    crate::git::commit(&mut run).await.unwrap();
+    let old_head = run.head_sha.clone().unwrap();
+    git(&run.worktree, &["push", "origin", &run.branch]);
+    run.pr = Some(1);
+    run.pr_url = Some("https://github.com/owner/a/pull/1".into());
+    run.test_sha = Some(old_head.clone());
+    run.review = Some(crate::model::Review {
+        head_sha: old_head.clone(),
+        approved: true,
+        blocking: vec![],
+        nonblocking: vec![],
+    });
+    run.agent_sessions = vec!["previous-implementer".into(), "previous-reviewer".into()];
+    store
+        .transition(&mut run, State::Reviewing, "previous review")
+        .unwrap();
+    store
+        .transition(&mut run, State::WaitingCi, "existing PR")
+        .unwrap();
+    std::fs::write(p.repo.join("feature.txt"), "upstream\n").unwrap();
+    commit(&p.repo, "advance base with conflict");
+    git(&p.repo, &["push", "origin", "main"]);
+    let new_base = git(&p.repo, &["rev-parse", "HEAD"]);
+    let remote_api = remote.clone();
+    let branch = run.branch.clone();
+    let id = run.id.clone();
+    let old_api_head = old_head.clone();
+    let checked = Arc::new(Mutex::new(Vec::new()));
+    let checked_api = checked.clone();
+    let db = store.clone();
+    let server = Server::start(move |line, _| {
+        let head = git(&remote_api, &["rev-parse", &branch]);
+        let base = git(&remote_api, &["rev-parse", "main"]);
+        if line.starts_with("GET /repos/owner/a/pulls/1 ") {
+            return (
+                200,
+                json!({"number":1,"state":"open","merged":false,"draft":false,
+                "body":format!("Maistro run: {id}"),
+                "head":{"sha":head,"ref":branch,"repo":{"full_name":"owner/a"}},
+                "base":{"sha":base,"ref":"main","repo":{"full_name":"owner/a"}}}),
+            );
+        }
+        if line.starts_with("GET /repos/owner/a/pulls?") {
+            return (
+                200,
+                json!([{"number":1,"html_url":"https://github.com/owner/a/pull/1"}]),
+            );
+        }
+        if line.contains("/check-runs?") {
+            assert_ne!(
+                head, old_api_head,
+                "CI must be rechecked on the repaired head"
+            );
+            assert!(line.contains(&head));
+            let persisted = db.get(&id).unwrap();
+            assert_eq!(persisted.test_sha.as_ref(), Some(&head));
+            assert_eq!(persisted.review.as_ref().unwrap().head_sha, head);
+            assert_eq!(
+                persisted.agent_sessions.len(),
+                4,
+                "new worker and independent review required"
+            );
+            checked_api.lock().unwrap().push(head.clone());
+            return (
+                200,
+                json!({"check_runs":[{"id":1,"name":"test","head_sha":head,"status":"completed","conclusion":"success","app":{"id":1}}]}),
+            );
+        }
+        if line.contains("/statuses?") {
+            return (200, json!([]));
+        }
+        panic!("manual mode must not create a second PR, modify protections or merge: {line}");
+    });
+    let mut github = Github::fixture(server.url.clone());
+    github.push_remote = Some(remote.to_string_lossy().into());
+    let engine = Engine {
+        config: config.clone(),
+        codex: Codex::new(config),
+        store: store.clone(),
+        github,
+    };
+    engine
+        .execute(run.clone(), &tokio_util::sync::CancellationToken::new())
+        .await
+        .unwrap();
+    let repaired = store.get(&run.id).unwrap();
+    assert_eq!(
+        repaired.state,
+        State::WaitingCi,
+        "{:?}",
+        repaired.last_error
+    );
+    assert_eq!(repaired.attempt, 2);
+    assert_eq!(repaired.pr, Some(1));
+    assert_eq!(repaired.base_sha.as_ref(), Some(&new_base));
+    assert_ne!(repaired.head_sha.as_ref(), Some(&old_head));
+    assert_eq!(checked.lock().unwrap().len(), 1);
+    assert_eq!(
+        git(&remote, &["rev-parse", "main"]),
+        new_base,
+        "base branch must not be merged"
+    );
+    assert_eq!(
+        git(&remote, &["rev-parse", &run.branch]),
+        repaired.head_sha.clone().unwrap()
+    );
+    // Reconciliation is idempotent; no further repair or extra agent sessions.
+    engine
+        .execute(
+            repaired.clone(),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(store.get(&run.id).unwrap().attempt, 2);
+    assert_eq!(store.get(&run.id).unwrap().head_sha, repaired.head_sha);
 }

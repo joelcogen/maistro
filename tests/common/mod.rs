@@ -42,6 +42,7 @@ pub fn story(status: Status) -> Story {
         status,
         priority: 1,
         dependencies: vec![],
+        reference_pages: vec![],
         acceptance_criteria: vec!["It works".into()],
         decision: Decision::Implement,
         reason: "Scoped".into(),

@@ -116,6 +116,9 @@ impl Engine {
                 }
             }
             while let Some(result) = polls.try_join_next() {
+                if stopping && result.as_ref().is_err_and(|e| e.is_cancelled()) {
+                    continue;
+                }
                 let (id, result) = result.context("poll task panicked")?;
                 polling.remove(&id);
                 scanned.insert(id.clone());
@@ -146,6 +149,9 @@ impl Engine {
                 }
             }
             while let Some(result) = projections.try_join_next() {
+                if stopping && result.as_ref().is_err_and(|e| e.is_cancelled()) {
+                    continue;
+                }
                 if let Err(e) = result.context("projection task panicked")? {
                     tracing::warn!(error=%e,"projection reconciliation failed");
                 }
@@ -396,7 +402,9 @@ impl Engine {
                 "{}: deterministic test_commands required",
                 p.id
             );
-            self.github.validate(&p.github_repo).await?;
+            self.github
+                .validate(&p.github_repo, self.config.github.auto_merge)
+                .await?;
             if self.config.github.auto_merge {
                 self.github.protections(p).await?;
             }
@@ -405,6 +413,31 @@ impl Engine {
             crate::process::checked(probe, Duration::from_secs(10))
                 .await
                 .context("worker isolation unavailable")?;
+            if p.test_commands.iter().any(|args| {
+                args.first().is_some_and(|s| {
+                    Path::new(s)
+                        .file_name()
+                        .is_some_and(|name| name == "cargo" || name == "rustc")
+                })
+            }) {
+                let mut compiler = crate::sandbox::command(p, &p.repo, false, false)?;
+                compiler.args(["--", "rustc", "-", "-o", "/tmp/maistro-toolchain-probe"]);
+                let output = crate::process::run(
+                    compiler,
+                    "fn main() {}",
+                    Duration::from_secs(30),
+                    &CancellationToken::new(),
+                    None,
+                )
+                .await
+                .context("Rust compiler preflight failed")?;
+                ensure!(
+                    output.code == 0,
+                    "{}: Rust/linker unavailable in test sandbox: {}",
+                    p.id,
+                    output.stderr
+                );
+            }
         }
         ensure!(
             self.config.agents.codex_home.join("auth.json").is_file(),

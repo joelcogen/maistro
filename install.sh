@@ -27,8 +27,10 @@ chmod 600 -- "$config_file"
 cat <<'INSTRUCTIONS'
 Create a GitHub personal access token (classic):
   https://github.com/settings/tokens/new
-1. Sign in with a dedicated account that has Write access to your repositories,
-   but no Admin access or protection-bypass role. Repository owners are rejected.
+1. Sign in with an account that has Write access to your repositories.
+   Repository owners can use github.auto_merge = false (the default).
+   Automatic merging requires a non-administrator account with no
+   protection-bypass role.
 2. Set Note to Maistro and choose an expiration (for example, 30 days).
 3. Select only the top-level repo scope, leaving its child scopes selected.
    Leave workflow, admin:org, delete_repo and all other top-level scopes unchecked.

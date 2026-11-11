@@ -141,3 +141,172 @@ example and AppFlowy setup text. The example omits path keys to use the defaults
 Formatting, strict Clippy, debug/release compilation and all 38 host tests passed,
 including default-path loading, interactive setup path resolution, override
 preservation and invalid HOME handling. The service remains stopped.
+
+## Installed pilot startup fixes — 2026-11-11
+
+Repository access validation now permits an owner account when automatic merging
+is disabled. Automatic merge protection checks still reject administrator
+accounts; push access and squash support remain required. The `admin` repository
+role reported by GitHub is independent of the classic token's `admin:*` scopes.
+
+Sandbox preflight now hides a main checkout's `.git` directory using a read-only
+empty mount, while retaining the file mount for linked worktrees. A host test
+verifies both read-only and writable sandbox modes without changing host metadata.
+
+The first live Luna scan read all three Ready stories but returned the story count
+as the board match count and confused the board view with its database. Clarified
+both fields in the prompt and JSON schema; validation also rejects identical
+database and view IDs. Ambiguous scans continue to fail closed.
+
+Formatting, strict Clippy, debug/release builds and all 42 tests passed, including
+host isolation, owner-account validation, identifier validation and merge gates.
+The installed pilot retains `auto_merge = false`. Live scan and status projection
+verification follows installation of this build; the earlier rejected scan did
+not create execution runs.
+
+The next live scan successfully persisted all three stories and dispatched one
+run, but two further integration issues appeared. Codex requested interactive
+approval for MCP writes despite the daemon's noninteractive policy. Only the two
+tools behind Rust's committed-projection guard now receive explicit per-tool
+approval; a process fixture verifies that ordinary scans remain read-only and
+that writes use the guard and scope. Luna also partitioned the same source text
+differently between scans, causing safe cancellation before any PR. The scan
+contract now preserves the complete body and uses it verbatim as the criteria
+when no separate criteria section exists. This needs repeat live-scan verification;
+it is a model extraction contract, not a claim of deterministic source parsing.
+
+All 43 tests passed after these changes, with formatting, strict Clippy and debug
+build checks. Backed up the stopped pilot database and removed exactly two pending
+erroneous cancellation projections, preserving the cancelled run history and
+recording recovery events. Automatic merge remains disabled.
+
+Live verification subsequently confirmed matching body/criteria text across
+consecutive scans, durable pickup of the Ready stories, and successful guarded
+AppFlowy status/comment writes. Projection instructions now specify exact metadata
+values (including the full progress message and string retry count); guard errors
+identify the expected committed value without relaxing validation. All 43 tests,
+formatting, strict Clippy and debug/release builds passed again.
+
+The Install script run reached Git preparation but SSH authentication failed.
+Diagnosis found that the user service manager's SSH agent had no usable identities,
+while the current session uses a different, reachable agent with identities.
+Nicer CLI was blocked requesting an output example; Cleanup doc was blocked on
+the unavailable writing guide and unclear completion criteria. These are live
+results, not fixture assumptions. No PR or merge occurred during these checks.
+
+The SSH read succeeded with the current session agent; refreshed systemd's stale
+`SSH_AUTH_SOCK`. All AppFlowy status projections then drained successfully. A later
+scan nevertheless reproduced a false revision change: Luna used the Markdown
+renderer, whose paragraph whitespace differs from row/detail's plain text. The
+prompt-only extraction fix was insufficient and is superseded by Rust source
+canonicalization. Rust now requires authoritative row/body and complete comment
+reads, reconstructs title/body/criteria/comments from their MCP results, and
+rejects missing or inconsistent source reads. Model transcription no longer
+determines revision-bearing text. Existing content hashing still detects actual
+body, criteria and human-comment edits; progress metadata remains excluded.
+
+All 45 tests passed, including new canonicalization regressions and updated
+end-to-end MCP fixtures. Formatting, strict Clippy and debug compilation passed.
+The installer run hit its retry limit during diagnosis and will be retried after
+restoring its original Ready authorization. Its history is preserved. The SSH
+agent refresh is session-dependent; unattended operation needs a durable agent
+or another configured Git credential mechanism.
+
+Final live verification: release compilation passed and the installed binary was
+checksum-verified. The fresh canonical scan matched the installer's original
+requirements exactly, so the existing blocked run was retried through the CLI.
+Git fetched successfully, the isolated worktree was prepared at base
+`00e74f0540a6b533ac151091c00456dbb33ef2cc`, and the worker emitted completed command
+events. The service is active with zero restarts and the projection outbox is
+empty. AppFlowy shows Install script In Progress, with Nicer CLI and Cleanup doc
+Blocked for their recorded clarification requests. `auto_merge = false` was
+rechecked. Story completion, real PR CI and merging are not claimed by this check.
+
+## Delegated implementation choices — 2026-11-11
+
+Changed Luna's readiness policy to respect the user's delegation of ordinary
+engineering and design choices. Understandable outcomes default to implementation;
+missing examples, exact CLI formatting or an explicit criteria checklist do not
+require clarification. Genuine blockers must explain why repository inspection
+or a reasonable default cannot resolve them. Source requirements remain verbatim,
+and Rust's authorization, verification and merge gates are unchanged.
+
+Updated the README to describe this policy. Formatting, strict Clippy, debug and
+release builds and all 45 existing tests passed. Live reclassification of Nicer
+CLI will be checked after installing the build; automatic merging remains off.
+
+Installed the checksum-verified release and restarted the daemon between coding
+worker invocations. A fresh live Luna scan returned `decision=implement` for the
+unchanged Nicer CLI story: its intended behavior is understandable and ordinary
+design choices are delegated. Restored Ready and used the CLI to retry the
+existing blocked run after verifying identical requirements. SQLite confirms it
+is queued. The service is active with zero restarts and `auto_merge = false`.
+During shutdown, an aborted poll was logged as a task panic; the service restarted
+successfully, but graceful-shutdown reporting needs a separate correction.
+
+## Referenced context and actionable repair feedback — 2026-11-11
+
+Diagnosed all live blocked stories. Cleanup doc was rejected by an unintended
+board-only read instruction, despite its human comment linking an accessible
+AppFlowy writing guide. Both implementation stories exhausted three repair
+attempts on the same missing `cc` linker: `/usr/bin/cc` points through
+`/etc/alternatives`, which the test sandbox did not expose. The repair prompt
+contained only a host log path that the worker could not read.
+
+Luna now reads referenced AppFlowy documents, including named guides resolved
+through the folder. Rust attaches exact fetched contents to the story context
+and hashes them with the requirements. Missing reads block the affected story;
+reference documents cannot authorize extra tasks. The sandbox exposes the
+read-only alternatives directory, and Rust-project preflight compiles a minimal
+program inside the sandbox before dispatch. Failed tests now supply the command
+and bounded stdout/stderr directly to the repair agent, including partial output
+on execution failure. The worker is instructed to diagnose, repair and rerun
+those checks. The repair budget and deterministic merge gates remain intact.
+Expected aborted polling/projection tasks no longer produce shutdown panics.
+
+Formatting, strict Clippy, debug/release compilation and all 47 tests passed.
+Regressions cover referenced-page content and revision changes, C/Rust linking
+inside the sandbox, and an end-to-end failed build repaired using actual stderr
+before independent review and CI verification. The two existing implementation
+worktrees also passed their configured `cargo test --locked --offline` and
+strict Clippy commands in the repaired sandbox, without manual source changes.
+Evidence is retained under `/tmp/maistro-verify-6_9e60jb/logs/`. All three stories
+were restored to Ready for recovery. Automatic merging remains disabled.
+
+Live recovery verification: Luna accepted all three Ready stories and read the
+linked writing guide. Cleanup doc's persisted task context contains its full
+contents and one grounded page reference. The installed release passed compiler
+preflight and the daemon is active with zero restarts. Cleanup doc was dispatched;
+the existing installer and CLI runs were explicitly retried after confirming
+unchanged requirements and are queued behind it. Their worktrees and histories
+were retained. Actual story review/CI completion has not been claimed.
+
+## Merge conflict recovery in manual mode — 2026-11-11
+
+PR maintenance previously ran only after the automatic-merge gate and green CI.
+With automatic merging disabled, an outdated conflicting PR could wait forever;
+an actual Git merge conflict also escaped the repair loop as an error.
+
+Maistro now integrates an advanced base before waiting for CI, in both manual
+and automatic merge modes. Rust preserves the pending merge and gives the coding
+agent the conflicted paths and repair instructions. Rust completes the merge,
+reruns deterministic checks and independent review, and pushes to the existing
+PR without force. Pending merges recover after interruption. Conflict markers
+prevent a commit and feed the bounded repair loop. Protected, binary and unsafe
+conflicts fail closed. Upstream changes to protected files are distinguished from
+worker edits. Uncertain remote merge attempts are not modified. Story comments
+and moving a story back to Ready retain their existing behavior.
+
+Formatting, strict Clippy, debug/release builds and all 49 automated tests passed,
+including the host namespace tests. New regressions use disposable repositories
+to exercise text and modify/delete conflicts, crash recovery, marker rejection,
+protected upstream changes, clean merges and ordinary non-force pushes. A full
+pipeline test proves repair with automatic merging disabled, fresh tests and
+review, CI tied to the new head, reuse of the same PR and repeat reconciliation
+without another attempt. Production automatic merging remains disabled.
+
+Installed the checksum-verified release and restarted the service; it is active
+with zero restarts and automatic merging disabled. The previous Cleanup doc run
+had already been cancelled by a board scan at 12:56 UTC, before this restart,
+so it was not revived. Live GitHub conflict repair is not claimed; its complete
+flow was verified with real disposable Git repositories and fixture agents/API.

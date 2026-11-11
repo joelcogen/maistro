@@ -7,6 +7,7 @@ pub mod model;
 pub mod policy;
 pub mod process;
 pub mod sandbox;
+mod source;
 pub mod store;
 pub mod verification;
 
