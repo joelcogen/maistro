@@ -163,3 +163,19 @@ host isolation, owner-account validation, identifier validation and merge gates.
 The installed pilot retains `auto_merge = false`. Live scan and status projection
 verification follows installation of this build; the earlier rejected scan did
 not create execution runs.
+
+The next live scan successfully persisted all three stories and dispatched one
+run, but two further integration issues appeared. Codex requested interactive
+approval for MCP writes despite the daemon's noninteractive policy. Only the two
+tools behind Rust's committed-projection guard now receive explicit per-tool
+approval; a process fixture verifies that ordinary scans remain read-only and
+that writes use the guard and scope. Luna also partitioned the same source text
+differently between scans, causing safe cancellation before any PR. The scan
+contract now preserves the complete body and uses it verbatim as the criteria
+when no separate criteria section exists. This needs repeat live-scan verification;
+it is a model extraction contract, not a claim of deterministic source parsing.
+
+All 43 tests passed after these changes, with formatting, strict Clippy and debug
+build checks. Backed up the stopped pilot database and removed exactly two pending
+erroneous cancellation projections, preserving the cancelled run history and
+recording recovery events. Automatic merge remains disabled.

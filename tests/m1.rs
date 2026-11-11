@@ -180,3 +180,81 @@ async fn untrusted_text_is_passed_as_an_argument() {
         "$(touch /tmp/maistro-injection-must-not-exist); literal"
     );
 }
+
+#[tokio::test]
+async fn only_guarded_projection_tools_are_preapproved() {
+    use maistro::codex::{Codex, Invocation};
+    use std::os::unix::fs::PermissionsExt;
+    let t = tempfile::tempdir().unwrap();
+    let mut c = config(t.path());
+    c.agents.codex_home = t.path().join("codex-home");
+    std::fs::create_dir(&c.agents.codex_home).unwrap();
+    std::fs::write(
+        c.agents.codex_home.join("config.toml"),
+        "[mcp_servers.appflowy]\ncommand='original-server'\n",
+    )
+    .unwrap();
+    c.agents.codex = t.path().join("fake-codex");
+    std::fs::write(
+        &c.agents.codex,
+        r#"#!/usr/bin/env python3
+import sys,json,pathlib
+a=sys.argv[1:]
+sys.stdin.read()
+pathlib.Path(a[a.index('-o')+1]).write_text('{}')
+(pathlib.Path(a[a.index('-C')+1])/'captured-args.json').write_text(json.dumps(a))
+print('{"type":"turn.completed"}')
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&c.agents.codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let codex = Codex::new(c);
+    let scope = t.path().join("committed-scope.json");
+    for write in [false, true] {
+        codex
+            .invoke(
+                Invocation {
+                    model: "fixture",
+                    cwd: t.path(),
+                    prompt: "fixture",
+                    kind: "projection",
+                    mcp: Some(write),
+                    scope: write.then_some(scope.as_path()),
+                    log_dir: t.path(),
+                },
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        let args: Vec<String> =
+            serde_json::from_slice(&std::fs::read(t.path().join("captured-args.json")).unwrap())
+                .unwrap();
+        std::fs::remove_file(t.path().join("captured-args.json")).unwrap();
+        let setting = args
+            .iter()
+            .find(|a| a.starts_with("mcp_servers.appflowy="))
+            .unwrap();
+        let parsed: toml::Value = toml::from_str(setting).unwrap();
+        let server = &parsed["mcp_servers"]["appflowy"];
+        let allowed = server["enabled_tools"].as_array().unwrap();
+        assert!(!allowed.iter().any(|v| v.as_str() == Some("delete_row")));
+        if write {
+            assert_eq!(server["args"][0].as_str(), Some("internal-mcp"));
+            assert_eq!(server["args"][2].as_str(), scope.to_str());
+            for tool in ["update_row_cells", "append_comment"] {
+                assert_eq!(
+                    server["tools"][tool]["approval_mode"].as_str(),
+                    Some("approve")
+                );
+            }
+        } else {
+            assert_eq!(server["command"].as_str(), Some("original-server"));
+            assert!(server.get("tools").is_none());
+            assert!(
+                !allowed
+                    .iter()
+                    .any(|v| v.as_str() == Some("update_row_cells"))
+            );
+        }
+    }
+}
