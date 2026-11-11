@@ -217,8 +217,8 @@ fn create_board_uses_setup_without_a_project_and_checks_mcp_evidence() {
     use std::os::unix::fs::PermissionsExt;
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();
-    let workspace = uuid::Uuid::new_v4().to_string();
-    let parent = uuid::Uuid::new_v4().to_string();
+    let workspace = "f757bab8-f38b-49a2-9338-6a524d0646e2";
+    let parent = "c80255e3-0f92-4e64-a938-6762304941a37";
     let database = uuid::Uuid::new_v4().to_string();
     let view = uuid::Uuid::new_v4().to_string();
     let board = json!({"workspace_id":workspace,"database_id":database,"view_id":view});
@@ -244,7 +244,11 @@ import json, pathlib, sys
 root = pathlib.Path(__file__).parent
 fixture = json.loads((root / 'fixture.json').read_text())
 prompt = sys.stdin.read()
-assert 'parent_view_id' in prompt and 'camelia' in prompt
+assert 'parent_view_id c80255e3-0f92-4e64-a938-6762304941a37' in prompt
+assert 'camelia' in prompt
+cwd = pathlib.Path(sys.argv[sys.argv.index('-C') + 1])
+scope = json.loads((cwd / 'scope.json').read_text())
+assert scope['parent_view_id'] == 'c80255e3-0f92-4e64-a938-6762304941a37'
 assert '--sandbox' in sys.argv and 'read-only' in sys.argv
 settings = '\n'.join(sys.argv)
 assert 'create_database' in settings and 'delete_database' not in settings

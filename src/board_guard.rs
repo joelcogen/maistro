@@ -182,7 +182,7 @@ mod tests {
         let scope = Scope {
             agents: Agents::default(),
             workspace_id: uuid::Uuid::new_v4().to_string(),
-            parent_view_id: uuid::Uuid::new_v4().to_string(),
+            parent_view_id: "c80255e3-0f92-4e64-a938-6762304941a37".into(),
         };
         let mut guard = Guard::default();
         let database = uuid::Uuid::new_v4().to_string();
@@ -194,6 +194,11 @@ mod tests {
                 .is_err()
         );
         let create = json!({"workspace_id":scope.workspace_id,"parent_view_id":scope.parent_view_id,"name":"Board","layout":"Board"});
+        // Browser page IDs are opaque even when they resemble malformed UUIDs.
+        // Reject a truncated target without consuming the one creation attempt.
+        let mut truncated = create.clone();
+        truncated["parent_view_id"] = json!("c80255e3-0f92-4e64-a938-6762304941a3");
+        assert!(guard.allow("create_database", &truncated, &scope).is_err());
         guard.allow("create_database", &create, &scope).unwrap();
         assert!(guard.allow("create_database", &create, &scope).is_err());
         guard.observe(&json!({"content":[{"text":json!({"database_id":database,"view_id":view}).to_string()}]}), &scope);
