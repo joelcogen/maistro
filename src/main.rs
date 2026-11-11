@@ -62,6 +62,8 @@ enum Action {
     Projects,
     /// Print durable execution state, diagnostics, and systemd service status.
     Status,
+    /// Print detailed project, run, and event diagnostics.
+    Diagnostics,
     /// Start the systemd user service.
     Start,
     /// Stop the systemd user service.
@@ -170,7 +172,7 @@ async fn main() -> Result<()> {
         Action::Validate => validate(c, cli.json).await?,
         other => {
             let store = Store::open(&c.orchestrator.state_db)?;
-            if !matches!(&other, Action::Status) {
+            if !matches!(&other, Action::Status | Action::Diagnostics) {
                 store.sync_config(&c)?;
             }
             let is_retry = matches!(&other, Action::Retry { .. });
@@ -192,13 +194,20 @@ async fn main() -> Result<()> {
                 Action::Status => {
                     let diagnostics = store.diagnostics()?;
                     let service = service_status();
+                    let status = live_status(&diagnostics, service);
                     if cli.json {
-                        let mut status = diagnostics;
-                        status["systemd_service"] = service;
                         println!("{}", serde_json::to_string_pretty(&status)?);
                     } else {
-                        print_status(&diagnostics);
-                        print_service_status(&service);
+                        print_live_status(&status);
+                    }
+                }
+                Action::Diagnostics => {
+                    let diagnostics = store.diagnostics()?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&diagnostics)?);
+                    } else {
+                        print_diagnostics(&diagnostics);
+                        print_service_status(&service_status());
                     }
                 }
                 Action::Pause => store.set_control("paused", "true")?,
@@ -283,10 +292,11 @@ fn print_service_status(service: &serde_json::Value) {
     } else {
         println!("Systemd service: {state} ({sub_state})");
     }
-    if let Some(detail) = service["detail"].as_str() {
-        if !detail.is_empty() {
-            println!("  {detail}");
-        }
+    if let Some(detail) = service["detail"]
+        .as_str()
+        .filter(|detail| !detail.is_empty())
+    {
+        println!("  {detail}");
     }
 }
 
@@ -469,7 +479,95 @@ fn print_projects(projects: &[Project]) {
     }
 }
 
-fn print_status(d: &serde_json::Value) {
+fn live_status(d: &serde_json::Value, service: serde_json::Value) -> serde_json::Value {
+    let runs = d["runs"].as_array().cloned().unwrap_or_default();
+    let agents: Vec<_> = runs
+        .iter()
+        .filter_map(|run| {
+            Some(serde_json::json!({
+                "agent": run["agent_activity"].as_str()?,
+                "story": run["story"]["title"],
+                "project": run["project_id"],
+            }))
+        })
+        .collect();
+    let work: Vec<_> = runs
+        .iter()
+        .filter(|run| {
+            matches!(
+                run["state"].as_str(),
+                Some("running" | "reviewing" | "waiting_ci" | "merging")
+            )
+        })
+        .map(|run| {
+            serde_json::json!({
+                "state": run["state"],
+                "story": run["story"]["title"],
+                "project": run["project_id"],
+                "agent": run["agent_activity"],
+            })
+        })
+        .collect();
+    let queued = runs.iter().filter(|run| run["state"] == "queued").count();
+    serde_json::json!({
+        "systemd_service": service,
+        "dispatch": if d["paused"] == true { "paused" } else { "enabled" },
+        "agents": agents,
+        "work": work,
+        "queued_runs": queued,
+    })
+}
+
+fn print_live_status(status: &serde_json::Value) {
+    print_service_status(&status["systemd_service"]);
+    println!(
+        "Dispatch: {}",
+        status["dispatch"].as_str().unwrap_or("unknown")
+    );
+    if let Some(agents) = status["agents"]
+        .as_array()
+        .filter(|agents| !agents.is_empty())
+    {
+        for agent in agents {
+            println!(
+                "Agent running: {} — {} ({})",
+                agent["agent"].as_str().unwrap_or("unknown agent"),
+                agent["story"].as_str().unwrap_or("untitled"),
+                agent["project"].as_str().unwrap_or("unknown project")
+            );
+        }
+    } else {
+        println!("Agents: none currently running");
+    }
+    if let Some(work) = status["work"].as_array().filter(|work| !work.is_empty()) {
+        println!("Work:");
+        for item in work {
+            let state = item["state"]
+                .as_str()
+                .unwrap_or("unknown")
+                .replace('_', " ");
+            let activity = item["agent"]
+                .as_str()
+                .map(|agent| format!("; {agent} working"))
+                .unwrap_or_default();
+            println!(
+                "  {} — {} ({}){}",
+                item["story"].as_str().unwrap_or("untitled"),
+                state,
+                item["project"].as_str().unwrap_or("unknown project"),
+                activity
+            );
+        }
+    } else {
+        println!("Work: none in progress");
+    }
+    let queued = status["queued_runs"].as_u64().unwrap_or(0);
+    if queued > 0 {
+        println!("Queued: {queued}");
+    }
+}
+
+fn print_diagnostics(d: &serde_json::Value) {
     println!(
         "Dispatch: {}",
         if d["paused"] == true {

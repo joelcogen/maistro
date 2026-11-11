@@ -111,6 +111,7 @@ impl Engine {
         r.review = None;
         r.test_sha = None;
         r.worker_inflight = false;
+        r.agent_activity = None;
         if r.attempt >= self.config.orchestrator.max_attempts {
             self.store.transition(
                 r,
@@ -131,10 +132,9 @@ impl Engine {
             .find(|p| p.id == r.project_id)
             .context("project removed")?;
         crate::process::reconcile_groups(&self.config.orchestrator.log_root.join(&r.id))?;
-        if r.stranded_pid.take().is_some() {
+        if r.stranded_pid.take().is_some() || r.agent_activity.is_some() {
             let state = r.state;
-            self.store
-                .save(&mut r, state, "stranded process group confirmed gone")?;
+            self.store.save(&mut r, state, "recovered run state")?;
         }
         loop {
             if cancel.is_cancelled() {
@@ -193,8 +193,13 @@ impl Engine {
                     crate::policy::pr_identity(p, &r, &pr)?;
                 } else {
                     r.worker_inflight = true;
+                    r.agent_activity = Some(if r.attempt > 1 {
+                        "repair agent".into()
+                    } else {
+                        "implementation agent".into()
+                    });
                     self.store
-                        .save(&mut r, State::Running, "implementation process starting")?;
+                        .save(&mut r, State::Running, "implementation agent starting")?;
                     match self
                         .codex
                         .worker(p, &r, false, r.last_error.as_deref().unwrap_or(""), cancel)
@@ -204,6 +209,7 @@ impl Engine {
                             let report: crate::model::AgentReport = serde_json::from_value(v)?;
                             r.agent_sessions.push(session);
                             r.worker_inflight = false;
+                            r.agent_activity = None;
                             if !report.uncertainties.is_empty() {
                                 r.last_error = Some(format!(
                                     "Implementation uncertainties: {:?}",
@@ -218,6 +224,9 @@ impl Engine {
                                 return Err(e);
                             }
                             if cancel.is_cancelled() {
+                                r.worker_inflight = false;
+                                r.agent_activity = None;
+                                self.store.save(&mut r, State::Running, "agent cancelled")?;
                                 return Ok(());
                             }
                             if self.repair(&mut r, &e.to_string())? {
@@ -270,7 +279,25 @@ impl Engine {
                             return Ok(());
                         }
                     };
-                let (v, session) = self.codex.worker(p, &r, true, &results, cancel).await?;
+                r.agent_activity = Some("review agent".into());
+                self.store
+                    .save(&mut r, State::Reviewing, "review agent starting")?;
+                let (v, session) = match self.codex.worker(p, &r, true, &results, cancel).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        if error
+                            .downcast_ref::<crate::process::UnconfirmedTermination>()
+                            .is_some()
+                        {
+                            return Err(error);
+                        }
+                        r.agent_activity = None;
+                        self.store
+                            .save(&mut r, State::Reviewing, "review agent finished")?;
+                        return Err(error);
+                    }
+                };
+                r.agent_activity = None;
                 ensure!(
                     !r.agent_sessions.contains(&session),
                     "reviewer reused an implementation session"

@@ -97,6 +97,8 @@ pub struct Run {
     #[serde(default)]
     pub worker_inflight: bool,
     #[serde(default)]
+    pub agent_activity: Option<String>,
+    #[serde(default)]
     pub stranded_pid: Option<u32>,
 }
 #[derive(Clone)]
@@ -335,6 +337,7 @@ PRAGMA user_version=1;")?;
                 retry_after: 0,
                 failures: 0,
                 worker_inflight: false,
+                agent_activity: None,
                 stranded_pid: None,
             };
             tx.execute(

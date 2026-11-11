@@ -71,10 +71,19 @@ fn status_reads_saved_state_without_applying_changed_configuration() {
     let before = store.diagnostics().unwrap();
     config.projects[0].base_branch = "different-branch".into();
     std::fs::write(root.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
-    assert!(output(root, &["status"]).contains("Projects (2)"));
+    let human = output(root, &["status"]);
+    assert!(human.contains("Agents: none currently running"));
+    assert!(human.contains("Work: none in progress"));
     let json: serde_json::Value =
         serde_json::from_str(&output(root, &["status", "--json"])).unwrap();
-    assert_eq!(json, before);
+    assert_eq!(json["agents"], serde_json::json!([]));
+    assert_eq!(json["work"], serde_json::json!([]));
+    assert_eq!(json["dispatch"], "enabled");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&output(root, &["diagnostics", "--json"]))
+            .unwrap(),
+        before
+    );
     assert!(store.scan(&config.projects[0].id).unwrap().is_some());
     // The identity protection must still apply to configuration updates.
     assert!(store.sync_config(&config).is_err());
@@ -93,7 +102,7 @@ fn human_output_and_compatible_json_cover_projects_runs_and_controls() {
     let projects: serde_json::Value =
         serde_json::from_str(&output(root, &["projects", "--json"])).unwrap();
     assert_eq!(projects, serde_json::to_value(&config.projects).unwrap());
-    assert!(output(root, &["status"]).contains("No runs recorded."));
+    assert!(output(root, &["status"]).contains("Work: none in progress"));
     assert!(output(root, &["pause"]).contains("Pause requested"));
     assert!(output(root, &["status"]).contains("Dispatch: paused"));
     assert!(output(root, &["--json", "resume"]).is_empty());
@@ -113,7 +122,7 @@ fn human_output_and_compatible_json_cover_projects_runs_and_controls() {
     run.pr_url = Some("https://github.com/owner/a/pull/1".into());
     let state = run.state;
     store.save(&mut run, state, "CLI fixture").unwrap();
-    let human = output(root, &["status"]);
+    let human = output(root, &["diagnostics"]);
     for expected in [
         &run.id,
         &run.story.story_id,
@@ -125,7 +134,7 @@ fn human_output_and_compatible_json_cover_projects_runs_and_controls() {
         assert!(human.contains(expected), "missing {expected}: {human}");
     }
     let json: serde_json::Value =
-        serde_json::from_str(&output(root, &["--json", "status"])).unwrap();
+        serde_json::from_str(&output(root, &["--json", "diagnostics"])).unwrap();
     assert_eq!(json, store.diagnostics().unwrap());
     assert!(output(root, &["cancel", &run.id]).contains("Cancellation requested"));
     assert_eq!(
