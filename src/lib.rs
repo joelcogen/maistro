@@ -1,3 +1,5 @@
+pub mod board;
+pub mod board_guard;
 pub mod codex;
 pub mod config;
 pub mod engine;

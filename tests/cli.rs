@@ -140,3 +140,103 @@ fn config_reports_missing_empty_and_failing_editors() {
         assert!(String::from_utf8_lossy(&result.stderr).contains("$EDITOR"));
     }
 }
+
+#[test]
+fn create_board_uses_setup_without_a_project_and_checks_mcp_evidence() {
+    use serde_json::json;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let workspace = uuid::Uuid::new_v4().to_string();
+    let parent = uuid::Uuid::new_v4().to_string();
+    let database = uuid::Uuid::new_v4().to_string();
+    let view = uuid::Uuid::new_v4().to_string();
+    let board = json!({"workspace_id":workspace,"database_id":database,"view_id":view});
+    let fields = json!([{"id":"status","name":"Status","field_type":3,"type_option":{"options":[
+        {"name":"Backlog","color":"iron"}, {"name":"Ready","color":"azure"},
+        {"name":"In progress","color":"Mango"}, {"name":"Review","color":"mauve"},
+        {"name":"Done","color":"jade"}, {"name":"Blocked","color":"camelia"},
+        {"name":"Cancelled","color":"iron"}
+    ]}}]);
+    let calls = json!([
+        {"tool":"create_database","arguments":{"workspace_id":workspace,"parent_view_id":parent,"name":"Board","layout":"Board"},"result":{"content":[{"text":board.to_string()}]}},
+        {"tool":"get_database_fields","arguments":{"workspace_id":workspace,"database_id":database},"result":{"content":[{"text":fields.to_string()}]}},
+        {"tool":"get_database_view_settings","arguments":{"workspace_id":workspace,"view_id":view},"result":{"structuredContent":{"group_settings":[{"field_id":"status"}]}}}
+    ]);
+    std::fs::write(
+        root.join("fixture.json"),
+        json!({"board":board,"calls":calls}).to_string(),
+    )
+    .unwrap();
+    let fake = root.join("fake-codex");
+    std::fs::write(&fake, r##"#!/usr/bin/env python3
+import json, pathlib, sys
+root = pathlib.Path(__file__).parent
+fixture = json.loads((root / 'fixture.json').read_text())
+prompt = sys.stdin.read()
+assert 'parent_view_id' in prompt and 'camelia' in prompt
+assert '--sandbox' in sys.argv and 'read-only' in sys.argv
+settings = '\n'.join(sys.argv)
+assert 'create_database' in settings and 'delete_database' not in settings
+assert 'internal-board-mcp' in settings and 'scope.json' in settings
+pathlib.Path(sys.argv[sys.argv.index('-o') + 1]).write_text(json.dumps(fixture['board']))
+for call in fixture['calls']:
+    print(json.dumps({'type':'item.completed', 'item':dict(call, type='mcp_tool_call', status='completed')}))
+print(json.dumps({'type':'turn.completed'}))
+"##).unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let home = root.join("codex-home");
+    std::fs::create_dir(&home).unwrap();
+    // This command must never be started by the fixture.
+    std::fs::write(
+        home.join("config.toml"),
+        "[mcp_servers.appflowy]\ncommand = 'must-not-be-executed'\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("config.toml"),
+        format!("[agents]\ncodex = {:?}\ncodex_home = {:?}\n", fake, home),
+    )
+    .unwrap();
+    let url = format!("https://appflowy.com/app/{workspace}/{parent}");
+    let result: serde_json::Value =
+        serde_json::from_str(&output(root, &["--json", "create-board", &url])).unwrap();
+    assert_eq!(result, board);
+    assert!(output(root, &["create-board", &url]).contains(&format!(
+        "Created Board: https://appflowy.com/app/{workspace}/{view}"
+    )));
+    assert!(!root.join("state.db").exists());
+    let invalid = cli(root)
+        .args(["create-board", "not-a-page-url"])
+        .output()
+        .unwrap();
+    assert!(!invalid.status.success());
+    assert!(invalid.stdout.is_empty());
+    assert!(output(root, &["create-board", "--help"]).contains("<PAGE_URL>"));
+    let missing = cli(root).arg("create-board").output().unwrap();
+    assert!(!missing.status.success());
+    // A model's success report alone must never acknowledge board setup.
+    std::fs::write(
+        root.join("fixture.json"),
+        json!({"board":board,"calls":[]}).to_string(),
+    )
+    .unwrap();
+    let failed = cli(root)
+        .args(["--json", "create-board", &url])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(failed.stdout.is_empty());
+    let error = String::from_utf8(failed.stderr).unwrap();
+    assert!(error.contains("missing successful board creation receipt"));
+    assert!(error.contains("a partial board may exist"));
+    // The retained logs are fixtures, not user diagnostics.
+    let log_dir = error
+        .split("private logs at ")
+        .nth(1)
+        .unwrap()
+        .split(" and the parent page")
+        .next()
+        .unwrap();
+    std::fs::remove_dir_all(log_dir).unwrap();
+}

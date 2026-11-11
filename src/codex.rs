@@ -139,6 +139,47 @@ impl Codex {
         }
         if let Some(write) = mcp {
             let mut s = self.mcp_config(write)?;
+            if kind == "board" {
+                ensure!(!write, "invalid board setup invocation");
+                let scope = scope.context("board setup requires a scope")?;
+                let table = s.as_table_mut().context("invalid MCP configuration")?;
+                let mut allowed: Vec<toml::Value> =
+                    READ_TOOLS.iter().map(|s| (*s).into()).collect();
+                allowed.extend(crate::board_guard::READ_TOOLS.iter().map(|s| (*s).into()));
+                allowed.extend(crate::board_guard::WRITE_TOOLS.iter().map(|s| (*s).into()));
+                table.insert("enabled_tools".into(), toml::Value::Array(allowed));
+                for key in ["env", "env_vars", "url", "http_headers"] {
+                    table.remove(key);
+                }
+                table.insert(
+                    "command".into(),
+                    std::env::current_exe()?
+                        .to_string_lossy()
+                        .into_owned()
+                        .into(),
+                );
+                table.insert(
+                    "args".into(),
+                    toml::Value::Array(vec![
+                        "internal-board-mcp".into(),
+                        "--scope".into(),
+                        scope.to_string_lossy().into_owned().into(),
+                    ]),
+                );
+                let policies = table
+                    .entry("tools")
+                    .or_insert_with(|| toml::Value::Table(Default::default()))
+                    .as_table_mut()
+                    .context("invalid MCP tool policies")?;
+                for tool in crate::board_guard::WRITE_TOOLS {
+                    let policy = policies
+                        .entry(*tool)
+                        .or_insert_with(|| toml::Value::Table(Default::default()))
+                        .as_table_mut()
+                        .context("invalid MCP tool policy")?;
+                    policy.insert("approval_mode".into(), "approve".into());
+                }
+            }
             if write {
                 let scope = scope.context("projection MCP requires committed scope")?;
                 let table = s.as_table_mut().unwrap();
