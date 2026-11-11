@@ -76,6 +76,11 @@ The tests use disposable repositories and SQLite databases. Pipeline fixtures ru
 the production engine with controlled model and GitHub responses; they don't prove
 that a live service or account is configured correctly.
 
+The user-owned cancellation change passed all 55 tests, including host isolation
+fixtures, plus formatting, strict all-target Clippy and debug/release builds.
+Regressions cover authoritative status labels, cancellation without a board
+write, rejection of cancellation writes and removal of legacy queued updates.
+
 | Coverage | Tests |
 | --- | --- |
 | Configuration, source revisions, referenced pages and process supervision | [m1](tests/m1.rs), [source](src/source.rs) |
