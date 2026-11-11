@@ -310,3 +310,19 @@ with zero restarts and automatic merging disabled. The previous Cleanup doc run
 had already been cancelled by a board scan at 12:56 UTC, before this restart,
 so it was not revived. Live GitHub conflict repair is not claimed; its complete
 flow was verified with real disposable Git repositories and fixture agents/API.
+
+## Hosted CI compiler fixture — 2026-11-11
+
+GitHub Actions run 43026692241 failed only
+`sandbox_compiles_and_runs_c_and_rust`: `rustc: not found`. The fixture used no
+toolchain paths, so it passed with cosmo's system Rust but could not see the
+runner's rustup installation inside the filesystem boundary. The fixture now
+discovers the active compiler's sysroot and mounts that specific toolchain
+read-only through the existing project configuration. It also asserts that the
+sandbox selects that compiler, preventing a system installation from masking
+the configuration mistake. No isolation rules or CI checks were relaxed.
+
+All 49 tests, including host isolation fixtures, passed locally, along with
+formatting, strict all-target Clippy, debug build and release build. A new hosted
+Actions run remains to be verified after pushing this fix. Production code and
+the running daemon are unchanged.

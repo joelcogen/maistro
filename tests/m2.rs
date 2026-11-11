@@ -281,12 +281,32 @@ async fn sandbox_preflight_hides_main_checkout_git_directory() {
 #[ignore = "requires host user namespaces and C/Rust toolchains"]
 async fn sandbox_compiles_and_runs_c_and_rust() {
     let t = tempfile::tempdir().unwrap();
-    let c = common::config(t.path());
-    let p = &c.projects[0];
+    let mut c = common::config(t.path());
+    let p = &mut c.projects[0];
+    // Hosted CI uses rustup under the runner's home, outside the sandbox's
+    // system mounts. Expose only the active toolchain, as a real project would.
+    let output = std::process::Command::new("rustc")
+        .args(["--print", "sysroot"])
+        .output()
+        .expect("Rust toolchain must be installed for this fixture");
+    assert!(
+        output.status.success(),
+        "cannot locate Rust toolchain: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let toolchain = std::path::PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+        .canonicalize()
+        .unwrap();
+    assert!(toolchain.join("bin/rustc").is_file());
+    p.toolchain_paths.push(toolchain.clone());
     std::fs::write(p.repo.join("probe.c"), "int main(void) { return 0; }\n").unwrap();
     std::fs::write(p.repo.join("probe.rs"), "fn main() {}\n").unwrap();
     let mut command = maistro::sandbox::command(p, &p.repo, true, false).unwrap();
-    command.args(["--", "sh", "-c", "cc probe.c -o /tmp/c-probe && /tmp/c-probe && rustc probe.rs -o /tmp/rust-probe && /tmp/rust-probe"]);
+    // Also prove PATH selects the configured compiler, rather than silently
+    // passing on hosts that happen to have another rustc in /usr/bin.
+    command.args(["--setenv", "EXPECTED_RUSTC"]);
+    command.arg(toolchain.join("bin/rustc"));
+    command.args(["--", "sh", "-c", "test \"$(command -v rustc)\" = \"$EXPECTED_RUSTC\" && cc probe.c -o /tmp/c-probe && /tmp/c-probe && rustc probe.rs -o /tmp/rust-probe && /tmp/rust-probe"]);
     maistro::process::checked(command, std::time::Duration::from_secs(30))
         .await
         .unwrap();
