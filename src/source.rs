@@ -1,5 +1,8 @@
 //! Revision-bearing text comes from MCP results, never a model's transcription.
-use crate::model::{Decision, PageReference, Scan};
+use crate::{
+    config::Statuses,
+    model::{Decision, PageReference, Scan, Status},
+};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -32,7 +35,7 @@ fn cell<'a>(row: &'a Value, names: &[&str]) -> Result<Option<&'a str>> {
     Ok(None)
 }
 
-pub fn canonicalize(scan: &mut Scan, evidence: &str) -> Result<()> {
+pub fn canonicalize(scan: &mut Scan, evidence: &str, statuses: &Statuses) -> Result<()> {
     let mut rows = BTreeMap::new();
     let mut pages = BTreeMap::new();
     let mut comments: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
@@ -94,7 +97,21 @@ pub fn canonicalize(scan: &mut Scan, evidence: &str) -> Result<()> {
                         .filter(|s| !s.trim().is_empty())
                         .unwrap_or(&text)
                         .to_owned();
-                    let source = (title, text, criteria);
+                    let label = cell(&row, &["status"])?.context("missing source status")?;
+                    let status = [
+                        (&statuses.backlog, Status::Backlog),
+                        (&statuses.ready, Status::Ready),
+                        (&statuses.in_progress, Status::InProgress),
+                        (&statuses.review, Status::Review),
+                        (&statuses.done, Status::Done),
+                        (&statuses.blocked, Status::Blocked),
+                        (&statuses.cancelled, Status::Cancelled),
+                    ]
+                    .into_iter()
+                    .find(|(configured, _)| configured.as_str() == label)
+                    .map(|(_, status)| status)
+                    .with_context(|| format!("unknown source status {label:?} for {id}"))?;
+                    let source = (title, text, criteria, status);
                     if let Some(previous) = rows.insert(id, source.clone()) {
                         ensure!(
                             previous == source,
@@ -132,9 +149,10 @@ pub fn canonicalize(scan: &mut Scan, evidence: &str) -> Result<()> {
         }
     }
     for story in &mut scan.stories {
-        let (title, mut body, criteria) = rows.remove(&story.story_id).with_context(|| {
-            format!("missing authoritative row/body read for {}", story.story_id)
-        })?;
+        let (title, mut body, criteria, status) =
+            rows.remove(&story.story_id).with_context(|| {
+                format!("missing authoritative row/body read for {}", story.story_id)
+            })?;
         ensure!(
             complete_comments.contains(&story.story_id),
             "incomplete comment read for {}",
@@ -171,6 +189,12 @@ pub fn canonicalize(scan: &mut Scan, evidence: &str) -> Result<()> {
                 );
             }
         }
+        story.status = status;
+        ensure!(
+            story.status != Status::Ready || story.decision != Decision::Ignore,
+            "Ready source row {} needs a readiness assessment; coordinator ignored it",
+            story.story_id
+        );
         story.title = title;
         story.description = body;
         story.acceptance_criteria = if criteria.trim().is_empty() {
@@ -231,7 +255,7 @@ mod tests {
             "human requirement",
             "Ready",
         );
-        canonicalize(&mut scan, &raw).unwrap();
+        canonicalize(&mut scan, &raw, &Statuses::default()).unwrap();
         let revision = scan.stories[0].revision();
         assert_eq!(
             scan.stories[0].description,
@@ -247,7 +271,7 @@ mod tests {
             "human requirement",
             "In Progress",
         );
-        canonicalize(&mut scan, &raw).unwrap();
+        canonicalize(&mut scan, &raw, &Statuses::default()).unwrap();
         assert_eq!(revision, scan.stories[0].revision());
         for (body, criteria, comment) in [
             ("first. second", "must pass", "human requirement"),
@@ -255,9 +279,50 @@ mod tests {
             ("first.second", "must pass", "changed comment"),
         ] {
             let raw = evidence(&scan, body, criteria, comment, "In Progress");
-            canonicalize(&mut scan, &raw).unwrap();
+            canonicalize(&mut scan, &raw, &Statuses::default()).unwrap();
             assert_ne!(revision, scan.stories[0].revision());
         }
+    }
+    #[test]
+    fn status_comes_only_from_the_configured_source_cell() {
+        let t = tempfile::tempdir().unwrap();
+        let c = fixtures::config(t.path());
+        let mut scan = fixtures::scan(&c.projects[0], vec![fixtures::story(Status::Cancelled)]);
+        let statuses = Statuses {
+            ready: "Approved for work".into(),
+            ..Statuses::default()
+        };
+        let raw = evidence(
+            &scan,
+            "Implement the feature",
+            "",
+            "Previously cancelled",
+            "Approved for work",
+        );
+        canonicalize(&mut scan, &raw, &statuses).unwrap();
+        assert_eq!(scan.stories[0].status, Status::Ready);
+        let revision = scan.stories[0].revision();
+        let cancelled = raw.replace("Approved for work", "Cancelled");
+        canonicalize(&mut scan, &cancelled, &statuses).unwrap();
+        assert_eq!(scan.stories[0].status, Status::Cancelled);
+        assert_eq!(scan.stories[0].revision(), revision);
+        assert!(canonicalize(&mut scan, &format!("{raw}\n{cancelled}"), &statuses).is_err());
+        assert!(
+            canonicalize(
+                &mut scan,
+                &raw.replace("Approved for work", "Unknown"),
+                &statuses
+            )
+            .is_err()
+        );
+        assert!(canonicalize(&mut scan, &raw.replace("Status", "Last error"), &statuses).is_err());
+        scan.stories[0].decision = Decision::Ignore;
+        assert!(
+            canonicalize(&mut scan, &raw, &statuses)
+                .unwrap_err()
+                .to_string()
+                .contains("readiness assessment")
+        );
     }
     #[test]
     fn prose_criteria_and_incomplete_source_reads() {
@@ -265,16 +330,16 @@ mod tests {
         let c = fixtures::config(t.path());
         let mut scan = fixtures::scan(&c.projects[0], vec![fixtures::story(Status::Ready)]);
         let raw = evidence(&scan, "complete prose requirement", "", "comment", "Ready");
-        canonicalize(&mut scan, &raw).unwrap();
+        canonicalize(&mut scan, &raw, &Statuses::default()).unwrap();
         assert_eq!(
             scan.stories[0].acceptance_criteria,
             ["complete prose requirement"]
         );
-        assert!(canonicalize(&mut scan, "").is_err());
+        assert!(canonicalize(&mut scan, "", &Statuses::default()).is_err());
         let incomplete = raw.lines().next().unwrap();
-        assert!(canonicalize(&mut scan, incomplete).is_err());
+        assert!(canonicalize(&mut scan, incomplete, &Statuses::default()).is_err());
         let wrong_database = raw.replace(&scan.board_id, &uuid::Uuid::new_v4().to_string());
-        assert!(canonicalize(&mut scan, &wrong_database).is_err());
+        assert!(canonicalize(&mut scan, &wrong_database, &Statuses::default()).is_err());
     }
     #[test]
     fn referenced_pages_reach_worker_and_revision_without_authorizing_other_work() {
@@ -286,7 +351,7 @@ mod tests {
         let url = format!("https://appflowy.com/app/{workspace}/{page}");
         let body = format!("Follow the [writing guide]({url}).");
         let raw = evidence(&scan, &body, "", "human comment", "Ready");
-        canonicalize(&mut scan, &raw).unwrap();
+        canonicalize(&mut scan, &raw, &Statuses::default()).unwrap();
         assert_eq!(scan.stories[0].decision, Decision::Blocked);
         assert!(scan.stories[0].reason.contains("get_page_markdown"));
         let page_call = |text: &str| {
@@ -298,7 +363,7 @@ mod tests {
         };
         let complete = format!("{raw}\n{}", page_call("Be direct. Keep necessary details."));
         scan.stories[0].decision = Decision::Implement;
-        canonicalize(&mut scan, &complete).unwrap();
+        canonicalize(&mut scan, &complete, &Statuses::default()).unwrap();
         assert_eq!(scan.stories.len(), 1);
         assert_eq!(scan.stories[0].reference_pages.len(), 1);
         assert!(
@@ -307,11 +372,12 @@ mod tests {
                 .contains("Be direct. Keep necessary details.")
         );
         let revision = scan.stories[0].revision();
-        canonicalize(&mut scan, &complete).unwrap();
+        canonicalize(&mut scan, &complete, &Statuses::default()).unwrap();
         assert_eq!(revision, scan.stories[0].revision());
         canonicalize(
             &mut scan,
             &format!("{raw}\n{}", page_call("New guide instructions.")),
+            &Statuses::default(),
         )
         .unwrap();
         assert_ne!(revision, scan.stories[0].revision());
@@ -321,6 +387,7 @@ mod tests {
         canonicalize(
             &mut scan,
             &format!("{named}\n{}", page_call("Named guide contents.")),
+            &Statuses::default(),
         )
         .unwrap();
         assert!(

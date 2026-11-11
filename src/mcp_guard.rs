@@ -97,6 +97,10 @@ impl Guard {
     }
     pub fn allow(&self, name: &str, a: &Value, s: &Scope) -> Result<()> {
         ensure!(
+            s.projection.status != Status::Cancelled,
+            "Cancelled is user-owned; Maistro cannot project it"
+        );
+        ensure!(
             a["workspace_id"].as_str() == Some(&s.scan.workspace_id),
             "projection workspace mismatch"
         );
@@ -259,7 +263,7 @@ fn live_scope(s: &Scope) -> Result<()> {
             Status::Ready
         }
         crate::store::State::Blocked | crate::store::State::Failed => Status::Blocked,
-        crate::store::State::Cancelled => Status::Cancelled,
+        crate::store::State::Cancelled => anyhow::bail!("cancelled runs cannot change the board"),
     };
     ensure!(
         status == s.projection.status,
@@ -370,7 +374,7 @@ mod tests {
         let c = crate::fixtures::config(t.path());
         let scan =
             crate::fixtures::scan(&c.projects[0], vec![crate::fixtures::story(Status::Ready)]);
-        let scope = Scope {
+        let mut scope = Scope {
             agents: c.agents,
             projection: Projection {
                 project_id: "a".into(),
@@ -395,5 +399,15 @@ mod tests {
         a["cells"] = json!("{\"status\":\"done\"}");
         assert!(guard.allow("update_row_cells", &a, &scope).is_err());
         assert!(guard.allow("delete_row", &a, &scope).is_err());
+        scope.projection.status = Status::Cancelled;
+        guard.observe("get_database_fields", &json!([{"id":"status","name":"Status","type_option":{"options":[{"id":"cancelled","name":"Cancelled"}]}}]), &scope);
+        a["cells"] = json!("{\"status\":\"cancelled\"}");
+        assert!(
+            guard
+                .allow("update_row_cells", &a, &scope)
+                .unwrap_err()
+                .to_string()
+                .contains("user-owned")
+        );
     }
 }

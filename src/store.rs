@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,run_id T
 CREATE TABLE IF NOT EXISTS leases(repo TEXT PRIMARY KEY,owner TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,story_id TEXT NOT NULL,payload TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS controls(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+DELETE FROM outbox WHERE json_extract(payload, '$.status') = 'cancelled';
 PRAGMA user_version=1;")?;
         Ok(s)
     }
@@ -374,13 +375,20 @@ PRAGMA user_version=1;")?;
             "state conflict"
         );
         event(&tx, &r.id, r.state.as_str(), message)?;
+        if r.state == State::Cancelled {
+            // Stop execution internally without changing the user's board status.
+            tx.execute(
+                "DELETE FROM outbox WHERE project_id=? AND story_id=?",
+                params![r.project_id, r.story.story_id],
+            )?;
+        }
         if r.state != expected {
             let status = match r.state {
                 State::Running => Some(Status::InProgress),
                 State::Reviewing | State::WaitingCi => Some(Status::Review),
                 State::Completed => Some(Status::Done),
                 State::Blocked | State::Failed => Some(Status::Blocked),
-                State::Cancelled => Some(Status::Cancelled),
+                State::Cancelled => None,
                 _ => None,
             };
             if let Some(s) = status {

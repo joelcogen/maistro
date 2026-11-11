@@ -311,3 +311,47 @@ async fn sandbox_compiles_and_runs_c_and_rust() {
         .await
         .unwrap();
 }
+
+#[test]
+fn cancellation_stops_execution_without_projecting_a_board_status() {
+    let t = tempfile::tempdir().unwrap();
+    let c = common::config(t.path());
+    let db = Store::open(&c.orchestrator.state_db).unwrap();
+    db.sync_config(&c).unwrap();
+    let p = &c.projects[0];
+    let scan = common::scan(p, vec![common::story(Status::Ready)]);
+    db.ingest(p, &scan, &c.orchestrator.worktree_root).unwrap();
+    let mut run = db.runs().unwrap().remove(0);
+    db.claim(&mut run, p, 1).unwrap();
+    assert_eq!(db.pending().unwrap().len(), 1);
+    db.transition(&mut run, State::Cancelled, "requirements changed")
+        .unwrap();
+    assert!(
+        db.pending().unwrap().is_empty(),
+        "stale In Progress update must be discarded"
+    );
+    assert_eq!(db.get(&run.id).unwrap().state, State::Cancelled);
+    assert_eq!(
+        db.scan(&p.id).unwrap().unwrap().stories[0].status,
+        Status::Ready
+    );
+
+    // An upgrade must also discard cancellation writes queued by an older binary.
+    let conn = rusqlite::Connection::open(&c.orchestrator.state_db).unwrap();
+    for status in ["cancelled", "review"] {
+        let payload = serde_json::json!({"project_id":p.id,"story_id":run.story.story_id,
+            "run_id":run.id,"status":status,"message":"legacy update","pr_url":null,"attempt":1});
+        conn.execute(
+            "INSERT INTO outbox(project_id,story_id,payload) VALUES(?,?,?)",
+            rusqlite::params![p.id, run.story.story_id, payload.to_string()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    for _ in 0..2 {
+        let reopened = Store::open(&c.orchestrator.state_db).unwrap();
+        let pending = reopened.pending().unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.status, Status::Review);
+    }
+}
