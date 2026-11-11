@@ -179,3 +179,17 @@ All 43 tests passed after these changes, with formatting, strict Clippy and debu
 build checks. Backed up the stopped pilot database and removed exactly two pending
 erroneous cancellation projections, preserving the cancelled run history and
 recording recovery events. Automatic merge remains disabled.
+
+Live verification subsequently confirmed matching body/criteria text across
+consecutive scans, durable pickup of the Ready stories, and successful guarded
+AppFlowy status/comment writes. Projection instructions now specify exact metadata
+values (including the full progress message and string retry count); guard errors
+identify the expected committed value without relaxing validation. All 43 tests,
+formatting, strict Clippy and debug/release builds passed again.
+
+The Install script run reached Git preparation but SSH authentication failed.
+Diagnosis found that the user service manager's SSH agent had no usable identities,
+while the current session uses a different, reachable agent with identities.
+Nicer CLI was blocked requesting an output example; Cleanup doc was blocked on
+the unavailable writing guide and unclear completion criteria. These are live
+results, not fixture assumptions. No PR or merge occurred during these checks.
