@@ -228,7 +228,17 @@ impl Engine {
                         }
                     }
                     git::verify_uncommitted_paths(p, &r).await?;
-                    git::commit(&mut r).await?;
+                    if let Err(e) = git::commit(&mut r).await {
+                        if e.downcast_ref::<crate::process::UnconfirmedTermination>()
+                            .is_some()
+                        {
+                            return Err(e);
+                        }
+                        if self.repair(&mut r, &e.to_string())? {
+                            continue;
+                        }
+                        return Ok(());
+                    }
                 }
                 self.store.transition(
                     &mut r,
@@ -289,6 +299,38 @@ impl Engine {
             }
             if matches!(r.state, State::WaitingCi | State::Merging) {
                 let number = r.pr.context("missing PR")?;
+                // PR maintenance is independent of permission to merge it. Do
+                // this before waiting on CI: a conflicting PR may have no CI run.
+                // Never alter a branch while reconciling an uncertain merge.
+                if r.state == State::WaitingCi
+                    && !self.store.paused(&p.id)?
+                    && self.store.control("reloading")?.as_deref() != Some("true")
+                {
+                    self.authorize(p, &r, cancel).await?;
+                    crate::policy::pr_identity(p, &r, &self.github.pr(p, number).await?)?;
+                    if let git::BaseUpdate::Updated { conflicts } =
+                        git::update_base(p, &mut r).await?
+                    {
+                        if let Err(e) = git::verify_conflict_paths(p, &r, &conflicts) {
+                            self.store.transition(
+                                &mut r,
+                                State::Blocked,
+                                &format!("Base merge requires human handling: {e}"),
+                            )?;
+                            return Ok(());
+                        }
+                        let feedback = format!(
+                            "Base branch {} advanced to {}. Rust prepared a merge in /work. Conflicted paths: {}. Resolve each conflict in the working files, preserving the assigned story and upstream changes. Inspect modify/delete conflicts and retain relevant upstream content rather than blindly selecting a whole side. Remove all conflict markers; delete a file only when appropriate for the intended result. Do not run Git: Rust will stage and complete the pending merge, then rerun deterministic tests and fresh independent review before updating the same PR. Automatic merging of the PR remains governed separately by configuration.",
+                            p.base_branch,
+                            r.base_sha.as_deref().unwrap_or(""),
+                            serde_json::to_string(&conflicts)?
+                        );
+                        if self.repair(&mut r, &feedback)? {
+                            continue;
+                        }
+                        return Ok(());
+                    }
+                }
                 self.github.mark_ready(p, number).await?;
                 let required = if self.config.github.auto_merge {
                     self.github.protections(p).await?
@@ -331,19 +373,6 @@ impl Engine {
                     return Ok(());
                 }
                 self.authorize(p, &r, cancel).await?;
-                if git::update_base(p, &mut r).await? {
-                    ensure!(
-                        r.state != State::Merging,
-                        "base changed during uncertain merge"
-                    );
-                    if self.repair(
-                        &mut r,
-                        "Base branch advanced; merged base locally, reimplement/retest/review",
-                    )? {
-                        continue;
-                    }
-                    return Ok(());
-                }
                 crate::policy::review_valid(&r)?;
                 git::verify_paths(p, &r).await?;
                 let pr = self.github.pr(p, number).await?;

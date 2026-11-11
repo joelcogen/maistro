@@ -280,3 +280,27 @@ preflight and the daemon is active with zero restarts. Cleanup doc was dispatche
 the existing installer and CLI runs were explicitly retried after confirming
 unchanged requirements and are queued behind it. Their worktrees and histories
 were retained. Actual story review/CI completion has not been claimed.
+
+## Merge conflict recovery in manual mode — 2026-11-11
+
+PR maintenance previously ran only after the automatic-merge gate and green CI.
+With automatic merging disabled, an outdated conflicting PR could wait forever;
+an actual Git merge conflict also escaped the repair loop as an error.
+
+Maistro now integrates an advanced base before waiting for CI, in both manual
+and automatic merge modes. Rust preserves the pending merge and gives the coding
+agent the conflicted paths and repair instructions. Rust completes the merge,
+reruns deterministic checks and independent review, and pushes to the existing
+PR without force. Pending merges recover after interruption. Conflict markers
+prevent a commit and feed the bounded repair loop. Protected, binary and unsafe
+conflicts fail closed. Upstream changes to protected files are distinguished from
+worker edits. Uncertain remote merge attempts are not modified. Story comments
+and moving a story back to Ready retain their existing behavior.
+
+Formatting, strict Clippy, debug/release builds and all 49 automated tests passed,
+including the host namespace tests. New regressions use disposable repositories
+to exercise text and modify/delete conflicts, crash recovery, marker rejection,
+protected upstream changes, clean merges and ordinary non-force pushes. A full
+pipeline test proves repair with automatic merging disabled, fresh tests and
+review, CI tied to the new head, reuse of the same PR and repeat reconciliation
+without another attempt. Production automatic merging remains disabled.

@@ -146,7 +146,14 @@ pilot uses `required_checks = ["test"]`. Verify its first GitHub run after pushi
 the repository. Other projects need their own check names.
 
 Keep `github.auto_merge = false` for the first trial. Maistro can open and review
-PRs while you handle merging. To enable automatic squash merges, it also needs
+PRs while you handle merging. When the base branch advances, it updates the PR
+branch and asks the coding agent to resolve text conflicts within the repair
+budget. It reruns local checks and independent review before pushing to the same
+PR, then checks CI for the new commit. This also works with automatic merging
+disabled and never uses a force push. Conflicts in protected files or files the
+agent cannot safely edit require human handling.
+
+To enable automatic squash merges, it also needs
 read access to branch protection and rulesets, strict up-to-date required checks,
 protection enforced for administrators, and no force pushes, deletions or bypass
 actors. Token scopes don't grant access the account itself lacks. If protection

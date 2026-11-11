@@ -154,9 +154,30 @@ pub async fn prepare(p: &Project, r: &mut crate::store::Run, root: &Path) -> Res
     Ok(())
 }
 pub async fn commit(r: &mut crate::store::Run) -> Result<()> {
-    if !git(&r.worktree, &["status", "--porcelain"])
-        .await?
-        .is_empty()
+    let pending = merge_head(&r.worktree).await?;
+    if let Some(base) = &pending {
+        ensure!(
+            Some(base) == r.base_sha.as_ref(),
+            "pending merge targets an unrecorded base"
+        );
+        for path in conflict_paths(&r.worktree).await? {
+            let file = r.worktree.join(&path);
+            if file.exists() {
+                let text = std::fs::read_to_string(&file)
+                    .with_context(|| format!("conflicted file {path} is not readable text"))?;
+                ensure!(
+                    !text
+                        .lines()
+                        .any(|line| line.starts_with("<<<<<<<") || line.starts_with(">>>>>>>")),
+                    "Unresolved merge conflict markers in {path}; resolve the contents before verification"
+                );
+            }
+        }
+    }
+    if pending.is_some()
+        || !git(&r.worktree, &["status", "--porcelain"])
+            .await?
+            .is_empty()
     {
         git(&r.worktree, &["add", "--all", "--", "."]).await?;
         git(
@@ -243,29 +264,114 @@ pub async fn current_base(p: &Project) -> Result<String> {
     )
     .await
 }
-pub async fn update_base(p: &Project, r: &mut crate::store::Run) -> Result<bool> {
-    let base = current_base(p).await?;
-    if r.base_sha.as_ref() == Some(&base) {
-        return Ok(false);
+#[derive(Debug, PartialEq, Eq)]
+pub enum BaseUpdate {
+    Unchanged,
+    Updated { conflicts: Vec<String> },
+}
+async fn merge_head(worktree: &Path) -> Result<Option<String>> {
+    let name = git(worktree, &["rev-parse", "--git-path", "MERGE_HEAD"]).await?;
+    let file = worktree.join(name);
+    match std::fs::read_to_string(file) {
+        Ok(text) => {
+            let sha = text.trim();
+            ensure!(
+                sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_hexdigit()),
+                "invalid pending merge head"
+            );
+            Ok(Some(sha.to_owned()))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.into()),
     }
-    git(
-        &r.worktree,
-        &[
-            "-c",
-            "user.name=Maistro",
-            "-c",
-            "user.email=maistro@localhost",
-            "merge",
-            "--no-edit",
-            &base,
-        ],
-    )
-    .await?;
+}
+async fn conflict_paths(worktree: &Path) -> Result<Vec<String>> {
+    let files = git(worktree, &["diff", "--name-only", "--diff-filter=U", "-z"]).await?;
+    let mut paths = files
+        .split('\0')
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+pub fn verify_conflict_paths(p: &Project, r: &crate::store::Run, paths: &[String]) -> Result<()> {
+    for path in paths {
+        crate::policy::changed_path_allowed(p, path)?;
+        let file = r.worktree.join(path);
+        match std::fs::symlink_metadata(&file) {
+            Ok(metadata) => {
+                ensure!(
+                    metadata.is_file() && metadata.len() <= 16 * 1024 * 1024,
+                    "conflict in {path} requires human handling (non-regular or oversized file)"
+                );
+                let bytes = std::fs::read(file)?;
+                ensure!(
+                    !bytes.contains(&0) && std::str::from_utf8(&bytes).is_ok(),
+                    "binary conflict in {path} requires human handling"
+                );
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+pub async fn update_base(p: &Project, r: &mut crate::store::Run) -> Result<BaseUpdate> {
+    // MERGE_HEAD survives interruption even if SQLite has not recorded the new
+    // base yet. Finish that exact merge before considering a later base update.
+    let pending = merge_head(&r.worktree).await?;
+    let base = match &pending {
+        Some(sha) => sha.clone(),
+        None => current_base(p).await?,
+    };
+    if pending.is_none() && r.base_sha.as_ref() == Some(&base) {
+        return Ok(BaseUpdate::Unchanged);
+    }
+    if pending.is_none() {
+        ensure!(
+            git(&r.worktree, &["status", "--porcelain"])
+                .await?
+                .is_empty(),
+            "cannot update base over uncommitted work"
+        );
+        let result = git(
+            &r.worktree,
+            &[
+                "-c",
+                "user.name=Maistro",
+                "-c",
+                "user.email=maistro@localhost",
+                "merge",
+                "--no-commit",
+                "--no-ff",
+                &base,
+            ],
+        )
+        .await;
+        if let Err(error) = result {
+            if error
+                .downcast_ref::<process::UnconfirmedTermination>()
+                .is_some()
+            {
+                return Err(error);
+            }
+            // Git exits nonzero for an ordinary content conflict. Preserve it
+            // for the repair worker instead of treating it as a failed fetch.
+            if merge_head(&r.worktree).await?.as_ref() != Some(&base)
+                || conflict_paths(&r.worktree).await?.is_empty()
+            {
+                return Err(error);
+            }
+        }
+    }
+    let conflicts = conflict_paths(&r.worktree).await?;
     r.base_sha = Some(base);
     r.head_sha = Some(git(&r.worktree, &["rev-parse", "HEAD"]).await?);
     r.review = None;
     r.test_sha = None;
-    Ok(true)
+    Ok(BaseUpdate::Updated { conflicts })
 }
 pub async fn confirm_merge(p: &Project, sha: &str) -> Result<()> {
     ensure!(
@@ -278,8 +384,18 @@ pub async fn confirm_merge(p: &Project, sha: &str) -> Result<()> {
 }
 
 pub async fn verify_uncommitted_paths(p: &Project, r: &crate::store::Run) -> Result<()> {
+    // During base integration, upstream edits are trusted base content. Check
+    // the task's result against that base rather than misclassifying upstream
+    // changes to protected files as worker edits.
+    let reference = if merge_head(&r.worktree).await?.is_some() {
+        r.base_sha
+            .as_deref()
+            .context("missing pending merge base")?
+    } else {
+        "HEAD"
+    };
     for args in [
-        vec!["diff", "--name-only", "--no-renames", "-z", "HEAD", "--"],
+        vec!["diff", "--name-only", "--no-renames", "-z", reference, "--"],
         vec!["ls-files", "--others", "--exclude-standard", "-z"],
     ] {
         let paths = git(&r.worktree, &args).await?;
