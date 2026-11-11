@@ -343,3 +343,12 @@ before the merge commit and after commit but before SQLite records its head.
 Each case requires fresh tests and independent review, updates the existing PR,
 checks its new head in CI and remains idempotent. Formatting, strict all-target
 Clippy and the debug build passed. Automatic merging remains disabled.
+
+Release build passed and the checksum-verified binary is installed. With the
+daemon stopped, backed up SQLite and restored only Install script's false block
+to WaitingCi after checking unchanged requirements, matching HEAD/MERGE_HEAD and
+an empty conflict list. The attempt count was retained at three and prior test
+and review evidence cleared. AppFlowy was restored to Review. After restart,
+Maistro completed the clean merge and fresh tests and independent review at head
+`7584cc784469408f12d50e024cd0510169622cd1`, still on attempt three. The daemon is
+active; automatic merging is disabled. Remote push/CI follow this verification.
