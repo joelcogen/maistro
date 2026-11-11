@@ -16,6 +16,28 @@ AppFlowy MCP configured. The host must allow Bubblewrap's user, process and netw
 namespaces. Development used Codex 0.167.0; CI uses Rust 1.93.1. Keep Codex's helper
 executables beside its main binary.
 
+From this checkout, run the interactive installer:
+
+```sh
+./install.sh
+```
+
+It builds and installs Maistro, explains how to create a GitHub token and prompts
+for it without echoing it, then saves it in the private environment file. It opens
+the installed `config.toml` with `$EDITOR` (or `vi`) and runs `validate` with the
+token. Set an editor that waits for editing to finish, for example
+`EDITOR="code --wait" ./install.sh`. Keep `github.token_env` set to
+`MAISTRO_GITHUB_TOKEN`.
+
+Existing installed configuration is preserved; on first installation, the script
+copies the checkout's `config.toml` if present, otherwise `config.example.toml`.
+Rerunning prompts for a replacement token and retains other environment settings.
+Validation accesses GitHub and AppFlowy and writes local diagnostics. The script
+stops on errors and does not start the daemon. After successful validation, follow
+the service commands under [Validate and start](#validate-and-start).
+
+Alternatively, install manually:
+
 ```sh
 cd ~/dev/maistro
 cargo build --release --locked
