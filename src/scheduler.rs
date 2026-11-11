@@ -12,7 +12,12 @@ use std::{
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 /// Round-robin projects; durable run ordering supplies descending priority within each project.
-pub fn fair_candidates(config: &Config, runs: &[Run], cursor: usize) -> Vec<Run> {
+pub fn fair_candidates(
+    config: &Config,
+    runs: &[Run],
+    cursor: usize,
+    prefer_new: &HashSet<String>,
+) -> Vec<Run> {
     let n = config.projects.len();
     let mut result = vec![];
     for i in 0..n {
@@ -23,7 +28,20 @@ pub fn fair_candidates(config: &Config, runs: &[Run], cursor: usize) -> Vec<Run>
         if let Some(r) = runs
             .iter()
             .filter(|r| r.project_id == p.id && r.state.active() && r.retry_after <= now())
-            .min_by_key(|r| r.state == State::Queued)
+            .min_by_key(|r| {
+                if !p.continue_while_prs_pending {
+                    return (u8::from(r.state == State::Queued), 0);
+                }
+                // Finish local work first. Alternate new work and PR reconciliation;
+                // among pending PRs, service the one checked least recently.
+                match r.state {
+                    State::Running | State::Reviewing | State::Merging => (0, 0),
+                    State::WaitingCi => {
+                        (if prefer_new.contains(&p.id) { 2 } else { 1 }, r.updated_at)
+                    }
+                    _ => (if prefer_new.contains(&p.id) { 1 } else { 2 }, 0),
+                }
+            })
         {
             result.push(r.clone());
         }
@@ -312,7 +330,18 @@ impl Engine {
                     .any(|r| &r.project_id == id && r.state.active() && r.state != State::Queued)
             });
             if !reload {
-                for mut r in fair_candidates(&self.config, &runs, cursor) {
+                let mut prefer_new = HashSet::new();
+                for p in &self.config.projects {
+                    if self
+                        .store
+                        .control(&format!("last_dispatch_was_pr:{}", p.id))?
+                        .as_deref()
+                        == Some("true")
+                    {
+                        prefer_new.insert(p.id.clone());
+                    }
+                }
+                for mut r in fair_candidates(&self.config, &runs, cursor, &prefer_new) {
                     if active.len() >= self.config.orchestrator.max_concurrent_workers {
                         break;
                     }
@@ -345,6 +374,7 @@ impl Engine {
                             }
                         }
                     }
+                    let was_pr = r.state == State::WaitingCi;
                     if r.state == State::Queued {
                         if !self.store.claim(
                             &mut r,
@@ -356,6 +386,10 @@ impl Engine {
                     } else {
                         self.store.acquire_recovery(&r, p)?;
                     }
+                    self.store.set_control(
+                        &format!("last_dispatch_was_pr:{}", p.id),
+                        if was_pr { "true" } else { "false" },
+                    )?;
                     let dispatched_project = r.project_id.clone();
                     let engine = self.clone();
                     let token = shutdown.child_token();

@@ -34,6 +34,8 @@ repo = "/absolute/path/to/repo"
 github_repo = "owner/repo"
 base_branch = "main"
 max_workers = 1
+# Keep implementing Ready stories while earlier PRs await CI or manual merging.
+continue_while_prs_pending = true
 enabled = true
 required_checks = ["test"]
 test_commands = [["cargo", "test", "--locked", "--offline"], ["cargo", "clippy", "--locked", "--offline", "--", "-D", "warnings"]]

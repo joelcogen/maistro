@@ -265,6 +265,7 @@ async fn add_project(path: &Path, json: bool) -> Result<()> {
         appflowy_page: (!board.starts_with("https://")).then_some(board),
         base_branch,
         max_workers,
+        continue_while_prs_pending: true,
         enabled: true,
         github_repo,
         required_checks: checks

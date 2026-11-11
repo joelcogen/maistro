@@ -150,7 +150,15 @@ Clippy, all automated tests and a release build. Its check is named `test`, matc
 in your repository before configuring them.
 
 Keep `github.auto_merge = false` for the first trial. Maistro can open and review
-PRs while you handle merging. When the base branch advances, it updates the PR
+PRs while you handle merging. Each project defaults to
+`continue_while_prs_pending = true`: pending PRs release the work slot so Maistro
+can prepare more stories for you to review in a batch. It alternates new work
+with pending PR checks and runs one coding, review or repair task at a time per
+repository. Dependencies still wait for their prerequisite stories to be Done.
+Set `continue_while_prs_pending = false` in a `[[projects]]` section to wait for
+each PR to merge before starting another story.
+
+When the base branch advances, it updates the PR
 branch and asks the coding agent to resolve text conflicts within the repair
 budget. Clean base updates do not consume repair attempts or invoke the coding
 agent. It reruns local checks and independent review before pushing to the same

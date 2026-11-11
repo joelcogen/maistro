@@ -448,7 +448,7 @@ PRAGMA user_version=1;")?;
         if paused || project_paused {
             return Ok(false);
         }
-        let existing: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE project_id=? AND id!=? AND state IN ('running','reviewing','waiting_ci','merging'))",params![p.id,r.id],|row|row.get(0))?;
+        let existing: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE project_id=? AND id!=? AND (state IN ('running','reviewing','merging') OR (state='waiting_ci' AND ?=0)))",params![p.id,r.id,p.continue_while_prs_pending],|row|row.get(0))?;
         if existing {
             return Ok(false);
         }
@@ -480,7 +480,7 @@ PRAGMA user_version=1;")?;
         Ok(true)
     }
     pub fn acquire_recovery(&self, r: &Run, p: &Project) -> Result<()> {
-        self.conn()?.execute("INSERT INTO leases VALUES(?,?,?) ON CONFLICT(repo) DO UPDATE SET expires=excluded.expires WHERE owner=excluded.owner",params![p.repo.canonicalize()?.to_string_lossy(),r.id,now()+120])?;
+        ensure!(self.conn()?.execute("INSERT INTO leases VALUES(?,?,?) ON CONFLICT(repo) DO UPDATE SET expires=excluded.expires WHERE owner=excluded.owner",params![p.repo.canonicalize()?.to_string_lossy(),r.id,now()+120])? == 1, "repository lease belongs to another run");
         Ok(())
     }
     pub fn release(&self, id: &str) -> Result<()> {
