@@ -50,9 +50,6 @@ cp --update=none config.example.toml "$HOME/.config/maistro/config.toml"
 chmod 600 "$HOME/.config/maistro/config.toml"
 ```
 
-For the existing Maistro pilot, use the local `config.toml` instead of the example.
-The daemon will read the installed copy in `~/.config/maistro/`.
-
 ## Configure a project
 
 Edit `~/.config/maistro/config.toml`. For each project, set:
@@ -84,7 +81,7 @@ Repairs remain bounded by `max_attempts`. Rust projects also get a compiler and
 linker check inside the sandbox before stories are dispatched.
 
 Use `toolchain_paths` to expose specific toolchains and caches read-only. For
-Cargo, mount a registry directory such as `/home/jole/.cargo/registry`. Maistro
+Cargo, mount a registry directory such as `/home/you/.cargo/registry`. Maistro
 also exposes it as the worker's Cargo registry. A mounted directory with a `bin`
 child is added to `PATH`. Keep credentials out of these directories.
 
@@ -161,16 +158,23 @@ the fetched text in the worker's context and revision checks. Only stories on th
 configured board authorize work; reference documents do not create extra tasks.
 
 Optional fields are `Execution ID`, `PR URL`, `Last error` and `Retry count`.
-Maistro fills these in; underscore spellings also work. See the
-[pilot setup](docs/PILOT.md) for the existing board and local paths.
+Maistro fills these in; underscore spellings also work.
 
 The included [GitHub Actions workflow](.github/workflows/ci.yml) runs formatting,
-Clippy, all automated tests and a release build. Its check is named `test`, so the
-pilot uses `required_checks = ["test"]`. Verify its first GitHub run after pushing
-the repository. Other projects need their own check names.
+Clippy, all automated tests and a release build. Its check is named `test`, matching
+`required_checks = ["test"]` in the example configuration. Verify the check names
+in your repository before configuring them.
 
 Keep `github.auto_merge = false` for the first trial. Maistro can open and review
-PRs while you handle merging. When the base branch advances, it updates the PR
+PRs while you handle merging. Each project defaults to
+`continue_while_prs_pending = true`: pending PRs release the work slot so Maistro
+can prepare more stories for you to review in a batch. It alternates new work
+with pending PR checks and runs one coding, review or repair task at a time per
+repository. Dependencies still wait for their prerequisite stories to be Done.
+Set `continue_while_prs_pending = false` in a `[[projects]]` section to wait for
+each PR to merge before starting another story.
+
+When the base branch advances, it updates the PR
 branch and asks the coding agent to resolve text conflicts within the repair
 budget. Clean base updates do not consume repair attempts or invoke the coding
 agent. It reruns local checks and independent review before pushing to the same
@@ -283,6 +287,8 @@ reload a running daemon; use `reload` separately. `--json` does not change edito
 
 Pause lets active local work and review finish, but holds new jobs and merges.
 Cancellation stops local work; it can't undo a merge GitHub has already accepted.
+The board's Cancelled status belongs to the user. Maistro never writes it:
+stopping an internal run, including through the CLI, leaves the board status alone.
 Changed requirements or revoked authorization prevent stale work from merging.
 
 Retry requires the same requirements revision and Ready status. Use the run ID
@@ -328,8 +334,5 @@ doesn't rerun implementation. Worktrees are retained by default. Setting
 `retain_worktrees = false` removes only clean, completed worktrees; branches, PRs
 and logs remain.
 
-See [architecture](docs/ARCHITECTURE.md) for isolation and recovery details,
-[operations](docs/OPERATIONS.md) for retries and backups, and
-[acceptance evidence](docs/ACCEPTANCE.md) for passed tests and unverified live
-integrations. Maistro currently supports Linux, GitHub.com and stdio AppFlowy MCP.
-It doesn't deploy the changes it merges.
+See [implementation progress and limitations](IMPLEMENTATION_PROGRESS.md) for
+isolation, recovery, test coverage and integration gaps.

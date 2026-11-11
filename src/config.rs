@@ -99,6 +99,9 @@ pub struct Project {
     pub base_branch: String,
     #[serde(default = "one")]
     pub max_workers: usize,
+    /// Continue implementing stories while earlier PRs await CI or merging.
+    #[serde(default = "yes")]
+    pub continue_while_prs_pending: bool,
     #[serde(default = "yes")]
     pub enabled: bool,
     pub github_repo: String,

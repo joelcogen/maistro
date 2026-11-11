@@ -22,6 +22,7 @@ async fn main() -> Result<()> {
         appflowy_page: Some("unused".into()),
         base_branch: "main".into(),
         max_workers: 1,
+        continue_while_prs_pending: true,
         enabled: true,
         github_repo: "unused/probe".into(),
         required_checks: vec![],

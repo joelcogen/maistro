@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY AUTOINCREMENT,run_id T
 CREATE TABLE IF NOT EXISTS leases(repo TEXT PRIMARY KEY,owner TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,project_id TEXT NOT NULL,story_id TEXT NOT NULL,payload TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS controls(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+DELETE FROM outbox WHERE json_extract(payload, '$.status') = 'cancelled';
 PRAGMA user_version=1;")?;
         Ok(s)
     }
@@ -374,13 +375,20 @@ PRAGMA user_version=1;")?;
             "state conflict"
         );
         event(&tx, &r.id, r.state.as_str(), message)?;
+        if r.state == State::Cancelled {
+            // Stop execution internally without changing the user's board status.
+            tx.execute(
+                "DELETE FROM outbox WHERE project_id=? AND story_id=?",
+                params![r.project_id, r.story.story_id],
+            )?;
+        }
         if r.state != expected {
             let status = match r.state {
                 State::Running => Some(Status::InProgress),
                 State::Reviewing | State::WaitingCi => Some(Status::Review),
                 State::Completed => Some(Status::Done),
                 State::Blocked | State::Failed => Some(Status::Blocked),
-                State::Cancelled => Some(Status::Cancelled),
+                State::Cancelled => None,
                 _ => None,
             };
             if let Some(s) = status {
@@ -406,7 +414,7 @@ PRAGMA user_version=1;")?;
         if paused || project_paused {
             return Ok(false);
         }
-        let existing: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE project_id=? AND id!=? AND state IN ('running','reviewing','waiting_ci','merging'))",params![p.id,r.id],|row|row.get(0))?;
+        let existing: bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM runs WHERE project_id=? AND id!=? AND (state IN ('running','reviewing','merging') OR (state='waiting_ci' AND ?=0)))",params![p.id,r.id,p.continue_while_prs_pending],|row|row.get(0))?;
         if existing {
             return Ok(false);
         }
@@ -438,7 +446,7 @@ PRAGMA user_version=1;")?;
         Ok(true)
     }
     pub fn acquire_recovery(&self, r: &Run, p: &Project) -> Result<()> {
-        self.conn()?.execute("INSERT INTO leases VALUES(?,?,?) ON CONFLICT(repo) DO UPDATE SET expires=excluded.expires WHERE owner=excluded.owner",params![p.repo.canonicalize()?.to_string_lossy(),r.id,now()+120])?;
+        ensure!(self.conn()?.execute("INSERT INTO leases VALUES(?,?,?) ON CONFLICT(repo) DO UPDATE SET expires=excluded.expires WHERE owner=excluded.owner",params![p.repo.canonicalize()?.to_string_lossy(),r.id,now()+120])? == 1, "repository lease belongs to another run");
         Ok(())
     }
     pub fn release(&self, id: &str) -> Result<()> {
