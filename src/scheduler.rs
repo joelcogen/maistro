@@ -43,6 +43,7 @@ impl Engine {
     pub async fn run_daemon(mut self, path: &Path, once: bool) -> Result<()> {
         let _singleton =
             Singleton::acquire(&self.config.orchestrator.state_db.with_extension("lock"))?;
+        self.store.sync_startup_config(&self.config)?;
         self.preflight().await?;
         self.store.reset_leases()?;
         let shutdown = CancellationToken::new();
