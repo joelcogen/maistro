@@ -29,6 +29,13 @@ entry in your existing Codex configuration. PR projects also need a working PR
 creation tool, typically authenticated `gh`. Use your normal Git credentials.
 Maistro does not require a separate GitHub token or Bubblewrap.
 
+To get started with a new AppFlowy board, copy the
+[create-board prompt](prompts/create-board.md) into a chat with an AppFlowy-connected
+model. It asks for the URL or name of the parent page, creates a child board with
+the seven workflow statuses and colors, and returns the board reference and
+status mapping to use in your project configuration. The prompt uses `In progress`,
+so set `in_progress = "In progress"` in that project's `[projects.statuses]` table.
+
 ```sh
 ./install.sh
 ```
