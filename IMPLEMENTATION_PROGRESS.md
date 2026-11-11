@@ -193,3 +193,21 @@ while the current session uses a different, reachable agent with identities.
 Nicer CLI was blocked requesting an output example; Cleanup doc was blocked on
 the unavailable writing guide and unclear completion criteria. These are live
 results, not fixture assumptions. No PR or merge occurred during these checks.
+
+The SSH read succeeded with the current session agent; refreshed systemd's stale
+`SSH_AUTH_SOCK`. All AppFlowy status projections then drained successfully. A later
+scan nevertheless reproduced a false revision change: Luna used the Markdown
+renderer, whose paragraph whitespace differs from row/detail's plain text. The
+prompt-only extraction fix was insufficient and is superseded by Rust source
+canonicalization. Rust now requires authoritative row/body and complete comment
+reads, reconstructs title/body/criteria/comments from their MCP results, and
+rejects missing or inconsistent source reads. Model transcription no longer
+determines revision-bearing text. Existing content hashing still detects actual
+body, criteria and human-comment edits; progress metadata remains excluded.
+
+All 45 tests passed, including new canonicalization regressions and updated
+end-to-end MCP fixtures. Formatting, strict Clippy and debug compilation passed.
+The installer run hit its retry limit during diagnosis and will be retried after
+restoring its original Ready authorization. Its history is preserved. The SSH
+agent refresh is session-dependent; unattended operation needs a durable agent
+or another configured Git credential mechanism.

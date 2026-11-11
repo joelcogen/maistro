@@ -25,15 +25,25 @@ fn git(dir: &Path, args: &[&str]) -> String {
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     String::from_utf8(o.stdout).unwrap().trim().into()
 }
+const SOURCE_FIXTURE: &str = r#"
+def emit_sources(scan):
+ def emit(tool,args,value):
+  print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','status':'completed','tool':tool,'arguments':args,'result':{'content':[{'type':'text','text':json.dumps(value)}]}}}))
+ for story in scan['stories']:
+  args={'workspace_id':scan['workspace_id'],'database_id':scan['board_id'],'with_doc':True}
+  emit('get_database_row_details',args,{'id':story['story_id'],'cells':{'Title':story['title'],'Acceptance criteria':'\n'.join(story['acceptance_criteria'])},'has_doc':True,'doc':story['description']})
+  emit('list_comments',{'workspace_id':scan['workspace_id'],'target_type':'row','target_id':story['story_id']},{'comments':[],'has_more':False})
+"#;
 fn fake_codex(path: &Path, scan: &crate::model::Scan, fail: &Path) {
     let script = format!(
         r#"#!/usr/bin/python3
 import json,sys,uuid,re,pathlib
+{source_fixture}
 args=sys.argv
 schema=json.loads(pathlib.Path(args[args.index('--output-schema')+1]).read_text())['properties']
 out=pathlib.Path(args[args.index('-o')+1]); prompt=sys.stdin.read(); evidence={{}}
 if 'stories' in schema:
- result=json.loads({scan:?}); evidence=result
+ result=json.loads({scan:?}); evidence=result; emit_sources(result)
 elif 'applied' in schema:
  if pathlib.Path({fail:?}).exists(): sys.exit(9)
  result={{'story_id':json.loads({scan:?})['stories'][0]['story_id'],'applied':True}}; evidence={{'updated':True}}
@@ -49,6 +59,7 @@ print(json.dumps({{'type':'thread.started','thread_id':str(uuid.uuid4())}}))
 if evidence: print(json.dumps({{'type':'item.completed','item':{{'type':'mcp_tool_call','status':'completed','result':evidence}}}}))
 print(json.dumps({{'type':'turn.completed'}}))
 "#,
+        source_fixture = SOURCE_FIXTURE,
         scan = serde_json::to_string(scan).unwrap(),
         fail = fail.to_str().unwrap()
     );
@@ -309,12 +320,14 @@ async fn two_projects_validate_and_poll_independent_boards() {
     let script = format!(
         r#"#!/usr/bin/python3
 import json,sys,pathlib
+{source_fixture}
 args=sys.argv; prompt=sys.stdin.read();project=json.loads(prompt.split('PROJECT CONFIG (trusted routing only): ')[1])
-scans=json.loads({scans:?}); result=scans[project['id']]
+scans=json.loads({scans:?}); result=scans[project['id']]; emit_sources(result)
 pathlib.Path(args[args.index('-o')+1]).write_text(json.dumps(result))
 print(json.dumps({{'type':'item.completed','item':{{'type':'mcp_tool_call','status':'completed','result':result}}}}))
 print(json.dumps({{'type':'turn.completed'}}))
 "#,
+        source_fixture = SOURCE_FIXTURE,
         scans = serde_json::to_string(&scans).unwrap()
     );
     std::fs::write(&executable, script).unwrap();
