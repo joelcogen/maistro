@@ -131,7 +131,10 @@ and is separate from the fixture suite.
   conflict. That retry wasn't evidence of successful conflict repair.
 - Deployment, a web dashboard, notifications, monetary accounting and atomic
   changes across repositories aren't implemented. Work is serialized within a
-  repository; concurrency is across independent projects.
+  repository; concurrency is across independent projects. Pending PRs release the
+  project work slot by default, configurable with `continue_while_prs_pending`.
+  New work alternates with PR reconciliation, while live repository leases still
+  prevent overlapping coding or repair operations.
 
 Before unattended automatic merging, validate the intended configuration and run
 an end-to-end trial on a disposable project with real CI and branch protection,

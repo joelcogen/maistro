@@ -23,17 +23,23 @@ fn round_robin_and_priority_with_active_run_precedence() {
         .unwrap();
     }
     let runs = db.runs().unwrap();
-    let a = fair_candidates(&c, &runs, 0);
+    let a = fair_candidates(&c, &runs, 0, &Default::default());
     assert_eq!(a[0].project_id, "a");
     assert_eq!(a[0].story.priority, 9);
-    assert_eq!(fair_candidates(&c, &runs, 1)[0].project_id, "b");
+    assert_eq!(
+        fair_candidates(&c, &runs, 1, &Default::default())[0].project_id,
+        "b"
+    );
     let mut low = runs
         .iter()
         .find(|r| r.project_id == "a" && r.story.priority == 1)
         .unwrap()
         .clone();
     db.claim(&mut low, &c.projects[0], 2).unwrap();
-    assert_eq!(fair_candidates(&c, &db.runs().unwrap(), 0)[0].id, low.id);
+    assert_eq!(
+        fair_candidates(&c, &db.runs().unwrap(), 0, &Default::default())[0].id,
+        low.id
+    );
 }
 #[test]
 fn pause_persists_blocks_new_claims_and_project_resume_is_independent() {
@@ -61,7 +67,7 @@ fn pause_persists_blocks_new_claims_and_project_resume_is_independent() {
     assert!(db.claim(&mut r, p, 2).unwrap());
 }
 #[test]
-fn waiting_ci_holds_repository_slot_after_process_lease_release() {
+fn pending_pr_policy_preserves_exclusive_execution_and_allows_batch_review() {
     let t = tempfile::tempdir().unwrap();
     let c = common::config(t.path());
     let db = Store::open(&c.orchestrator.state_db).unwrap();
@@ -83,7 +89,41 @@ fn waiting_ci_holds_repository_slot_after_process_lease_release() {
     db.transition(&mut a, State::Reviewing, "review").unwrap();
     db.transition(&mut a, State::WaitingCi, "CI").unwrap();
     db.release(&a.id).unwrap();
-    assert!(!db.claim(&mut b, p, 2).unwrap());
+    let mut serial = p.clone();
+    serial.continue_while_prs_pending = false;
+    assert!(!db.claim(&mut b, &serial, 2).unwrap());
+    assert!(
+        p.continue_while_prs_pending,
+        "batch review must be the default"
+    );
+    let prefer_new = std::collections::HashSet::from([p.id.clone()]);
+    assert_eq!(
+        fair_candidates(&c, &db.runs().unwrap(), 0, &prefer_new)[0].id,
+        b.id
+    );
+    assert_eq!(
+        fair_candidates(&c, &db.runs().unwrap(), 0, &Default::default())[0].id,
+        a.id
+    );
+    db.acquire_recovery(&a, p).unwrap();
+    assert!(
+        !db.claim(&mut b, p, 2).unwrap(),
+        "an active CI check or repair still owns the lease"
+    );
+    db.release(&a.id).unwrap();
+    assert!(db.claim(&mut b, p, 2).unwrap());
+    assert!(
+        db.acquire_recovery(&a, p).is_err(),
+        "reconciliation cannot steal the coding lease"
+    );
+    assert_eq!(
+        fair_candidates(&c, &db.runs().unwrap(), 0, &Default::default())[0].id,
+        b.id
+    );
+    drop(db);
+    let db = Store::open(&c.orchestrator.state_db).unwrap();
+    assert_eq!(db.get(&a.id).unwrap().state, State::WaitingCi);
+    assert_eq!(db.get(&b.id).unwrap().state, State::Running);
 }
 #[test]
 fn backoff_is_bounded_and_configuration_identity_cannot_drift() {
