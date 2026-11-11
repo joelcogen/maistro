@@ -304,3 +304,9 @@ protected upstream changes, clean merges and ordinary non-force pushes. A full
 pipeline test proves repair with automatic merging disabled, fresh tests and
 review, CI tied to the new head, reuse of the same PR and repeat reconciliation
 without another attempt. Production automatic merging remains disabled.
+
+Installed the checksum-verified release and restarted the service; it is active
+with zero restarts and automatic merging disabled. The previous Cleanup doc run
+had already been cancelled by a board scan at 12:56 UTC, before this restart,
+so it was not revived. Live GitHub conflict repair is not claimed; its complete
+flow was verified with real disposable Git repositories and fixture agents/API.
