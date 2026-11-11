@@ -221,6 +221,37 @@ PRAGMA user_version=1;")?;
         )?;
         tx.execute("DELETE FROM stories WHERE project_id=?", [&scan.project_id])?;
         for s in &scan.stories {
+            // Arm retries only after observing a non-Ready board status while
+            // the matching run is terminal. A Ready card surviving a failed
+            // projection (or the first scan after startup) is not a new request.
+            let terminal: Option<String> = tx.query_row(
+                "SELECT data FROM runs WHERE project_id=? AND story_id=? AND revision=? AND state IN ('blocked','failed','cancelled')",
+                params![scan.project_id, s.story_id, s.revision()], |row| row.get(0),
+            ).optional()?;
+            if let Some(data) = terminal {
+                let run: Run = serde_json::from_str(&data)?;
+                let armed = format!("board_retry_armed:{}", run.id);
+                let request = format!("board_retry:{}", run.id);
+                if s.status == Status::Ready {
+                    let pending_ready: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM outbox WHERE project_id=? AND story_id=? AND json_extract(payload,'$.status')='ready')",
+                        params![scan.project_id, s.story_id], |row| row.get(0),
+                    )?;
+                    if control_tx(&tx, &armed)?.is_some() && !pending_ready {
+                        tx.execute(
+                            "INSERT OR REPLACE INTO controls VALUES(?, 'true')",
+                            [&request],
+                        )?;
+                    }
+                    tx.execute("DELETE FROM controls WHERE key=?", [&armed])?;
+                } else {
+                    tx.execute("DELETE FROM controls WHERE key=?", [&request])?;
+                    tx.execute(
+                        "INSERT OR REPLACE INTO controls VALUES(?, 'true')",
+                        [&armed],
+                    )?;
+                }
+            }
             tx.execute(
                 "INSERT INTO stories VALUES(?,?,?,?,?)",
                 params![
@@ -412,11 +443,17 @@ PRAGMA user_version=1;")?;
             "state conflict"
         );
         event(&tx, &r.id, r.state.as_str(), message)?;
-        if r.state == State::Cancelled {
+        if r.state == State::Cancelled || r.state == State::Queued {
             // Stop execution internally without changing the user's board status.
             tx.execute(
                 "DELETE FROM outbox WHERE project_id=? AND story_id=?",
                 params![r.project_id, r.story.story_id],
+            )?;
+        }
+        if r.state == State::Queued {
+            tx.execute(
+                "DELETE FROM controls WHERE key=?",
+                [format!("board_retry_armed:{}", r.id)],
             )?;
         }
         if r.state != expected {

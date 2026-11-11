@@ -65,7 +65,9 @@ fn process_retries(
     poll_errors: &HashMap<String, u32>,
 ) -> Result<()> {
     for mut r in store.runs()? {
-        if store.control(&format!("retry:{}", r.id))?.is_some()
+        let board_request = format!("board_retry:{}", r.id);
+        let from_board = store.control(&board_request)?.is_some();
+        if (store.control(&format!("retry:{}", r.id))?.is_some() || from_board)
             && !active.contains_key(&r.id)
             && scanned.contains(&r.project_id)
             && !poll_errors.contains_key(&r.project_id)
@@ -77,18 +79,37 @@ fn process_retries(
                 s.story_id == r.story.story_id
                     && s.status == crate::model::Status::Ready
                     && s.revision() == r.revision
+                    && (!from_board
+                        || (s.decision == crate::model::Decision::Implement
+                            && !s.acceptance_criteria.is_empty()
+                            && !s.title.trim().is_empty()
+                            && s.dependencies.iter().all(|id| {
+                                scan.stories.iter().any(|d| {
+                                    &d.story_id == id && d.status == crate::model::Status::Done
+                                })
+                            })))
             });
             if authorized && matches!(r.state, State::Blocked | State::Failed | State::Cancelled) {
                 r.attempt = 0;
                 r.failures = 0;
                 r.retry_after = 0;
                 r.worker_inflight = false;
-                store.transition(&mut r, State::Queued, "Explicit operator retry")?;
+                r.agent_activity = None;
+                store.transition(
+                    &mut r,
+                    State::Queued,
+                    if from_board {
+                        "Board moved back to Ready; retry authorized"
+                    } else {
+                        "Explicit operator retry"
+                    },
+                )?;
                 store.clear_control(&format!("cancel:{}", r.id))?;
             } else {
                 tracing::warn!(run=%r.id,"retry requires unchanged Ready story and terminal run");
             }
             store.clear_control(&format!("retry:{}", r.id))?;
+            store.clear_control(&board_request)?;
         }
     }
     Ok(())
@@ -503,6 +524,62 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn board_ready_transition_retries_once_and_preserves_work() {
+        use crate::{fixtures, model::Status, store::Store};
+        let temp = tempfile::tempdir().unwrap();
+        let config = fixtures::config(temp.path());
+        let p = &config.projects[0];
+        let db = Store::open(&config.orchestrator.state_db).unwrap();
+        db.sync_config(&config).unwrap();
+        let mut scan = fixtures::scan(p, vec![fixtures::story(Status::Ready)]);
+        db.ingest(p, &scan, &config.orchestrator.worktree_root)
+            .unwrap();
+        let mut run = db.runs().unwrap().remove(0);
+        run.pr = Some(42);
+        run.pr_url = Some("https://github.com/example/repo/pull/42".into());
+        run.attempt = 3;
+        run.failures = 3;
+        db.transition(&mut run, State::Blocked, "push failed")
+            .unwrap();
+        let scanned = HashSet::from([p.id.clone()]);
+        let process =
+            |db: &Store| process_retries(db, &HashMap::new(), &scanned, &HashMap::new()).unwrap();
+        // A stale Ready card must not reset exhausted budgets.
+        db.record_scan(&scan).unwrap();
+        process(&db);
+        assert_eq!(db.get(&run.id).unwrap().state, State::Blocked);
+        scan.stories[0].status = Status::Blocked;
+        db.record_scan(&scan).unwrap();
+        // The observed transition survives a daemon restart.
+        drop(db);
+        let db = Store::open(&config.orchestrator.state_db).unwrap();
+        scan.stories[0].status = Status::Ready;
+        db.record_scan(&scan).unwrap();
+        process(&db);
+        let retried = db.get(&run.id).unwrap();
+        assert_eq!(retried.state, State::Queued);
+        assert_eq!(retried.pr, Some(42));
+        assert_eq!(retried.branch, run.branch);
+        assert_eq!(retried.worktree, run.worktree);
+        assert_eq!((retried.attempt, retried.failures), (0, 0));
+        assert!(db.pending().unwrap().is_empty());
+        assert_eq!(db.runs().unwrap().len(), 1);
+        let mut failed_again = retried;
+        db.transition(&mut failed_again, State::Cancelled, "requirements changed")
+            .unwrap();
+        db.record_scan(&scan).unwrap();
+        process(&db);
+        assert_eq!(db.get(&run.id).unwrap().state, State::Cancelled);
+        scan.stories[0].status = Status::Review;
+        db.record_scan(&scan).unwrap();
+        process(&db);
+        assert_eq!(db.get(&run.id).unwrap().state, State::Cancelled);
+        scan.stories[0].status = Status::Ready;
+        db.record_scan(&scan).unwrap();
+        process(&db);
+        assert_eq!(db.get(&run.id).unwrap().state, State::Queued);
+    }
     use super::*;
     use crate::{
         model::{Decision, Scan, Status, Story},

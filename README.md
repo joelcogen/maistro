@@ -385,3 +385,12 @@ and logs remain.
 
 See [implementation progress and limitations](IMPLEMENTATION_PROGRESS.md) for
 isolation, recovery, test coverage and integration gaps.
+
+A blocked, failed, or cancelled run can be retried from the board: let Maistro
+observe the card in a non-Ready state, then move it to Ready. With unchanged
+requirements, a successful fresh scan resets retry budgets and reuses the same
+run, branch, worktree, and PR. Readiness and dependency checks still apply.
+Completed runs are not reopened, and In Progress/Review alone do not restart
+terminal runs. A card that remains Ready across failure or restart is not a new
+retry request. This avoids retry loops when board updates are delayed. The
+explicit `maistro retry <run-id>` command remains available for such cards.
