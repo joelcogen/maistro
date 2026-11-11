@@ -18,6 +18,12 @@ Automatic merging is off by default. Setup and CLI usage are in the
   MCP. Referenced documents are included in the worker context and revision hash.
   Missing or inconsistent reads stop work. Progress fields don't change the
   requirements revision, and reference pages can't authorize additional tasks.
+- Board cancellation belongs to the user. Internal cancellation stops a run
+  without projecting Cancelled or leaving a stale status update queued. The MCP
+  write guard rejects cancellation projections, and startup discards legacy
+  cancellation writes. Rust reads status from the configured source Status cell;
+  coordinator prose, comments and execution metadata cannot override it. Unknown
+  or inconsistent source statuses fail closed.
 - Workers receive one assigned worktree. Rust runs configured checks and gives
   failed commands and bounded stdout/stderr to the worker for repair. A fresh
   reviewer examines the result. Tests and approval must match the current commit;
@@ -73,6 +79,11 @@ The tests use disposable repositories and SQLite databases. Pipeline fixtures ru
 the production engine with controlled model and GitHub responses; they don't prove
 that a live service or account is configured correctly.
 
+The user-owned cancellation change passed all 55 tests, including host isolation
+fixtures, plus formatting, strict all-target Clippy and debug/release builds.
+Regressions cover authoritative status labels, cancellation without a board
+write, rejection of cancellation writes and removal of legacy queued updates.
+
 | Coverage | Tests |
 | --- | --- |
 | Configuration, source revisions, referenced pages and process supervision | [m1](tests/m1.rs), [source](src/source.rs) |
@@ -110,11 +121,17 @@ and is separate from the fixture suite.
 - Board reads and GitHub writes don't share a transaction. Revision and
   authorization checks reduce stale-work risk, but cancellation can't undo a merge
   GitHub has already accepted.
-- Earlier implementation notes recorded live board reads, guarded status/comment
-  writes and an isolated coding probe. They don't establish a complete live
-  story-to-merge run. Live conflict repair, automatic merging and the hosted CI
-  result after the compiler-fixture fix still need confirmation. Fixture coverage
-  alone doesn't close these gaps.
+- Live checks confirmed board reads, guarded status/comment writes and an
+  isolated coding probe. A clean base update also passed fresh tests and review
+  and reached the existing PR without another coding attempt. A manually merged
+  PR was verified on the base branch and its story moved to Done automatically.
+  These observations don't verify unattended automatic merging. Live conflict
+  repair and the hosted CI result after the compiler-fixture fix still need
+  confirmation. Fixture coverage alone doesn't close these gaps.
+- Existing runs can retain attempts consumed by the earlier clean-update bug.
+  One affected run was restored with its worktree and PR intact, then explicitly
+  retried with a fresh bounded budget after a later base update caused a real
+  conflict. That retry wasn't evidence of successful conflict repair.
 - Deployment, a web dashboard, notifications, monetary accounting and atomic
   changes across repositories aren't implemented. Work is serialized within a
   repository; concurrency is across independent projects.

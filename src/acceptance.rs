@@ -31,7 +31,7 @@ def emit_sources(scan):
   print(json.dumps({'type':'item.completed','item':{'type':'mcp_tool_call','status':'completed','tool':tool,'arguments':args,'result':{'content':[{'type':'text','text':json.dumps(value)}]}}}))
  for story in scan['stories']:
   args={'workspace_id':scan['workspace_id'],'database_id':scan['board_id'],'with_doc':True}
-  emit('get_database_row_details',args,{'id':story['story_id'],'cells':{'Title':story['title'],'Acceptance criteria':'\n'.join(story['acceptance_criteria'])},'has_doc':True,'doc':story['description']})
+  emit('get_database_row_details',args,{'id':story['story_id'],'cells':{'Title':story['title'],'Status':{'backlog':'Backlog','ready':'Ready','in_progress':'In Progress','review':'Review','done':'Done','blocked':'Blocked','cancelled':'Cancelled'}[story['status']],'Acceptance criteria':'\n'.join(story['acceptance_criteria'])},'has_doc':True,'doc':story['description']})
   emit('list_comments',{'workspace_id':scan['workspace_id'],'target_type':'row','target_id':story['story_id']},{'comments':[],'has_more':False})
 "#;
 fn fake_codex(path: &Path, scan: &crate::model::Scan, fail: &Path) {

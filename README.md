@@ -263,6 +263,8 @@ reload a running daemon; use `reload` separately. `--json` does not change edito
 
 Pause lets active local work and review finish, but holds new jobs and merges.
 Cancellation stops local work; it can't undo a merge GitHub has already accepted.
+The board's Cancelled status belongs to the user. Maistro never writes it:
+stopping an internal run, including through the CLI, leaves the board status alone.
 Changed requirements or revoked authorization prevent stale work from merging.
 
 Retry requires the same requirements revision and Ready status. Use the run ID
