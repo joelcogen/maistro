@@ -394,3 +394,9 @@ Completed runs are not reopened, and In Progress/Review alone do not restart
 terminal runs. A card that remains Ready across failure or restart is not a new
 retry request. This avoids retry loops when board updates are delayed. The
 explicit `maistro retry <run-id>` command remains available for such cards.
+
+Git push failures include Git's stderr/stdout in the saved run error and daemon
+logs, so permission errors and rejected branches can be diagnosed. The configured
+GitHub token, its URL-encoded and Basic-auth forms, and authorization headers are
+redacted before output is limited to 4096 characters. Previously discarded push
+output cannot be recovered; details are captured on the next failed attempt.

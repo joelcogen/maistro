@@ -100,7 +100,8 @@ impl Github {
                 "GIT_CONFIG_VALUE_0",
                 format!("Authorization: Basic {basic}"),
             );
-        // Do not include stderr: a credential helper or remote may echo secrets.
+        // Capture diagnostics, but redact credentials before they reach logs,
+        // persisted run errors, or board updates.
         let o = crate::process::run(
             c,
             "",
@@ -109,7 +110,11 @@ impl Github {
             None,
         )
         .await?;
-        ensure!(o.code == 0, "Git push failed (exit {})", o.code);
+        if o.code != 0 {
+            let details = push_diagnostics(&o.stderr, &o.stdout, &self.token);
+            tracing::warn!(run=%r.id, project=%p.id, exit_code=o.code, error=%details, "Git push failed");
+            anyhow::bail!("Git push failed (exit {}): {}", o.code, details);
+        }
         Ok(())
     }
     pub async fn find_pr(
@@ -154,6 +159,61 @@ impl Github {
         )
         .await
     }
+}
+
+fn push_diagnostics(stderr: &str, stdout: &str, token: &str) -> String {
+    use base64::Engine;
+    let basic = base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+    let encoded_token = base64::engine::general_purpose::STANDARD.encode(token);
+    let percent_encode = |value: &str, lowercase: bool| -> String {
+        value
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+                    char::from(byte).to_string()
+                } else if lowercase {
+                    format!("%{byte:02x}")
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect()
+    };
+    let mut text = format!("{stderr}\n{stdout}");
+    // Redact before truncation, including URL and HTTP Basic representations.
+    for secret in [
+        percent_encode(&basic, false),
+        percent_encode(&basic, true),
+        basic,
+        encoded_token,
+        percent_encode(token, false),
+        percent_encode(token, true),
+        token.to_owned(),
+    ] {
+        if !secret.is_empty() {
+            text = text.replace(&secret, "[REDACTED]");
+        }
+    }
+    let text = text
+        .lines()
+        .map(|line| {
+            if line.to_ascii_lowercase().contains("authorization:") {
+                "[REDACTED authorization header]"
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = text.trim();
+    if text.is_empty() {
+        return "Git returned no diagnostic output".into();
+    }
+    let mut bounded: String = text.chars().take(4096).collect();
+    if text.chars().count() > 4096 {
+        bounded.push_str("\n[output truncated]");
+    }
+    bounded
 }
 
 impl Github {
@@ -331,6 +391,40 @@ impl Github {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn push_diagnostics_keep_rejection_reason_and_redact_credentials() {
+        use base64::Engine;
+        let token = "fixture+secret/token=";
+        let basic =
+            base64::engine::general_purpose::STANDARD.encode(format!("x-access-token:{token}"));
+        let stderr = format!(
+            "remote: Permission denied\nfatal: https://x-access-token:{token}@github.com/repo\nAuthorization: Basic {basic}\nencoded=fixture%2Bsecret%2Ftoken%3D\nencoded=fixture%2bsecret%2ftoken%3d"
+        );
+        let result = super::push_diagnostics(&stderr, &format!("credential={basic}"), token);
+        assert!(result.contains("remote: Permission denied"));
+        assert!(result.contains("[REDACTED]"));
+        for secret in [
+            token,
+            basic.as_str(),
+            "fixture%2Bsecret%2Ftoken%3D",
+            "fixture%2bsecret%2ftoken%3d",
+        ] {
+            assert!(!result.contains(secret));
+        }
+        assert!(
+            super::push_diagnostics("", "! [rejected] non-fast-forward", token)
+                .contains("non-fast-forward")
+        );
+        assert!(super::push_diagnostics("", "", token).contains("no diagnostic output"));
+    }
+
+    #[test]
+    fn push_diagnostics_redact_before_truncating_and_handle_unicode() {
+        let input = format!("{}secret-at-boundary", "é".repeat(4090));
+        let result = super::push_diagnostics(&input, "", "secret-at-boundary");
+        assert!(!result.contains("secret"));
+        assert!(result.ends_with("[output truncated]"));
+    }
     use super::*;
     use crate::{fixtures, model::Status, store::Store, test_support::Server};
     use serde_json::json;
