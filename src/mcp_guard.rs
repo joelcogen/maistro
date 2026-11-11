@@ -179,20 +179,23 @@ fn find_option(v: &Value, label: &str) -> Option<String> {
         _ => None,
     }
 }
-async fn send(w: &mut (impl tokio::io::AsyncWrite + Unpin), v: &Value) -> Result<()> {
+pub(crate) async fn send(w: &mut (impl tokio::io::AsyncWrite + Unpin), v: &Value) -> Result<()> {
     w.write_all(v.to_string().as_bytes()).await?;
     w.write_all(b"\n").await?;
     w.flush().await?;
     Ok(())
 }
-pub async fn serve(path: &Path) -> Result<()> {
-    let scope: Scope = serde_json::from_slice(&std::fs::read(path)?)?;
+pub(crate) fn server_command(agents: &Agents) -> Result<Command> {
     let cfg: toml::Value = toml::from_str(&std::fs::read_to_string(
-        scope.agents.codex_home.join("config.toml"),
+        agents.codex_home.join("config.toml"),
     )?)?;
-    let server = &cfg["mcp_servers"][&scope.agents.mcp_server];
-    let executable = server["command"]
-        .as_str()
+    let server = cfg
+        .get("mcp_servers")
+        .and_then(|v| v.get(&agents.mcp_server))
+        .context("configured AppFlowy MCP server missing")?;
+    let executable = server
+        .get("command")
+        .and_then(toml::Value::as_str)
         .context("guard currently requires the configured stdio MCP transport")?;
     let mut c = Command::new(executable);
     if let Some(a) = server.get("args").and_then(toml::Value::as_array) {
@@ -212,7 +215,11 @@ pub async fn serve(path: &Path) -> Result<()> {
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
-    let mut child = c.spawn()?;
+    Ok(c)
+}
+pub async fn serve(path: &Path) -> Result<()> {
+    let scope: Scope = serde_json::from_slice(&std::fs::read(path)?)?;
+    let mut child = server_command(&scope.agents)?.spawn()?;
     let mut target = child.stdin.take().unwrap();
     let mut server_lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let mut client_lines = BufReader::new(tokio::io::stdin()).lines();

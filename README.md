@@ -115,6 +115,40 @@ token, update this file and restart the service so it picks up the new value.
 
 ## Prepare the board and CI
 
+To create a new board inside an AppFlowy page, run:
+
+```sh
+maistro -c ~/.config/maistro/config.toml create-board 'https://appflowy.com/app/WORKSPACE_ID/PAGE_ID'
+```
+
+This explicitly authorizes creation of a child database named `Board`, grouped by
+its `Status` select field. It uses the configured coordinator and AppFlowy MCP
+server, through a setup guard that permits one creation under the supplied page and
+subsequent writes only to the newly returned database/view IDs. Daemon scans and
+projection permissions are unchanged. Setup requires the stdio MCP transport. The installed MCP must expose `create_database` and field editing
+and reading tools. The command uses only agent settings, so it can run before
+adding a project; a missing configuration file uses the default agent settings.
+It prints the new board URL, or workspace, database and view IDs with `--json`.
+Success requires a creation receipt and a final field read confirming these options:
+
+| Status | Color |
+| --- | --- |
+| Backlog | iron |
+| Ready | azure |
+| In progress | Mango |
+| Review | mauve |
+| Done | jade |
+| Blocked | camelia |
+| Cancelled | iron |
+
+Each invocation creates a new board. If setup fails, it exits unsuccessfully and
+retains private diagnostic logs at the path in the error. Inspect the parent page
+before retrying: creation may have succeeded before a later step failed. The
+command does not delete partial boards or register a project automatically.
+When configuring a project for this board, set `in_progress = "In progress"` in
+its `[projects.statuses]` table to match the created label exactly.
+
+
 Use these board statuses: Backlog, Ready, In Progress, Review, Done, Blocked and
 Cancelled. The `Status` select field must match `projects.statuses`. You can map
 Ready to an existing label such as To Do.
@@ -218,6 +252,7 @@ current directory. The systemd unit explicitly uses `~/.config/maistro/config.to
 | `projects` | Show configured projects |
 | `status` | Show runs, errors and pending updates |
 | `config` | Open the selected config file in `$EDITOR` |
+| `create-board PAGE_URL` | Create a child Board with the seven workflow states and colors |
 | `project add` | Add a project interactively and validate it |
 | `project pause ID` / `project resume ID` | Pause or resume one project |
 | `pause` / `resume` | Pause or resume all projects |

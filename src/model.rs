@@ -155,6 +155,9 @@ pub struct ProjectionResult {
     pub applied: bool,
 }
 pub fn schema(name: &str) -> serde_json::Value {
+    if name == "board" {
+        return crate::board::schema();
+    }
     serde_json::from_str(match name {
         "scan" => include_str!("../schemas/scan.json"),
         "report" => include_str!("../schemas/report.json"),

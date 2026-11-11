@@ -30,6 +30,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Action {
     #[command(hide = true)]
+    InternalBoardMcp {
+        #[arg(long)]
+        scope: PathBuf,
+    },
+    #[command(hide = true)]
     InternalBridge {
         #[arg(long)]
         socket: PathBuf,
@@ -41,6 +46,8 @@ enum Action {
         #[arg(long)]
         scope: PathBuf,
     },
+    /// Create a Board with the seven workflow states inside an AppFlowy page.
+    CreateBoard { page_url: String },
     /// Run the daemon; --once performs one reconciliation cycle.
     Run {
         #[arg(long)]
@@ -92,12 +99,27 @@ async fn main() -> Result<()> {
     } else {
         logging.with_ansi(false).init();
     }
+    if let Action::CreateBoard { page_url } = &cli.command {
+        let board = maistro::board::create(&cli.config, page_url).await?;
+        if cli.json {
+            println!("{}", serde_json::to_string_pretty(&board)?);
+        } else {
+            println!(
+                "Created Board: https://appflowy.com/app/{}/{}",
+                board.workspace_id, board.view_id
+            );
+        }
+        return Ok(());
+    }
     if matches!(cli.command, Action::Config) {
         return edit_config(&cli.config);
     }
     if let Action::InternalBridge { socket, command } = &cli.command {
         let code = maistro::network::bridge(socket, command).await?;
         std::process::exit(code);
+    }
+    if let Action::InternalBoardMcp { scope } = &cli.command {
+        return maistro::board_guard::serve(scope).await;
     }
     if let Action::InternalMcp { scope } = &cli.command {
         return maistro::mcp_guard::serve(scope).await;
