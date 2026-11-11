@@ -234,3 +234,12 @@ and Rust's authorization, verification and merge gates are unchanged.
 Updated the README to describe this policy. Formatting, strict Clippy, debug and
 release builds and all 45 existing tests passed. Live reclassification of Nicer
 CLI will be checked after installing the build; automatic merging remains off.
+
+Installed the checksum-verified release and restarted the daemon between coding
+worker invocations. A fresh live Luna scan returned `decision=implement` for the
+unchanged Nicer CLI story: its intended behavior is understandable and ordinary
+design choices are delegated. Restored Ready and used the CLI to retry the
+existing blocked run after verifying identical requirements. SQLite confirms it
+is queued. The service is active with zero restarts and `auto_merge = false`.
+During shutdown, an aborted poll was logged as a task panic; the service restarted
+successfully, but graceful-shutdown reporting needs a separate correction.
