@@ -211,3 +211,13 @@ The installer run hit its retry limit during diagnosis and will be retried after
 restoring its original Ready authorization. Its history is preserved. The SSH
 agent refresh is session-dependent; unattended operation needs a durable agent
 or another configured Git credential mechanism.
+
+Final live verification: release compilation passed and the installed binary was
+checksum-verified. The fresh canonical scan matched the installer's original
+requirements exactly, so the existing blocked run was retried through the CLI.
+Git fetched successfully, the isolated worktree was prepared at base
+`00e74f0540a6b533ac151091c00456dbb33ef2cc`, and the worker emitted completed command
+events. The service is active with zero restarts and the projection outbox is
+empty. AppFlowy shows Install script In Progress, with Nicer CLI and Cleanup doc
+Blocked for their recorded clarification requests. `auto_merge = false` was
+rechecked. Story completion, real PR CI and merging are not claimed by this check.
