@@ -60,8 +60,12 @@ enum Action {
     Config,
     /// Print configured projects.
     Projects,
-    /// Print durable execution state and diagnostics.
+    /// Print durable execution state, diagnostics, and systemd service status.
     Status,
+    /// Start the systemd user service.
+    Start,
+    /// Stop the systemd user service.
+    Stop,
     /// Project configuration and dispatch controls.
     Project {
         #[command(subcommand)]
@@ -139,6 +143,12 @@ async fn main() -> Result<()> {
     if let Action::InternalMcp { scope } = &cli.command {
         return maistro::mcp_guard::serve(scope).await;
     }
+    if matches!(&cli.command, Action::Start) {
+        return control_service("start", cli.json);
+    }
+    if matches!(&cli.command, Action::Stop) {
+        return control_service("stop", cli.json);
+    }
     if matches!(
         cli.command,
         Action::Project {
@@ -181,10 +191,14 @@ async fn main() -> Result<()> {
             match other {
                 Action::Status => {
                     let diagnostics = store.diagnostics()?;
+                    let service = service_status();
                     if cli.json {
-                        println!("{}", serde_json::to_string_pretty(&diagnostics)?);
+                        let mut status = diagnostics;
+                        status["systemd_service"] = service;
+                        println!("{}", serde_json::to_string_pretty(&status)?);
                     } else {
                         print_status(&diagnostics);
+                        print_service_status(&service);
                     }
                 }
                 Action::Pause => store.set_control("paused", "true")?,
@@ -217,6 +231,76 @@ async fn main() -> Result<()> {
                 println!("{message}");
             }
         }
+    }
+    Ok(())
+}
+
+fn systemctl(args: &[&str]) -> Result<std::process::Output> {
+    std::process::Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .output()
+        .context("failed to run systemctl; is systemd available?")
+}
+
+fn service_status() -> serde_json::Value {
+    let output = match systemctl(&[
+        "show",
+        "maistro.service",
+        "--property=LoadState",
+        "--property=ActiveState",
+        "--property=SubState",
+        "--no-pager",
+    ]) {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            return serde_json::json!({
+                "state": "unknown",
+                "detail": String::from_utf8_lossy(&output.stderr).trim()
+            });
+        }
+        Err(error) => return serde_json::json!({"state": "unknown", "detail": error.to_string()}),
+    };
+    let properties = String::from_utf8_lossy(&output.stdout);
+    let property = |name: &str| {
+        properties
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{name}=")))
+            .unwrap_or("unknown")
+    };
+    serde_json::json!({
+        "state": property("ActiveState"),
+        "sub_state": property("SubState"),
+        "load_state": property("LoadState"),
+    })
+}
+
+fn print_service_status(service: &serde_json::Value) {
+    let state = service["state"].as_str().unwrap_or("unknown");
+    let sub_state = service["sub_state"].as_str().unwrap_or("");
+    if sub_state.is_empty() {
+        println!("Systemd service: {state}");
+    } else {
+        println!("Systemd service: {state} ({sub_state})");
+    }
+    if let Some(detail) = service["detail"].as_str() {
+        if !detail.is_empty() {
+            println!("  {detail}");
+        }
+    }
+}
+
+fn control_service(action: &str, json: bool) -> Result<()> {
+    let output = systemctl(&[action, "maistro.service"])?;
+    ensure!(
+        output.status.success(),
+        "systemctl --user {action} maistro.service failed: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    if json {
+        println!("{{}}");
+    } else {
+        println!("Systemd service {action} requested.");
     }
     Ok(())
 }
