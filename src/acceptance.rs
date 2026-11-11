@@ -469,12 +469,28 @@ async fn reviewer_rejection_exhausts_pipeline_budget() {
 #[tokio::test]
 #[ignore = "requires host namespaces; real conflicting Git branches, fixture model and GitHub"]
 async fn manual_merge_mode_repairs_conflicts_and_rechecks_the_same_pr() {
+    base_update_pipeline(true, 0).await;
+}
+
+#[tokio::test]
+#[ignore = "requires host namespaces; clean base updates at the repair limit and crash recovery"]
+async fn clean_base_updates_do_not_consume_repairs() {
+    for crash in 0..=2 {
+        base_update_pipeline(false, crash).await;
+    }
+}
+
+async fn base_update_pipeline(conflict: bool, crash: u8) {
     let t = tempfile::tempdir().unwrap();
     let mut config = fixtures::config(t.path());
     config.projects.truncate(1);
     config.github.auto_merge = false;
     config.projects[0].test_commands = vec![vec!["python3".into(), "-c".into(),
         r#"from pathlib import Path; assert Path('feature.txt').read_text() == 'implemented\nupstream\n'"#.into()]];
+    if !conflict {
+        config.projects[0].test_commands = vec![vec!["python3".into(), "-c".into(),
+            r#"from pathlib import Path; assert Path('feature.txt').read_text() == 'implemented\n'; assert Path('upstream.txt').read_text() == 'upstream\n'"#.into()]];
+    }
     let p = config.projects[0].clone();
     let commit = |repo: &Path, message: &str| {
         git(repo, &["add", "--all"]);
@@ -534,6 +550,11 @@ async fn manual_merge_mode_repairs_conflicts_and_rechecks_the_same_pr() {
     std::fs::write(run.worktree.join("feature.txt"), "implemented\n").unwrap();
     crate::git::commit(&mut run).await.unwrap();
     let old_head = run.head_sha.clone().unwrap();
+    if !conflict {
+        run.attempt = config.orchestrator.max_attempts;
+    }
+    let expected_attempt = run.attempt + u32::from(conflict);
+    let expected_sessions = if conflict { 4 } else { 3 };
     git(&run.worktree, &["push", "origin", &run.branch]);
     run.pr = Some(1);
     run.pr_url = Some("https://github.com/owner/a/pull/1".into());
@@ -551,10 +572,36 @@ async fn manual_merge_mode_repairs_conflicts_and_rechecks_the_same_pr() {
     store
         .transition(&mut run, State::WaitingCi, "existing PR")
         .unwrap();
-    std::fs::write(p.repo.join("feature.txt"), "upstream\n").unwrap();
-    commit(&p.repo, "advance base with conflict");
+    std::fs::write(
+        p.repo.join(if conflict {
+            "feature.txt"
+        } else {
+            "upstream.txt"
+        }),
+        "upstream\n",
+    )
+    .unwrap();
+    commit(&p.repo, "advance base");
     git(&p.repo, &["push", "origin", "main"]);
     let new_base = git(&p.repo, &["rev-parse", "HEAD"]);
+    if crash != 0 {
+        assert_eq!(
+            crate::git::update_base(&p, &mut run).await.unwrap(),
+            crate::git::BaseUpdate::Updated { conflicts: vec![] }
+        );
+        store
+            .transition(
+                &mut run,
+                State::Reviewing,
+                "clean update before interruption",
+            )
+            .unwrap();
+        if crash == 2 {
+            // Git commit completed, but its head was not yet saved in SQLite.
+            crate::git::commit(&mut run).await.unwrap();
+        }
+        run = store.get(&run.id).unwrap();
+    }
     let remote_api = remote.clone();
     let branch = run.branch.clone();
     let id = run.id.clone();
@@ -591,8 +638,8 @@ async fn manual_merge_mode_repairs_conflicts_and_rechecks_the_same_pr() {
             assert_eq!(persisted.review.as_ref().unwrap().head_sha, head);
             assert_eq!(
                 persisted.agent_sessions.len(),
-                4,
-                "new worker and independent review required"
+                expected_sessions,
+                "only conflicts require a new worker; every update needs independent review"
             );
             checked_api.lock().unwrap().push(head.clone());
             return (
@@ -624,7 +671,7 @@ async fn manual_merge_mode_repairs_conflicts_and_rechecks_the_same_pr() {
         "{:?}",
         repaired.last_error
     );
-    assert_eq!(repaired.attempt, 2);
+    assert_eq!(repaired.attempt, expected_attempt);
     assert_eq!(repaired.pr, Some(1));
     assert_eq!(repaired.base_sha.as_ref(), Some(&new_base));
     assert_ne!(repaired.head_sha.as_ref(), Some(&old_head));
@@ -646,6 +693,6 @@ async fn manual_merge_mode_repairs_conflicts_and_rechecks_the_same_pr() {
         )
         .await
         .unwrap();
-    assert_eq!(store.get(&run.id).unwrap().attempt, 2);
+    assert_eq!(store.get(&run.id).unwrap().attempt, expected_attempt);
     assert_eq!(store.get(&run.id).unwrap().head_sha, repaired.head_sha);
 }

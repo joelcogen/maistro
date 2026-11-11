@@ -318,7 +318,7 @@ impl Github {
     pub(crate) fn fixture(url: String) -> Self {
         Self {
             client: Client::builder()
-                // Local fixture requests must not inherit the host's HTTP proxy.
+                // Loopback fixtures must stay local even when the host sets a proxy.
                 .no_proxy()
                 .timeout(std::time::Duration::from_secs(5))
                 .build()
