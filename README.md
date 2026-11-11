@@ -148,7 +148,8 @@ the repository. Other projects need their own check names.
 Keep `github.auto_merge = false` for the first trial. Maistro can open and review
 PRs while you handle merging. When the base branch advances, it updates the PR
 branch and asks the coding agent to resolve text conflicts within the repair
-budget. It reruns local checks and independent review before pushing to the same
+budget. Clean base updates do not consume repair attempts or invoke the coding
+agent. It reruns local checks and independent review before pushing to the same
 PR, then checks CI for the new commit. This also works with automatic merging
 disabled and never uses a force push. Conflicts in protected files or files the
 agent cannot safely edit require human handling.

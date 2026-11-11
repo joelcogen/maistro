@@ -227,26 +227,31 @@ impl Engine {
                             return Ok(());
                         }
                     }
-                    git::verify_uncommitted_paths(p, &r).await?;
-                    if let Err(e) = git::commit(&mut r).await {
-                        if e.downcast_ref::<crate::process::UnconfirmedTermination>()
-                            .is_some()
-                        {
-                            return Err(e);
-                        }
-                        if self.repair(&mut r, &e.to_string())? {
-                            continue;
-                        }
-                        return Ok(());
-                    }
                 }
                 self.store.transition(
                     &mut r,
                     State::Reviewing,
-                    "implementation committed; verification required",
+                    "implementation ready; verification required",
                 )?;
             }
             if r.state == State::Reviewing {
+                git::verify_uncommitted_paths(p, &r).await?;
+                if let Err(e) = git::commit(&mut r).await {
+                    if e.downcast_ref::<crate::process::UnconfirmedTermination>()
+                        .is_some()
+                    {
+                        return Err(e);
+                    }
+                    if self.repair(&mut r, &e.to_string())? {
+                        continue;
+                    }
+                    return Ok(());
+                }
+                self.store.save(
+                    &mut r,
+                    State::Reviewing,
+                    "implementation committed; verification required",
+                )?;
                 git::verify_paths(p, &r).await?;
                 let results =
                     match crate::verification::tests(&self.config, p, &mut r, cancel).await {
@@ -318,6 +323,18 @@ impl Engine {
                                 &format!("Base merge requires human handling: {e}"),
                             )?;
                             return Ok(());
+                        }
+                        if conflicts.is_empty() {
+                            // Persist the review obligation before committing. Recovery
+                            // finishes the merge (or records its already-created head)
+                            // and repeats verification without invoking a coding agent.
+                            r.last_error = None;
+                            self.store.transition(
+                                &mut r,
+                                State::Reviewing,
+                                "Base integrated cleanly; fresh tests and review required",
+                            )?;
+                            continue;
                         }
                         let feedback = format!(
                             "Base branch {} advanced to {}. Rust prepared a merge in /work. Conflicted paths: {}. Resolve each conflict in the working files, preserving the assigned story and upstream changes. Inspect modify/delete conflicts and retain relevant upstream content rather than blindly selecting a whole side. Remove all conflict markers; delete a file only when appropriate for the intended result. Do not run Git: Rust will stage and complete the pending merge, then rerun deterministic tests and fresh independent review before updating the same PR. Automatic merging of the PR remains governed separately by configuration.",

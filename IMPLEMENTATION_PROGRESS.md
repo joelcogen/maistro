@@ -326,3 +326,20 @@ All 49 tests, including host isolation fixtures, passed locally, along with
 formatting, strict all-target Clippy, debug build and release build. A new hosted
 Actions run remains to be verified after pushing this fix. Production code and
 the running daemon are unchanged.
+
+## Clean base updates and repair accounting — 2026-11-11
+
+Install script was falsely blocked after passing tests and review: the conflict
+recovery change routed even a clean base merge through the coding repair budget.
+Repeated base advances exhausted its three attempts despite no conflicted files.
+Clean integrations now transition directly from WaitingCi to Reviewing without
+another coding agent or attempt. The review obligation is persisted before Git
+commit; recovery refreshes the committed head and reruns checks and independent
+review. Real conflicts, failed checks and rejected reviews remain bounded.
+
+All 50 tests passed, including the full host isolation suite. The new pipeline
+regression covers clean integration at the attempt limit and interruptions both
+before the merge commit and after commit but before SQLite records its head.
+Each case requires fresh tests and independent review, updates the existing PR,
+checks its new head in CI and remains idempotent. Formatting, strict all-target
+Clippy and the debug build passed. Automatic merging remains disabled.

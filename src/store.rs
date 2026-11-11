@@ -48,7 +48,7 @@ impl State {
                 )
                 | (
                     WaitingCi,
-                    Running | Merging | Completed | Blocked | Cancelled
+                    Running | Reviewing | Merging | Completed | Blocked | Cancelled
                 )
                 | (Merging, Completed | Blocked)
                 | (Blocked, Queued)
