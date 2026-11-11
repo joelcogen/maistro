@@ -126,10 +126,11 @@ its `Status` select field. It uses the configured coordinator and AppFlowy MCP
 server, through a setup guard that permits one creation under the supplied page and
 subsequent writes only to the newly returned database/view IDs. Daemon scans and
 projection permissions are unchanged. Setup requires the stdio MCP transport. The installed MCP must expose `create_database` and field editing
-and reading tools. The command uses only agent settings, so it can run before
+and reading tools, plus `get_database_view_settings` or `get_database_view`. The command uses only agent settings, so it can run before
 adding a project; a missing configuration file uses the default agent settings.
 It prints the new board URL, or workspace, database and view IDs with `--json`.
-Success requires a creation receipt and a final field read confirming these options:
+Success requires a creation receipt and final reads confirming that Status is a
+single-select field, the created view groups by its field ID, and it has these options:
 
 | Status | Color |
 | --- | --- |

@@ -10,6 +10,8 @@ use serde_json::{Value, json};
 use std::{collections::HashMap, path::Path};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+pub(crate) const READ_TOOLS: &[&str] = &["get_database_view", "get_database_view_settings"];
+
 pub(crate) const WRITE_TOOLS: &[&str] = &[
     "create_database",
     "create_database_field",
@@ -33,7 +35,7 @@ struct Guard {
 }
 impl Guard {
     fn allow(&mut self, name: &str, args: &Value, scope: &Scope) -> Result<()> {
-        if crate::codex::READ_TOOLS.contains(&name) {
+        if crate::codex::READ_TOOLS.contains(&name) || READ_TOOLS.contains(&name) {
             return Ok(());
         }
         ensure!(

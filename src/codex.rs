@@ -145,6 +145,7 @@ impl Codex {
                 let table = s.as_table_mut().context("invalid MCP configuration")?;
                 let mut allowed: Vec<toml::Value> =
                     READ_TOOLS.iter().map(|s| (*s).into()).collect();
+                allowed.extend(crate::board_guard::READ_TOOLS.iter().map(|s| (*s).into()));
                 allowed.extend(crate::board_guard::WRITE_TOOLS.iter().map(|s| (*s).into()));
                 table.insert("enabled_tools".into(), toml::Value::Array(allowed));
                 for key in ["env", "env_vars", "url", "http_headers"] {

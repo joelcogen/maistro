@@ -152,7 +152,7 @@ fn create_board_uses_setup_without_a_project_and_checks_mcp_evidence() {
     let database = uuid::Uuid::new_v4().to_string();
     let view = uuid::Uuid::new_v4().to_string();
     let board = json!({"workspace_id":workspace,"database_id":database,"view_id":view});
-    let fields = json!([{"id":"status","name":"Status","type_option":{"options":[
+    let fields = json!([{"id":"status","name":"Status","field_type":3,"type_option":{"options":[
         {"name":"Backlog","color":"iron"}, {"name":"Ready","color":"azure"},
         {"name":"In progress","color":"Mango"}, {"name":"Review","color":"mauve"},
         {"name":"Done","color":"jade"}, {"name":"Blocked","color":"camelia"},
@@ -160,7 +160,8 @@ fn create_board_uses_setup_without_a_project_and_checks_mcp_evidence() {
     ]}}]);
     let calls = json!([
         {"tool":"create_database","arguments":{"workspace_id":workspace,"parent_view_id":parent,"name":"Board","layout":"Board"},"result":{"content":[{"text":board.to_string()}]}},
-        {"tool":"get_database_fields","arguments":{"workspace_id":workspace,"database_id":database},"result":{"content":[{"text":fields.to_string()}]}}
+        {"tool":"get_database_fields","arguments":{"workspace_id":workspace,"database_id":database},"result":{"content":[{"text":fields.to_string()}]}},
+        {"tool":"get_database_view_settings","arguments":{"workspace_id":workspace,"view_id":view},"result":{"structuredContent":{"group_settings":[{"field_id":"status"}]}}}
     ]);
     std::fs::write(
         root.join("fixture.json"),
