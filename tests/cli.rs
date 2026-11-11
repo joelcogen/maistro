@@ -60,6 +60,27 @@ fn output(root: &Path, args: &[&str]) -> String {
 }
 
 #[test]
+fn status_reads_saved_state_without_applying_changed_configuration() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let mut config = common::config(root);
+    let store = Store::open(&config.orchestrator.state_db).unwrap();
+    store.sync_config(&config).unwrap();
+    let scan = common::scan(&config.projects[0], vec![common::story(Status::Ready)]);
+    store.record_scan(&scan).unwrap();
+    let before = store.diagnostics().unwrap();
+    config.projects[0].base_branch = "different-branch".into();
+    std::fs::write(root.join("config.toml"), toml::to_string(&config).unwrap()).unwrap();
+    assert!(output(root, &["status"]).contains("Projects (2)"));
+    let json: serde_json::Value =
+        serde_json::from_str(&output(root, &["status", "--json"])).unwrap();
+    assert_eq!(json, before);
+    assert!(store.scan(&config.projects[0].id).unwrap().is_some());
+    // The identity protection must still apply to configuration updates.
+    assert!(store.sync_config(&config).is_err());
+}
+
+#[test]
 fn human_output_and_compatible_json_cover_projects_runs_and_controls() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path();

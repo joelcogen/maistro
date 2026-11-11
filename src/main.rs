@@ -160,7 +160,9 @@ async fn main() -> Result<()> {
         Action::Validate => validate(c, cli.json).await?,
         other => {
             let store = Store::open(&c.orchestrator.state_db)?;
-            store.sync_config(&c)?;
+            if !matches!(&other, Action::Status) {
+                store.sync_config(&c)?;
+            }
             let is_retry = matches!(&other, Action::Retry { .. });
             let confirmation = match &other {
                 Action::Pause => Some("Pause requested for all projects.".to_owned()),
