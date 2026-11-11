@@ -31,9 +31,24 @@ jobs:
           persist-credentials: false
 
       - name: Install fixture dependencies
+        timeout-minutes: 6
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap build-essential pkg-config python3
+          # Hosted runners use an Azure mirror that can stall on DNS failures.
+          # Cover both mirror lists and traditional/deb822 source definitions.
+          shopt -s nullglob
+          sources=(/etc/apt/apt-mirrors.txt /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources)
+          for source in "${sources[@]}"; do
+            if [[ -f "$source" ]]; then
+              sudo sed -i 's|azure\.archive\.ubuntu\.com|archive.ubuntu.com|g' "$source"
+            fi
+          done
+
+          # APT retries downloads; outer limits also bound DNS and other stalls.
+          # Failed index refreshes must fail the job rather than use stale indexes.
+          apt_options=(-o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15)
+          sudo timeout --kill-after=10s 120s apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          sudo timeout --kill-after=10s 180s apt-get "${apt_options[@]}" install --yes bubblewrap build-essential pkg-config python3
 
       - name: Install Rust
         run: |
