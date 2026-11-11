@@ -18,6 +18,12 @@ Automatic merging is off by default. Setup and CLI usage are in the
   MCP. Referenced documents are included in the worker context and revision hash.
   Missing or inconsistent reads stop work. Progress fields don't change the
   requirements revision, and reference pages can't authorize additional tasks.
+- Board cancellation belongs to the user. Internal cancellation stops a run
+  without projecting Cancelled or leaving a stale status update queued. The MCP
+  write guard rejects cancellation projections, and startup discards legacy
+  cancellation writes. Rust reads status from the configured source Status cell;
+  coordinator prose, comments and execution metadata cannot override it. Unknown
+  or inconsistent source statuses fail closed.
 - Workers receive one assigned worktree. Rust runs configured checks and gives
   failed commands and bounded stdout/stderr to the worker for repair. A fresh
   reviewer examines the result. Tests and approval must match the current commit;
