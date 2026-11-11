@@ -221,3 +221,16 @@ events. The service is active with zero restarts and the projection outbox is
 empty. AppFlowy shows Install script In Progress, with Nicer CLI and Cleanup doc
 Blocked for their recorded clarification requests. `auto_merge = false` was
 rechecked. Story completion, real PR CI and merging are not claimed by this check.
+
+## Delegated implementation choices — 2026-11-11
+
+Changed Luna's readiness policy to respect the user's delegation of ordinary
+engineering and design choices. Understandable outcomes default to implementation;
+missing examples, exact CLI formatting or an explicit criteria checklist do not
+require clarification. Genuine blockers must explain why repository inspection
+or a reasonable default cannot resolve them. Source requirements remain verbatim,
+and Rust's authorization, verification and merge gates are unchanged.
+
+Updated the README to describe this policy. Formatting, strict Clippy, debug and
+release builds and all 45 existing tests passed. Live reclassification of Nicer
+CLI will be checked after installing the build; automatic merging remains off.

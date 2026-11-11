@@ -117,10 +117,14 @@ Use these board statuses: Backlog, Ready, In Progress, Review, Done, Blocked and
 Cancelled. The `Status` select field must match `projects.statuses`. You can map
 Ready to an existing label such as To Do.
 
-Only Ready authorizes work. Give each story a description and observable
-acceptance criteria. Dependencies refer to row IDs on the same board. Maistro
-waits for them to become Done and explains the wait in a comment. Unclear
-requirements become Blocked.
+Only Ready authorizes work. Describe the outcome you want; observable requirements
+in prose are enough. The agent chooses ordinary implementation and design details
+using repository conventions and reasonable defaults. Examples, mockups and exact
+output formats are optional. Luna blocks a story only when a concrete obstacle
+prevents meaningful progress, and explains why the agent cannot resolve it.
+
+Dependencies refer to row IDs on the same board. Maistro waits for them to become
+Done and explains the wait in a comment.
 
 Optional fields are `Execution ID`, `PR URL`, `Last error` and `Retry count`.
 Maistro fills these in; underscore spellings also work. See the
