@@ -39,6 +39,42 @@ async fn repo_lock(p: &Project) -> Result<Singleton> {
     };
     Singleton::acquire(&path.join("maistro.lock"))
 }
+// Retry requests survive startup and poll failures until current board evidence is available.
+fn process_retries(
+    store: &crate::store::Store,
+    active: &HashMap<String, CancellationToken>,
+    scanned: &HashSet<String>,
+    poll_errors: &HashMap<String, u32>,
+) -> Result<()> {
+    for mut r in store.runs()? {
+        if store.control(&format!("retry:{}", r.id))?.is_some()
+            && !active.contains_key(&r.id)
+            && scanned.contains(&r.project_id)
+            && !poll_errors.contains_key(&r.project_id)
+        {
+            let Some(scan) = store.scan(&r.project_id)? else {
+                continue;
+            };
+            let authorized = scan.stories.iter().any(|s| {
+                s.story_id == r.story.story_id
+                    && s.status == crate::model::Status::Ready
+                    && s.revision() == r.revision
+            });
+            if authorized && matches!(r.state, State::Blocked | State::Failed | State::Cancelled) {
+                r.attempt = 0;
+                r.failures = 0;
+                r.retry_after = 0;
+                r.worker_inflight = false;
+                store.transition(&mut r, State::Queued, "Explicit operator retry")?;
+                store.clear_control(&format!("cancel:{}", r.id))?;
+            } else {
+                tracing::warn!(run=%r.id,"retry requires unchanged Ready story and terminal run");
+            }
+            store.clear_control(&format!("retry:{}", r.id))?;
+        }
+    }
+    Ok(())
+}
 impl Engine {
     pub async fn run_daemon(mut self, path: &Path, once: bool) -> Result<()> {
         let _singleton =
@@ -256,37 +292,7 @@ impl Engine {
                     }
                 }
             }
-            // Retry is an explicit operator action and requires current Ready authorization.
-            for mut r in self.store.runs()? {
-                if self.store.control(&format!("retry:{}", r.id))?.is_some()
-                    && !active.contains_key(&r.id)
-                {
-                    let scan = self
-                        .store
-                        .scan(&r.project_id)?
-                        .context("retry needs a successful board scan")?;
-                    let story = scan
-                        .stories
-                        .iter()
-                        .find(|s| s.story_id == r.story.story_id)
-                        .context("story missing")?;
-                    if story.status == crate::model::Status::Ready
-                        && story.revision() == r.revision
-                        && matches!(r.state, State::Blocked | State::Failed | State::Cancelled)
-                    {
-                        r.attempt = 0;
-                        r.failures = 0;
-                        r.retry_after = 0;
-                        r.worker_inflight = false;
-                        self.store
-                            .transition(&mut r, State::Queued, "Explicit operator retry")?;
-                        self.store.clear_control(&format!("cancel:{}", r.id))?;
-                    } else {
-                        tracing::warn!(run=%r.id,"retry requires unchanged Ready story and terminal run");
-                    }
-                    self.store.clear_control(&format!("retry:{}", r.id))?;
-                }
-            }
+            process_retries(&self.store, &active, &scanned, &poll_errors)?;
             let runs = self.store.runs()?;
             if !self.config.orchestrator.retain_worktrees {
                 for r in runs
@@ -458,5 +464,119 @@ impl Engine {
             tracing::info!(model=%model,"model availability verified");
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        model::{Decision, Scan, Status, Story},
+        store::Store,
+    };
+
+    #[test]
+    fn config_restart_preserves_retry_until_successful_fresh_scan() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("repo")).unwrap();
+        let mut config: Config = toml::from_str(&format!(
+            r#"
+[orchestrator]
+state_db = "{0}/state.db"
+worktree_root = "{0}/worktrees"
+log_root = "{0}/logs"
+[[projects]]
+id = "project"
+name = "Project"
+repo = "{0}/repo"
+appflowy_page = "Board"
+github_repo = "owner/repo"
+"#,
+            root.path().display()
+        ))
+        .unwrap();
+        let db = Store::open(&config.orchestrator.state_db).unwrap();
+        db.sync_startup_config(&config).unwrap();
+        let mut scan = Scan {
+            project_id: "project".into(),
+            workspace_id: "workspace".into(),
+            board_id: "board".into(),
+            view_id: "view".into(),
+            matches: 1,
+            complete: true,
+            fields_readable: true,
+            stories: vec![Story {
+                story_id: "story".into(),
+                title: "Example".into(),
+                description: "Implement".into(),
+                status: Status::Ready,
+                priority: 0,
+                dependencies: vec![],
+                reference_pages: vec![],
+                acceptance_criteria: vec![],
+                decision: Decision::Implement,
+                reason: String::new(),
+            }],
+        };
+        db.ingest(
+            &config.projects[0],
+            &scan,
+            &config.orchestrator.worktree_root,
+        )
+        .unwrap();
+        let mut run = db.runs().unwrap().remove(0);
+        db.transition(&mut run, State::Blocked, "test failure")
+            .unwrap();
+        let retry = format!("retry:{}", run.id);
+        db.set_control(&retry, "true").unwrap();
+        drop(db);
+
+        config.projects[0].required_checks.push("lint".into());
+        let path = root.path().join("config.toml");
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let config = Config::load(&path).unwrap();
+        let db = Store::open(&config.orchestrator.state_db).unwrap();
+        db.sync_startup_config(&config).unwrap();
+        assert!(db.scan("project").unwrap().is_none());
+        let active = HashMap::new();
+        let mut scanned = HashSet::new();
+        let mut errors = HashMap::new();
+        process_retries(&db, &active, &scanned, &errors).unwrap();
+        assert!(db.control(&retry).unwrap().is_some());
+        assert_eq!(db.get(&run.id).unwrap().state, State::Blocked);
+
+        // A completed but failed poll must not consume the request, even with cached data.
+        scanned.insert("project".into());
+        errors.insert("project".into(), 1);
+        db.record_scan(&scan).unwrap();
+        process_retries(&db, &active, &scanned, &errors).unwrap();
+        assert!(db.control(&retry).unwrap().is_some());
+        assert_eq!(db.get(&run.id).unwrap().state, State::Blocked);
+        // A new daemon also must not use a previous session's cached scan.
+        process_retries(&db, &active, &HashSet::new(), &HashMap::new()).unwrap();
+        assert!(db.control(&retry).unwrap().is_some());
+
+        db.ingest(
+            &config.projects[0],
+            &scan,
+            &config.orchestrator.worktree_root,
+        )
+        .unwrap();
+        errors.clear();
+        process_retries(&db, &active, &scanned, &errors).unwrap();
+        assert_eq!(db.get(&run.id).unwrap().state, State::Queued);
+        assert!(db.control(&retry).unwrap().is_none());
+        assert_eq!(db.runs().unwrap().len(), 1);
+
+        // A successful scan with a removed story rejects the retry without stopping the daemon.
+        let mut run = db.get(&run.id).unwrap();
+        db.transition(&mut run, State::Blocked, "test failure")
+            .unwrap();
+        db.set_control(&retry, "true").unwrap();
+        scan.stories.clear();
+        db.record_scan(&scan).unwrap();
+        process_retries(&db, &active, &scanned, &errors).unwrap();
+        assert_eq!(db.get(&run.id).unwrap().state, State::Blocked);
+        assert!(db.control(&retry).unwrap().is_none());
     }
 }

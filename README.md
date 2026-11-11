@@ -38,7 +38,8 @@ Edit `~/.config/maistro/config.toml`. For each project, set:
 
 On startup, `config.toml` takes precedence over saved project settings in SQLite.
 Changed settings replace the saved configuration and invalidate cached scans;
-run history, pending updates and pause controls are preserved. A board, repository
+run history, pending updates and pause controls are preserved. Pending retries wait
+for a successful fresh board scan before their authorization is checked. A board, repository
 or base branch can change under the same project ID only at startup and only if
 that project has no saved runs or pending updates. Otherwise use a new project ID
 so existing work cannot be recovered against a different target.
