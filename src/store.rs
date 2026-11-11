@@ -135,6 +135,13 @@ PRAGMA user_version=1;")?;
         Ok(c)
     }
     pub fn sync_config(&self, c: &Config) -> Result<()> {
+        self.sync_project_config(c, false)
+    }
+    /// Apply file configuration on startup, retaining durable execution state.
+    pub fn sync_startup_config(&self, c: &Config) -> Result<()> {
+        self.sync_project_config(c, true)
+    }
+    fn sync_project_config(&self, c: &Config, startup: bool) -> Result<()> {
         let mut conn = self.conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for p in &c.projects {
@@ -145,14 +152,41 @@ PRAGMA user_version=1;")?;
                 .optional()?;
             if let Some(old) = old {
                 let old: Project = serde_json::from_str(&old)?;
-                ensure!(
-                    old.repo.canonicalize()? == p.repo.canonicalize()?
-                        && old.github_repo == p.github_repo
-                        && old.base_branch == p.base_branch
-                        && old.appflowy_url == p.appflowy_url
-                        && old.appflowy_page == p.appflowy_page,
-                    "project identity cannot change under an existing ID"
-                );
+                let same_repo = old.repo == p.repo
+                    || old
+                        .repo
+                        .canonicalize()
+                        .ok()
+                        .zip(p.repo.canonicalize().ok())
+                        .is_some_and(|(old, new)| old == new);
+                let same_identity = same_repo
+                    && old.github_repo == p.github_repo
+                    && old.base_branch == p.base_branch
+                    && old.appflowy_url == p.appflowy_url
+                    && old.appflowy_page == p.appflowy_page;
+                if !same_identity {
+                    ensure!(
+                        startup,
+                        "project identity cannot change under an existing ID"
+                    );
+                    let has_work: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM runs WHERE project_id=?1) OR EXISTS(SELECT 1 FROM outbox WHERE project_id=?1)",
+                        [&p.id],
+                        |r| r.get(0),
+                    )?;
+                    ensure!(
+                        !has_work,
+                        "{}: project identity has saved work; use a new project ID",
+                        p.id
+                    );
+                }
+                if serde_json::to_value(&old)? != serde_json::to_value(p)? {
+                    tx.execute(
+                        "UPDATE projects SET scan=NULL,last_scan=NULL,board_id=CASE WHEN ? THEN board_id ELSE NULL END WHERE id=?",
+                        params![same_identity, p.id],
+                    )?;
+                    tx.execute("DELETE FROM stories WHERE project_id=?", [&p.id])?;
+                }
             }
             tx.execute("INSERT INTO projects(id,config) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET config=excluded.config",params![p.id,serde_json::to_string(p)?])?;
         }

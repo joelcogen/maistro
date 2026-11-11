@@ -41,7 +41,6 @@ pub struct Engine {
 impl Engine {
     pub fn new(config: Config) -> Result<Self> {
         let store = Store::open(&config.orchestrator.state_db)?;
-        store.sync_config(&config)?;
         Ok(Self {
             codex: Codex::new(config.clone()),
             github: Github::new(&config.github.token_env)?,

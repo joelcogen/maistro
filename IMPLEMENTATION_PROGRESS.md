@@ -63,7 +63,10 @@ local work and review can finish. Cancellation stops local work. Reload drains
 active tasks and preserves project identity; invalid changes leave the previous
 configuration in use.
 
-Restart with the same configuration, database and worktrees. Don't delete the
+Startup applies the current TOML project settings over saved configuration and
+clears changed projects' cached scans. Identity changes require a project without
+saved runs or pending updates; otherwise use a new project ID. Keep the same
+database and worktrees when restarting. Don't delete the
 database to retry a failed job. Keep it on a local filesystem with reliable SQLite
 locking. Use SQLite's online backup API, or stop the service and copy the database,
 WAL and SHM files consistently. Copying only the database during active WAL writes

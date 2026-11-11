@@ -183,6 +183,7 @@ async fn main() -> Result<()> {
 }
 async fn validate(c: Config, json: bool) -> Result<()> {
     let engine = Engine::new(c.clone())?;
+    engine.store.sync_config(&c)?;
     engine.preflight().await?;
     let token = tokio_util::sync::CancellationToken::new();
     for p in c.projects.iter().filter(|p| p.enabled) {
