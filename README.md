@@ -211,14 +211,51 @@ current directory. The systemd unit explicitly uses `~/.config/maistro/config.to
 | --- | --- |
 | `run [--once]` | Poll boards and process authorized work |
 | `validate` | Check setup and read boards |
-| `projects` | Print configured projects as JSON |
-| `status` | Print runs, errors and pending updates as JSON |
+| `projects` | Show configured projects |
+| `status` | Show runs, errors and pending updates |
+| `config` | Open the selected config file in `$EDITOR` |
 | `project add` | Add a project interactively and validate it |
 | `project pause ID` / `project resume ID` | Pause or resume one project |
 | `pause` / `resume` | Pause or resume all projects |
 | `retry RUN_OR_STORY_ID` | Retry a terminal run with a fresh attempt budget |
 | `cancel RUN_OR_STORY_ID` | Stop work and keep the branch and PR for inspection |
 | `reload` | Validate configuration changes after active work drains |
+
+Output is human-readable by default. For example, `maistro projects` shows:
+
+```text
+Projects (1)
+
+demo — Demo (enabled)
+  Repository: /home/alice/demo
+  Board: Demo board
+  GitHub: alice/demo
+  Base branch: main
+```
+
+`status` shows dispatch state, event and pending-update counts, project pause and
+last-scan information, and runs with full IDs, story titles, state, attempts,
+branches, worktrees, PR links and errors. An empty run list says `No runs recorded.`
+Last-scan timestamps are labeled Unix seconds. `validate` prints one success line
+per enabled project, such as `demo: valid (board BOARD_ID, 3 stories)`.
+Control commands confirm recorded changes or requests; a request confirmation does
+not mean the daemon has finished processing it.
+
+For scripts, use `maistro --json projects`, `maistro status --json`, or
+`maistro --json validate`. This preserves the previous projects array, status
+object, and one JSON object per validated project. Control commands remain silent
+in JSON mode. Logs go to stderr (JSON with `--json`, plain text otherwise).
+`project add` remains interactive, with prompts on stderr and a JSON result on
+stdout when `--json` is set. Internal bridge and MCP stdout protocols are unchanged.
+
+Run `EDITOR=nano maistro config` or `EDITOR='code --wait' maistro -c PATH config`.
+The command waits for the editor and reports a failure if it exits unsuccessfully.
+`EDITOR` is required and interpreted as a shell command, supporting arguments and
+quoted executable paths; the config path is passed as a separate literal argument.
+It opens the same path selected by `-c` (default: `./config.toml`) without parsing
+or validating it, allowing broken files to be repaired and missing files to be
+created by the editor. Parent directories must already exist. Editing does not
+reload a running daemon; use `reload` separately. `--json` does not change editor I/O.
 
 Pause lets active local work and review finish, but holds new jobs and merges.
 Cancellation stops local work; it can't undo a merge GitHub has already accepted.

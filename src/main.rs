@@ -21,6 +21,9 @@ use std::{
 struct Cli {
     #[arg(short, long, global = true, default_value = "config.toml")]
     config: PathBuf,
+    /// Emit JSON for scripts instead of human-readable output.
+    #[arg(long, global = true)]
+    json: bool,
     #[command(subcommand)]
     command: Action,
 }
@@ -45,9 +48,11 @@ enum Action {
     },
     /// Check repositories, isolation, GitHub permissions, models and boards (read-only).
     Validate,
-    /// Print configured projects as JSON.
+    /// Open the selected configuration file in $EDITOR.
+    Config,
+    /// Print configured projects.
     Projects,
-    /// Print durable execution state and diagnostics as JSON.
+    /// Print durable execution state and diagnostics.
     Status,
     /// Project configuration and dispatch controls.
     Project {
@@ -76,14 +81,20 @@ async fn main() -> Result<()> {
     unsafe {
         libc::umask(0o077);
     }
-    tracing_subscriber::fmt()
-        .json()
+    let cli = Cli::parse();
+    let logging = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
-        .with_writer(std::io::stderr)
-        .init();
-    let cli = Cli::parse();
+        .with_writer(std::io::stderr);
+    if cli.json {
+        logging.json().init();
+    } else {
+        logging.with_ansi(false).init();
+    }
+    if matches!(cli.command, Action::Config) {
+        return edit_config(&cli.config);
+    }
     if let Action::InternalBridge { socket, command } = &cli.command {
         let code = maistro::network::bridge(socket, command).await?;
         std::process::exit(code);
@@ -97,20 +108,45 @@ async fn main() -> Result<()> {
             command: ProjectAction::Add
         }
     ) {
-        return add_project(&cli.config).await;
+        return add_project(&cli.config, cli.json).await;
     }
     let c = Config::load(&cli.config)?;
     match cli.command {
         Action::Run { once } => Engine::new(c)?.run_daemon(&cli.config, once).await?,
-        Action::Projects => println!("{}", serde_json::to_string_pretty(&c.projects)?),
-        Action::Validate => validate(c).await?,
+        Action::Projects => {
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&c.projects)?);
+            } else {
+                print_projects(&c.projects);
+            }
+        }
+        Action::Validate => validate(c, cli.json).await?,
         other => {
             let store = Store::open(&c.orchestrator.state_db)?;
             store.sync_config(&c)?;
             let is_retry = matches!(&other, Action::Retry { .. });
+            let confirmation = match &other {
+                Action::Pause => Some("Pause requested for all projects.".to_owned()),
+                Action::Resume => Some("Resume requested for all projects.".to_owned()),
+                Action::Reload => Some("Configuration reload requested.".to_owned()),
+                Action::Project {
+                    command: ProjectAction::Pause { id },
+                } => Some(format!("Project {id} paused.")),
+                Action::Project {
+                    command: ProjectAction::Resume { id },
+                } => Some(format!("Project {id} resumed.")),
+                Action::Retry { id } => Some(format!("Retry requested for {id}.")),
+                Action::Cancel { id } => Some(format!("Cancellation requested for {id}.")),
+                _ => None,
+            };
             match other {
                 Action::Status => {
-                    println!("{}", serde_json::to_string_pretty(&store.diagnostics()?)?)
+                    let diagnostics = store.diagnostics()?;
+                    if cli.json {
+                        println!("{}", serde_json::to_string_pretty(&diagnostics)?);
+                    } else {
+                        print_status(&diagnostics);
+                    }
                 }
                 Action::Pause => store.set_control("paused", "true")?,
                 Action::Resume => store.set_control("paused", "false")?,
@@ -136,27 +172,41 @@ async fn main() -> Result<()> {
                 }
                 _ => unreachable!(),
             }
+            if !cli.json
+                && let Some(message) = confirmation
+            {
+                println!("{message}");
+            }
         }
     }
     Ok(())
 }
-async fn validate(c: Config) -> Result<()> {
+async fn validate(c: Config, json: bool) -> Result<()> {
     let engine = Engine::new(c.clone())?;
     engine.preflight().await?;
     let token = tokio_util::sync::CancellationToken::new();
     for p in c.projects.iter().filter(|p| p.enabled) {
         let scan = engine.codex.scan(p, &token).await?;
         engine.store.record_scan(&scan)?;
-        println!(
-            "{}",
-            serde_json::json!({"project":p.id,"board":scan.board_id,"stories":scan.stories.len(),"valid":true})
-        );
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({"project":p.id,"board":scan.board_id,"stories":scan.stories.len(),"valid":true})
+            );
+        } else {
+            println!(
+                "{}: valid (board {}, {} stories)",
+                p.id,
+                scan.board_id,
+                scan.stories.len()
+            );
+        }
     }
     Ok(())
 }
 fn prompt(label: &str, default: &str) -> Result<String> {
-    print!("{label} [{default}]: ");
-    io::stdout().flush()?;
+    eprint!("{label} [{default}]: ");
+    io::stderr().flush()?;
     let mut line = String::new();
     ensure!(io::stdin().read_line(&mut line)? > 0, "input closed");
     let value = line.trim();
@@ -166,7 +216,7 @@ fn prompt(label: &str, default: &str) -> Result<String> {
         value.into()
     })
 }
-async fn add_project(path: &Path) -> Result<()> {
+async fn add_project(path: &Path, json: bool) -> Result<()> {
     let target = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -246,6 +296,121 @@ async fn add_project(path: &Path) -> Result<()> {
     file.sync_all()?;
     std::fs::rename(&temp, &target)?;
     std::fs::File::open(parent)?.sync_all()?;
-    println!("Added {} to {}", p.id, target.display());
+    if json {
+        println!("{}", serde_json::json!({"added": p.id, "config": target}));
+    } else {
+        println!("Added {} to {}", p.id, target.display());
+    }
     Ok(())
+}
+
+fn edit_config(path: &Path) -> Result<()> {
+    let editor = std::env::var("EDITOR")
+        .context("Set $EDITOR to the editor command to use (for example, nano or 'code --wait')")?;
+    ensure!(!editor.trim().is_empty(), "$EDITOR must not be empty");
+    // Pass the path separately so spaces and shell metacharacters stay literal.
+    // An absolute path also prevents a filename beginning with '-' becoming an option.
+    let target = std::path::absolute(path)?;
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(format!("exec {editor} \"$1\""))
+        .arg("maistro-config")
+        .arg(&target)
+        .status()
+        .context("could not launch $EDITOR")?;
+    ensure!(status.success(), "$EDITOR exited unsuccessfully: {status}");
+    Ok(())
+}
+
+fn print_projects(projects: &[Project]) {
+    println!("Projects ({})", projects.len());
+    for p in projects {
+        println!(
+            "\n{} — {} ({})",
+            p.id,
+            p.name,
+            if p.enabled { "enabled" } else { "disabled" }
+        );
+        println!("  Repository: {}", p.repo.display());
+        println!(
+            "  Board: {}",
+            p.appflowy_url
+                .as_deref()
+                .or(p.appflowy_page.as_deref())
+                .unwrap_or("not configured")
+        );
+        println!("  GitHub: {}", p.github_repo);
+        println!("  Base branch: {}", p.base_branch);
+    }
+}
+
+fn print_status(d: &serde_json::Value) {
+    println!(
+        "Dispatch: {}",
+        if d["paused"] == true {
+            "paused"
+        } else {
+            "enabled"
+        }
+    );
+    println!("Events: {}", d["event_count"]);
+    println!("Pending board updates: {}", d["pending_projections"]);
+    if let Some(projects) = d["projects"].as_array() {
+        println!("\nProjects ({})", projects.len());
+        for p in projects {
+            println!(
+                "  {} — {}",
+                p["id"].as_str().unwrap_or("unknown"),
+                if p["paused"] == true {
+                    "paused"
+                } else {
+                    "not paused"
+                }
+            );
+            println!(
+                "    Last scan (Unix seconds): {}",
+                p["last_scan"]
+                    .as_i64()
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "never".into())
+            );
+        }
+    }
+    if let Some(runs) = d["runs"].as_array() {
+        println!("\nRuns ({})", runs.len());
+        if runs.is_empty() {
+            println!("  No runs recorded.");
+        }
+        for r in runs {
+            println!(
+                "\n  {} — {}",
+                r["id"].as_str().unwrap_or("unknown"),
+                r["story"]["title"].as_str().unwrap_or("untitled")
+            );
+            println!(
+                "    Project: {}",
+                r["project_id"].as_str().unwrap_or("unknown")
+            );
+            println!(
+                "    Story: {}",
+                r["story"]["story_id"].as_str().unwrap_or("unknown")
+            );
+            println!(
+                "    State: {} | Attempt: {} | Failures: {}",
+                r["state"].as_str().unwrap_or("unknown").replace('_', " "),
+                r["attempt"],
+                r["failures"]
+            );
+            for (key, label) in [
+                ("branch", "Branch"),
+                ("worktree", "Worktree"),
+                ("pr_url", "PR"),
+                ("last_error", "Last error"),
+            ] {
+                if let Some(value) = r[key].as_str().filter(|s| !s.is_empty()) {
+                    println!("    {label}: {}", value.replace('\n', "\n      "));
+                }
+            }
+        }
+    }
 }
