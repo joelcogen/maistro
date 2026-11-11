@@ -276,3 +276,18 @@ async fn sandbox_preflight_hides_main_checkout_git_directory() {
     assert_eq!(std::fs::read(p.repo.join(".git/config")).unwrap(), original);
     assert!(!p.repo.join(".git/injected").exists());
 }
+
+#[tokio::test]
+#[ignore = "requires host user namespaces and C/Rust toolchains"]
+async fn sandbox_compiles_and_runs_c_and_rust() {
+    let t = tempfile::tempdir().unwrap();
+    let c = common::config(t.path());
+    let p = &c.projects[0];
+    std::fs::write(p.repo.join("probe.c"), "int main(void) { return 0; }\n").unwrap();
+    std::fs::write(p.repo.join("probe.rs"), "fn main() {}\n").unwrap();
+    let mut command = maistro::sandbox::command(p, &p.repo, true, false).unwrap();
+    command.args(["--", "sh", "-c", "cc probe.c -o /tmp/c-probe && /tmp/c-probe && rustc probe.rs -o /tmp/rust-probe && /tmp/rust-probe"]);
+    maistro::process::checked(command, std::time::Duration::from_secs(30))
+        .await
+        .unwrap();
+}

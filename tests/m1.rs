@@ -110,6 +110,7 @@ fn revision_ignores_projection_but_detects_requirements() {
         status: Status::Ready,
         priority: 1,
         dependencies: vec![],
+        reference_pages: vec![],
         acceptance_criteria: vec!["works".into()],
         decision: Decision::Implement,
         reason: String::new(),

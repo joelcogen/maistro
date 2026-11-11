@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     config.orchestrator.log_root = t.path().join("logs");
     config.orchestrator.worktree_root = t.path().join("worktrees");
     config.orchestrator.process_timeout_seconds = 180;
-    let story=Story{story_id:uuid::Uuid::new_v4().to_string(),title:"Sandbox connectivity probe".into(),description:"Create only probe.txt in /work with the exact contents sandbox-ok followed by a newline. This is a disposable fixture. Do not access any external service or other path.".into(),status:Status::Ready,priority:1,dependencies:vec![],acceptance_criteria:vec!["probe.txt contains sandbox-ok and newline".into()],decision:Decision::Implement,reason:"Explicit deployment probe".into()};
+    let story=Story{story_id:uuid::Uuid::new_v4().to_string(),title:"Sandbox connectivity probe".into(),description:"Create only probe.txt in /work with the exact contents sandbox-ok followed by a newline. This is a disposable fixture. Do not access any external service or other path.".into(),status:Status::Ready,priority:1,dependencies:vec![],reference_pages:vec![],acceptance_criteria:vec!["probe.txt contains sandbox-ok and newline".into()],decision:Decision::Implement,reason:"Explicit deployment probe".into()};
     let scan = Scan {
         project_id: "probe".into(),
         workspace_id: uuid::Uuid::new_v4().to_string(),

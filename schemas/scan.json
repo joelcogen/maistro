@@ -76,6 +76,26 @@
           },
           "reason": {
             "type": "string"
+          },
+          "reference_pages": {
+            "type": "array",
+            "description": "AppFlowy reference documents used by this story, including linked pages and uniquely resolved named guides. Read every listed page with get_page_markdown. These are context, not additional task boards.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "workspace_id": {
+                  "type": "string"
+                },
+                "page_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "workspace_id",
+                "page_id"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -87,7 +107,8 @@
           "dependencies",
           "acceptance_criteria",
           "decision",
-          "reason"
+          "reason",
+          "reference_pages"
         ],
         "additionalProperties": false
       }

@@ -1,5 +1,5 @@
 //! Revision-bearing text comes from MCP results, never a model's transcription.
-use crate::model::Scan;
+use crate::model::{Decision, PageReference, Scan};
 use anyhow::{Context, Result, ensure};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
@@ -34,11 +34,35 @@ fn cell<'a>(row: &'a Value, names: &[&str]) -> Result<Option<&'a str>> {
 
 pub fn canonicalize(scan: &mut Scan, evidence: &str) -> Result<()> {
     let mut rows = BTreeMap::new();
+    let mut pages = BTreeMap::new();
     let mut comments: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut complete_comments = HashSet::new();
     for line in evidence.lines() {
         let call: Value = serde_json::from_str(line)?;
         let args = &call["arguments"];
+        if call["tool"] == "get_page_markdown" {
+            let reference = PageReference {
+                workspace_id: args["workspace_id"]
+                    .as_str()
+                    .context("missing page workspace")?
+                    .into(),
+                page_id: args["page_id"].as_str().context("missing page ID")?.into(),
+            };
+            let text = call["result"]["content"]
+                .as_array()
+                .context("missing page content")?
+                .iter()
+                .filter_map(|block| block["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            ensure!(!text.trim().is_empty(), "empty referenced page response");
+            if let Some(previous) = pages.insert(reference, text.clone()) {
+                ensure!(
+                    previous == text,
+                    "referenced page changed during source read"
+                );
+            }
+        }
         if args["workspace_id"].as_str() != Some(&scan.workspace_id) {
             continue;
         }
@@ -119,6 +143,34 @@ pub fn canonicalize(scan: &mut Scan, evidence: &str) -> Result<()> {
         for (id, text) in comments.remove(&story.story_id).unwrap_or_default() {
             body.push_str(&format!("\n\nComment {id}:\n{text}"));
         }
+        // Derive linked references from the original source as well, so an
+        // omitted model reference cannot silently discard a required document.
+        story.reference_pages.extend(linked_pages(&body));
+        story.reference_pages.sort();
+        story.reference_pages.dedup();
+        ensure!(
+            story.reference_pages.len() <= 32,
+            "too many reference pages"
+        );
+        for reference in &story.reference_pages {
+            ensure!(
+                uuid::Uuid::parse_str(&reference.workspace_id).is_ok()
+                    && uuid::Uuid::parse_str(&reference.page_id).is_ok(),
+                "invalid page reference"
+            );
+            let url = format!(
+                "https://appflowy.com/app/{}/{}",
+                reference.workspace_id, reference.page_id
+            );
+            if let Some(text) = pages.get(reference) {
+                body.push_str(&format!("\n\nReferenced page {url}:\n{text}"));
+            } else {
+                story.decision = Decision::Blocked;
+                story.reason = format!(
+                    "Referenced page {url} has no successful get_page_markdown read. Read that page using the configured AppFlowy MCP; if access fails, report the actual access error."
+                );
+            }
+        }
         story.title = title;
         story.description = body;
         story.acceptance_criteria = if criteria.trim().is_empty() {
@@ -128,6 +180,27 @@ pub fn canonicalize(scan: &mut Scan, evidence: &str) -> Result<()> {
         };
     }
     Ok(())
+}
+
+fn linked_pages(text: &str) -> Vec<PageReference> {
+    text.split(|c: char| c.is_whitespace() || "<>[]()\"'".contains(c))
+        .filter_map(|token| {
+            let url = reqwest::Url::parse(token.trim_end_matches(['.', ',', ';'])).ok()?;
+            if url.scheme() != "https" || url.host_str() != Some("appflowy.com") {
+                return None;
+            }
+            let parts = url.path_segments()?.collect::<Vec<_>>();
+            if parts.len() != 3 || parts[0] != "app" {
+                return None;
+            }
+            uuid::Uuid::parse_str(parts[1]).ok()?;
+            uuid::Uuid::parse_str(parts[2]).ok()?;
+            Some(PageReference {
+                workspace_id: parts[1].into(),
+                page_id: parts[2].into(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -202,5 +275,58 @@ mod tests {
         assert!(canonicalize(&mut scan, incomplete).is_err());
         let wrong_database = raw.replace(&scan.board_id, &uuid::Uuid::new_v4().to_string());
         assert!(canonicalize(&mut scan, &wrong_database).is_err());
+    }
+    #[test]
+    fn referenced_pages_reach_worker_and_revision_without_authorizing_other_work() {
+        let t = tempfile::tempdir().unwrap();
+        let c = fixtures::config(t.path());
+        let mut scan = fixtures::scan(&c.projects[0], vec![fixtures::story(Status::Ready)]);
+        let workspace = uuid::Uuid::new_v4().to_string();
+        let page = uuid::Uuid::new_v4().to_string();
+        let url = format!("https://appflowy.com/app/{workspace}/{page}");
+        let body = format!("Follow the [writing guide]({url}).");
+        let raw = evidence(&scan, &body, "", "human comment", "Ready");
+        canonicalize(&mut scan, &raw).unwrap();
+        assert_eq!(scan.stories[0].decision, Decision::Blocked);
+        assert!(scan.stories[0].reason.contains("get_page_markdown"));
+        let page_call = |text: &str| {
+            serde_json::json!({
+                "tool":"get_page_markdown", "arguments":{"workspace_id":workspace,"page_id":page},
+                "result":{"content":[{"type":"text","text":text}]}
+            })
+            .to_string()
+        };
+        let complete = format!("{raw}\n{}", page_call("Be direct. Keep necessary details."));
+        scan.stories[0].decision = Decision::Implement;
+        canonicalize(&mut scan, &complete).unwrap();
+        assert_eq!(scan.stories.len(), 1);
+        assert_eq!(scan.stories[0].reference_pages.len(), 1);
+        assert!(
+            scan.stories[0]
+                .description
+                .contains("Be direct. Keep necessary details.")
+        );
+        let revision = scan.stories[0].revision();
+        canonicalize(&mut scan, &complete).unwrap();
+        assert_eq!(revision, scan.stories[0].revision());
+        canonicalize(
+            &mut scan,
+            &format!("{raw}\n{}", page_call("New guide instructions.")),
+        )
+        .unwrap();
+        assert_ne!(revision, scan.stories[0].revision());
+
+        // A named reference also passes the exact fetched text to the worker.
+        let named = evidence(&scan, "Follow the writing guide.", "", "comment", "Ready");
+        canonicalize(
+            &mut scan,
+            &format!("{named}\n{}", page_call("Named guide contents.")),
+        )
+        .unwrap();
+        assert!(
+            scan.stories[0]
+                .description
+                .contains("Named guide contents.")
+        );
     }
 }

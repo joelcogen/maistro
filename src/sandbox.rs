@@ -25,6 +25,9 @@ pub fn command(p: &Project, worktree: &Path, writable: bool, network: bool) -> R
         }
     }
     for f in [
+        // Compiler commands such as /usr/bin/cc resolve through this directory.
+        // Mount alternatives without exposing the rest of /etc.
+        "/etc/alternatives",
         "/etc/ssl",
         "/etc/resolv.conf",
         "/etc/hosts",

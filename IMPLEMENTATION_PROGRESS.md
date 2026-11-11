@@ -243,3 +243,32 @@ existing blocked run after verifying identical requirements. SQLite confirms it
 is queued. The service is active with zero restarts and `auto_merge = false`.
 During shutdown, an aborted poll was logged as a task panic; the service restarted
 successfully, but graceful-shutdown reporting needs a separate correction.
+
+## Referenced context and actionable repair feedback — 2026-11-11
+
+Diagnosed all live blocked stories. Cleanup doc was rejected by an unintended
+board-only read instruction, despite its human comment linking an accessible
+AppFlowy writing guide. Both implementation stories exhausted three repair
+attempts on the same missing `cc` linker: `/usr/bin/cc` points through
+`/etc/alternatives`, which the test sandbox did not expose. The repair prompt
+contained only a host log path that the worker could not read.
+
+Luna now reads referenced AppFlowy documents, including named guides resolved
+through the folder. Rust attaches exact fetched contents to the story context
+and hashes them with the requirements. Missing reads block the affected story;
+reference documents cannot authorize extra tasks. The sandbox exposes the
+read-only alternatives directory, and Rust-project preflight compiles a minimal
+program inside the sandbox before dispatch. Failed tests now supply the command
+and bounded stdout/stderr directly to the repair agent, including partial output
+on execution failure. The worker is instructed to diagnose, repair and rerun
+those checks. The repair budget and deterministic merge gates remain intact.
+Expected aborted polling/projection tasks no longer produce shutdown panics.
+
+Formatting, strict Clippy, debug/release compilation and all 47 tests passed.
+Regressions cover referenced-page content and revision changes, C/Rust linking
+inside the sandbox, and an end-to-end failed build repaired using actual stderr
+before independent review and CI verification. The two existing implementation
+worktrees also passed their configured `cargo test --locked --offline` and
+strict Clippy commands in the repaired sandbox, without manual source changes.
+Evidence is retained under `/tmp/maistro-verify-6_9e60jb/logs/`. All three stories
+were restored to Ready for recovery. Automatic merging remains disabled.

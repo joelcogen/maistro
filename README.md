@@ -54,6 +54,11 @@ Test commands are argument arrays, such as `["cargo", "test", "--locked",
 They must exit successfully without changing source files; ignore build outputs
 in Git.
 
+When a check fails, Maistro sends the command and its stdout/stderr to the coding
+agent, which diagnoses the failure, repairs the code and reruns the checks.
+Repairs remain bounded by `max_attempts`. Rust projects also get a compiler and
+linker check inside the sandbox before stories are dispatched.
+
 Use `toolchain_paths` to expose specific toolchains and caches read-only. For
 Cargo, mount a registry directory such as `/home/jole/.cargo/registry`. Maistro
 also exposes it as the worker's Cargo registry. A mounted directory with a `bin`
@@ -125,6 +130,11 @@ prevents meaningful progress, and explains why the agent cannot resolve it.
 
 Dependencies refer to row IDs on the same board. Maistro waits for them to become
 Done and explains the wait in a comment.
+
+Stories and human comments may reference other AppFlowy pages. Luna reads linked
+documents and resolves named guides through the workspace folder. Rust includes
+the fetched text in the worker's context and revision checks. Only stories on the
+configured board authorize work; reference documents do not create extra tasks.
 
 Optional fields are `Execution ID`, `PR URL`, `Last error` and `Retry count`.
 Maistro fills these in; underscore spellings also work. See the

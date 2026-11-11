@@ -53,6 +53,7 @@ elif 'approved' in schema:
  result={{'head_sha':re.search(r'exactly ([0-9a-f]+)',prompt).group(1),'approved':True,'blocking':[],'nonblocking':[]}}
 else:
  pathlib.Path('/work/feature.txt').write_text('implemented\n')
+ if 'fixture compiler: missing generated file' in prompt.split('REPAIR FEEDBACK=',1)[-1]: pathlib.Path('/work/repaired.txt').write_text('fixed from actual stderr\n')
  result={{'summary':'Implemented assigned fixture','uncertainties':[]}}
 out.write_text(json.dumps(result))
 print(json.dumps({{'type':'thread.started','thread_id':str(uuid.uuid4())}}))
@@ -73,6 +74,7 @@ async fn green_merge_once_recovery_and_appflowy_outage_end_to_end() {
     let mut config = fixtures::config(t.path());
     config.projects.truncate(1);
     config.github.auto_merge = true;
+    config.projects[0].test_commands = vec![vec!["sh".into(), "-c".into(), "test -f repaired.txt || { printf 'fixture compiler: missing generated file\\n' >&2; exit 1; }".into()]];
     let p = config.projects[0].clone();
     git(&p.repo, &["init", "-b", "main"]);
     std::fs::write(p.repo.join("README.md"), "fixture\n").unwrap();
@@ -233,8 +235,8 @@ async fn green_merge_once_recovery_and_appflowy_outage_end_to_end() {
     assert_eq!(waiting.state, State::WaitingCi);
     assert_eq!(*mutations.lock().unwrap(), (1, 0));
     assert_eq!(
-        waiting.attempt, 2,
-        "CI failure must trigger a bounded repair"
+        waiting.attempt, 3,
+        "local stderr and CI failure must each trigger a successful bounded repair"
     );
     store.set_control("paused", "false").unwrap();
     let mut changed = scan.clone();
@@ -266,7 +268,7 @@ async fn green_merge_once_recovery_and_appflowy_outage_end_to_end() {
     engine.flush(&cancel).await.unwrap();
     assert!(store.pending().unwrap().is_empty());
     assert_eq!(store.runs().unwrap().len(), 1);
-    assert_eq!(store.get(&run.id).unwrap().agent_sessions.len(), 4);
+    assert_eq!(store.get(&run.id).unwrap().agent_sessions.len(), 5);
     assert_eq!(*mutations.lock().unwrap(), (1, 1));
     assert_eq!(
         std::fs::read_to_string(p.repo.join("README.md")).unwrap(),

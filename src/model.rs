@@ -30,8 +30,16 @@ pub struct Story {
     pub priority: i64,
     pub dependencies: Vec<String>,
     pub acceptance_criteria: Vec<String>,
+    #[serde(default)]
+    pub reference_pages: Vec<PageReference>,
     pub decision: Decision,
     pub reason: String,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct PageReference {
+    pub workspace_id: String,
+    pub page_id: String,
 }
 impl Story {
     /// Status/projection fields are deliberately excluded. Normalization changes fail closed.
