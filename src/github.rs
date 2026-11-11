@@ -45,7 +45,7 @@ impl Github {
         );
         Ok(res.json().await?)
     }
-    pub async fn validate(&self, repo: &str) -> Result<()> {
+    pub async fn validate(&self, repo: &str, auto_merge: bool) -> Result<()> {
         let v = self
             .request(Method::GET, &format!("/repos/{repo}"), None)
             .await?;
@@ -53,9 +53,11 @@ impl Github {
             v["permissions"]["push"] == true,
             "GitHub credential needs repository push access"
         );
+        // This is the authenticated account's repository role, not its token scopes.
+        // Owners can run the manual-merge pilot; automatic merging keeps the stricter policy.
         ensure!(
-            v["permissions"]["admin"] != true,
-            "refusing administrator GitHub credential; use least privilege"
+            !auto_merge || v["permissions"]["admin"] != true,
+            "automatic merging requires a non-administrator GitHub account; keep auto_merge=false to use an owner account"
         );
         ensure!(
             v["allow_squash_merge"] == true,
@@ -173,7 +175,7 @@ impl Github {
         &self,
         p: &crate::config::Project,
     ) -> Result<Vec<(String, Option<i64>)>> {
-        self.validate(&p.github_repo).await?;
+        self.validate(&p.github_repo, true).await?;
         let branch = reqwest::Url::parse(&format!(
             "https://api.github.com/repos/{}/branches/x",
             p.github_repo
@@ -330,6 +332,58 @@ mod tests {
     use super::*;
     use crate::{fixtures, model::Status, store::Store, test_support::Server};
     use serde_json::json;
+    #[tokio::test]
+    async fn repository_owner_can_run_only_with_automatic_merging_disabled() {
+        let server = Server::start(|line, _| {
+            assert!(line.starts_with("GET /repos/owner/a "));
+            (
+                200,
+                json!({"permissions":{"push":true,"admin":true},"allow_squash_merge":true}),
+            )
+        });
+        let gh = Github::fixture(server.url.clone());
+        gh.validate("owner/a", false).await.unwrap();
+        let error = gh.validate("owner/a", true).await.unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("automatic merging requires a non-administrator")
+        );
+        let t = tempfile::tempdir().unwrap();
+        let c = fixtures::config(t.path());
+        assert!(gh.protections(&c.projects[0]).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn manual_merge_validation_still_requires_push_access_and_squash_support() {
+        for repo in [
+            json!({"permissions":{"push":false,"admin":false},"allow_squash_merge":true}),
+            json!({"permissions":{"admin":true},"allow_squash_merge":true}),
+            json!({"permissions":{"push":true,"admin":true},"allow_squash_merge":false}),
+        ] {
+            let server = Server::start(move |_, _| (200, repo.clone()));
+            assert!(
+                Github::fixture(server.url.clone())
+                    .validate("owner/a", false)
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn non_admin_write_account_passes_repository_access_in_both_modes() {
+        let server = Server::start(|_, _| {
+            (
+                200,
+                json!({"permissions":{"push":true,"admin":false},"allow_squash_merge":true}),
+            )
+        });
+        let gh = Github::fixture(server.url.clone());
+        gh.validate("owner/a", false).await.unwrap();
+        gh.validate("owner/a", true).await.unwrap();
+    }
+
     #[tokio::test]
     async fn uncertain_create_is_reconciled_without_duplicate_pr() {
         let t = tempfile::tempdir().unwrap();

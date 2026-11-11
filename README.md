@@ -71,11 +71,10 @@ Use a **personal access token (classic)** for this version. Maistro reads the
 Checks API, which GitHub doesn't currently support with fine-grained personal
 access tokens.
 
-Use a dedicated GitHub account with Write access to the managed repositories and
-no protection-bypass role. Maistro currently rejects accounts with repository
-Admin access, even when their token has limited scopes. A token created by the
-owner of a personal repository will therefore fail validation. This is a current
-Maistro restriction.
+The account needs Write access to the managed repositories. You can use your
+repository-owner account while `github.auto_merge = false`. Automatic merging
+requires a non-administrator account with no protection-bypass role. This check
+uses the account's repository role, not the token's `admin:*` scope checkboxes.
 
 1. Sign in as that account and open [Create a classic personal access token](https://github.com/settings/tokens/new).
 2. Set **Note** to `Maistro` and choose an expiration, for example 30 days.

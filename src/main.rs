@@ -231,7 +231,7 @@ async fn add_project(path: &Path) -> Result<()> {
     c.validate()?;
     git::validate(&p).await?;
     Github::new(&c.github.token_env)?
-        .validate(&p.github_repo)
+        .validate(&p.github_repo, c.github.auto_merge)
         .await?;
     Codex::new(c.clone())
         .scan(&p, &tokio_util::sync::CancellationToken::new())

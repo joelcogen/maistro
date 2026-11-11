@@ -396,7 +396,9 @@ impl Engine {
                 "{}: deterministic test_commands required",
                 p.id
             );
-            self.github.validate(&p.github_repo).await?;
+            self.github
+                .validate(&p.github_repo, self.config.github.auto_merge)
+                .await?;
             if self.config.github.auto_merge {
                 self.github.protections(p).await?;
             }

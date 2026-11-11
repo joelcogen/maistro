@@ -336,7 +336,10 @@ print(json.dumps({{'type':'turn.completed'}}))
     });
     let github = Github::fixture(server.url.clone());
     for p in &config.projects {
-        github.validate(&p.github_repo).await.unwrap();
+        github
+            .validate(&p.github_repo, config.github.auto_merge)
+            .await
+            .unwrap();
     }
     let store = Store::open(&config.orchestrator.state_db).unwrap();
     store.sync_config(&config).unwrap();
