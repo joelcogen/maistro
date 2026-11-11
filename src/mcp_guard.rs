@@ -217,6 +217,79 @@ pub(crate) fn server_command(agents: &Agents) -> Result<Command> {
         .kill_on_drop(true);
     Ok(c)
 }
+
+/// Check the configured MCP process and API without invoking a model or writing data.
+pub async fn check_connectivity(agents: &Agents) -> Result<()> {
+    let mut command = server_command(agents)?;
+    let description = format!("{:?}", command.as_std().get_program());
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("could not start AppFlowy MCP executable {description}"))?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        let mut input = child.stdin.take().context("MCP stdin unavailable")?;
+        let mut output =
+            BufReader::new(child.stdout.take().context("MCP stdout unavailable")?).lines();
+        send(
+            &mut input,
+            &json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
+                "protocolVersion":"2024-11-05","capabilities":{},
+                "clientInfo":{"name":"maistro-connectivity","version":env!("CARGO_PKG_VERSION")}
+            }}),
+        )
+        .await?;
+        for id in [1, 2] {
+            loop {
+                let line = output
+                    .next_line()
+                    .await?
+                    .context("AppFlowy MCP exited before responding")?;
+                ensure!(line.len() <= 16 * 1024 * 1024, "oversized MCP response");
+                let response: Value =
+                    serde_json::from_str(&line).context("invalid MCP response")?;
+                if response["id"] != id {
+                    continue;
+                }
+                ensure!(
+                    response.get("error").is_none(),
+                    "AppFlowy MCP error: {}",
+                    response["error"]
+                );
+                ensure!(
+                    response.get("result").is_some(),
+                    "AppFlowy MCP response has no result"
+                );
+                ensure!(
+                    response["result"]["isError"] != true,
+                    "AppFlowy workspace read failed: {}",
+                    response["result"]
+                );
+                break;
+            }
+            if id == 1 {
+                send(
+                    &mut input,
+                    &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+                )
+                .await?;
+                send(
+                    &mut input,
+                    &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                        "name":"get_workspaces","arguments":{}
+                    }}),
+                )
+                .await?;
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    // Reap the probe server on success, error, and timeout.
+    child
+        .kill()
+        .await
+        .context("could not stop AppFlowy connectivity probe")?;
+    result.context("AppFlowy connectivity check timed out after 15 seconds")?
+}
 pub async fn serve(path: &Path) -> Result<()> {
     let scope: Scope = serde_json::from_slice(&std::fs::read(path)?)?;
     let mut child = server_command(&scope.agents)?.spawn()?;
@@ -374,6 +447,54 @@ fn observe_response(
 }
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn connectivity_reads_workspaces_and_surfaces_tool_errors() {
+        let temp = tempfile::tempdir().unwrap();
+        let script = temp.path().join("mcp.py");
+        std::fs::write(
+            &script,
+            r#"
+import json, sys
+request = json.loads(input())
+assert request['method'] == 'initialize'
+print(json.dumps({'jsonrpc':'2.0', 'id':1, 'result':{}}), flush=True)
+assert json.loads(input())['method'] == 'notifications/initialized'
+request = json.loads(input())
+assert request['method'] == 'tools/call'
+assert request['params'] == {'name':'get_workspaces', 'arguments':{}}
+print(json.dumps({'jsonrpc':'2.0', 'id':2, 'result':{
+    'isError': sys.argv[1] == 'fail',
+    'content':[{'type':'text','text':'fixture response'}]
+}}), flush=True)
+"#,
+        )
+        .unwrap();
+        let agents = crate::config::Agents {
+            codex_home: temp.path().into(),
+            ..Default::default()
+        };
+        for outcome in ["success", "fail"] {
+            let config = serde_json::json!({"mcp_servers": {
+                &agents.mcp_server: {"command":"python3", "args":[script, outcome]}
+            }});
+            std::fs::write(
+                temp.path().join("config.toml"),
+                toml::to_string(&config).unwrap(),
+            )
+            .unwrap();
+            let result = super::check_connectivity(&agents).await;
+            if outcome == "success" {
+                result.unwrap();
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("workspace read failed")
+                );
+            }
+        }
+    }
     use super::*;
     #[test]
     fn rejects_wrong_row_and_requirement_writes() {

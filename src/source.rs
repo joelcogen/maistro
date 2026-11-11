@@ -166,16 +166,23 @@ pub fn canonicalize(scan: &mut Scan, evidence: &str, statuses: &Statuses) -> Res
         story.reference_pages.extend(linked_pages(&body));
         story.reference_pages.sort();
         story.reference_pages.dedup();
-        ensure!(
-            story.reference_pages.len() <= 32,
-            "too many reference pages"
-        );
-        for reference in &story.reference_pages {
-            ensure!(
-                uuid::Uuid::parse_str(&reference.workspace_id).is_ok()
-                    && uuid::Uuid::parse_str(&reference.page_id).is_ok(),
-                "invalid page reference"
-            );
+        let mut reference_errors = Vec::new();
+        if story.reference_pages.len() > 32 {
+            reference_errors.push(format!(
+                "Too many reference pages: {} (maximum 32)",
+                story.reference_pages.len()
+            ));
+        }
+        for reference in story.reference_pages.iter().take(32) {
+            if uuid::Uuid::parse_str(&reference.workspace_id).is_err()
+                || uuid::Uuid::parse_str(&reference.page_id).is_err()
+            {
+                reference_errors.push(format!(
+                    "Invalid page reference: workspace_id={:?}, page_id={:?}; both must be valid UUIDs. Coordinator must resolve these IDs from AppFlowy tool results.",
+                    reference.workspace_id, reference.page_id
+                ));
+                continue;
+            }
             let url = format!(
                 "https://appflowy.com/app/{}/{}",
                 reference.workspace_id, reference.page_id
@@ -183,11 +190,20 @@ pub fn canonicalize(scan: &mut Scan, evidence: &str, statuses: &Statuses) -> Res
             if let Some(text) = pages.get(reference) {
                 body.push_str(&format!("\n\nReferenced page {url}:\n{text}"));
             } else {
-                story.decision = Decision::Blocked;
-                story.reason = format!(
+                reference_errors.push(format!(
                     "Referenced page {url} has no successful get_page_markdown read. Read that page using the configured AppFlowy MCP; if access fails, report the actual access error."
-                );
+                ));
             }
+        }
+        if !reference_errors.is_empty() {
+            story.decision = Decision::Blocked;
+            story.reason = format!(
+                "Story {} ({title}): {}",
+                story.story_id,
+                reference_errors.join("; ")
+            );
+            tracing::warn!(story_id=%story.story_id, story_title=%title, error=%story.reason,
+                "story blocked by page references; other stories can proceed");
         }
         story.status = status;
         ensure!(
@@ -340,6 +356,39 @@ mod tests {
         assert!(canonicalize(&mut scan, incomplete, &Statuses::default()).is_err());
         let wrong_database = raw.replace(&scan.board_id, &uuid::Uuid::new_v4().to_string());
         assert!(canonicalize(&mut scan, &wrong_database, &Statuses::default()).is_err());
+    }
+    #[test]
+    fn malformed_reference_blocks_only_its_story() {
+        let t = tempfile::tempdir().unwrap();
+        let c = fixtures::config(t.path());
+        let mut scan = fixtures::scan(&c.projects[0], vec![fixtures::story(Status::Ready)]);
+        scan.stories[0].reference_pages.push(PageReference {
+            workspace_id: scan.workspace_id.clone(),
+            page_id: "c80255e3-0f92-4e64-a938-6762304941a37".into(),
+        });
+        let first_id = scan.stories[0].story_id.clone();
+        let first = evidence(&scan, "first story", "", "", "Ready");
+        let mut other = scan.clone();
+        other.stories[0].story_id = uuid::Uuid::new_v4().to_string();
+        other.stories[0].reference_pages.clear();
+        let second = evidence(&other, "second story", "", "", "Ready");
+        scan.stories.push(other.stories.remove(0));
+        canonicalize(
+            &mut scan,
+            &format!("{first}\n{second}"),
+            &Statuses::default(),
+        )
+        .unwrap();
+        assert_eq!(scan.stories[0].decision, Decision::Blocked);
+        assert!(scan.stories[0].reason.contains(&first_id));
+        assert!(
+            scan.stories[0]
+                .reason
+                .contains("c80255e3-0f92-4e64-a938-6762304941a37")
+        );
+        assert_eq!(scan.stories[1].decision, Decision::Implement);
+        assert_eq!(scan.stories[1].status, Status::Ready);
+        assert!(scan.stories[1].description.contains("second story"));
     }
     #[test]
     fn referenced_pages_reach_worker_and_revision_without_authorizing_other_work() {

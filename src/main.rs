@@ -54,7 +54,7 @@ enum Action {
         #[arg(long)]
         once: bool,
     },
-    /// Check repositories, isolation, GitHub permissions, models and boards (read-only).
+    /// Check Codex login, AppFlowy connectivity, and GitHub access without model calls.
     Validate,
     /// Open the selected configuration file in $EDITOR.
     Config,
@@ -315,26 +315,41 @@ fn control_service(action: &str, json: bool) -> Result<()> {
     Ok(())
 }
 async fn validate(c: Config, json: bool) -> Result<()> {
-    let engine = Engine::new(c.clone())?;
-    engine.store.sync_config(&c)?;
-    engine.preflight().await?;
-    let token = tokio_util::sync::CancellationToken::new();
-    for p in c.projects.iter().filter(|p| p.enabled) {
-        let scan = engine.codex.scan(p, &token).await?;
-        engine.store.record_scan(&scan)?;
+    let report = |component: &str| {
         if json {
             println!(
                 "{}",
-                serde_json::json!({"project":p.id,"board":scan.board_id,"stories":scan.stories.len(),"valid":true})
+                serde_json::json!({"component":component,"connected":true})
             );
         } else {
-            println!(
-                "{}: valid (board {}, {} stories)",
-                p.id,
-                scan.board_id,
-                scan.stories.len()
-            );
+            println!("{component}: OK");
         }
+    };
+    let codex = Codex::new(c.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(15), codex.validate_cli())
+        .await
+        .context("Codex CLI/login check timed out after 15 seconds")??;
+    report("Codex CLI/login (local check)");
+    maistro::mcp_guard::check_connectivity(&c.agents).await?;
+    report("AppFlowy MCP/API");
+    let github = Github::new(&c.github.token_env)?;
+    for p in c.projects.iter().filter(|p| p.enabled) {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            github.request(
+                reqwest::Method::GET,
+                &format!("/repos/{}", p.github_repo),
+                None,
+            ),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "GitHub access check for {} timed out after 15 seconds",
+                p.github_repo
+            )
+        })??;
+        report(&format!("GitHub {}", p.github_repo));
     }
     Ok(())
 }

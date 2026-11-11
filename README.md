@@ -273,7 +273,7 @@ log out, an administrator can run `sudo loginctl enable-linger "$USER"`.
 
 For a foreground run, use `maistro -c PATH run`. Polling defaults to 60 seconds.
 `run --once` performs one cycle and can write code, push branches and open PRs.
-Use `validate` when you only want to check the setup.
+Use `validate` for quick connectivity checks. It checks the local Codex CLI/login, initializes the configured AppFlowy MCP server and reads the workspace list, and requests each enabled GitHub repository. Each check has a 15-second timeout. It does not invoke models, scan stories, test the compiler/sandbox, or open the state database. Full operational preflight still runs when the daemon starts.
 
 ## Commands
 
@@ -286,7 +286,7 @@ The systemd unit explicitly uses `~/.config/maistro/config.toml`.
 | Command | What it does |
 | --- | --- |
 | `run [--once]` | Poll boards and process authorized work |
-| `validate` | Check setup and read boards |
+| `validate` | Check Codex login, AppFlowy connectivity, and GitHub repository access |
 | `projects` | Show configured projects |
 | `status` | Show runs, errors and pending updates |
 | `config` | Open the selected config file in `$EDITOR` |
@@ -313,14 +313,14 @@ demo — Demo (enabled)
 `status` shows dispatch state, event and pending-update counts, project pause and
 last-scan information, and runs with full IDs, story titles, state, attempts,
 branches, worktrees, PR links and errors. An empty run list says `No runs recorded.`
-Last-scan timestamps are labeled Unix seconds. `validate` prints one success line
-per enabled project, such as `demo: valid (board BOARD_ID, 3 stories)`.
+Last-scan timestamps are labeled Unix seconds. `validate` prints a success line
+for each connectivity check; the Codex login check is local and does not verify model availability.
 Control commands confirm recorded changes or requests; a request confirmation does
 not mean the daemon has finished processing it.
 
 For scripts, use `maistro --json projects`, `maistro status --json`, or
 `maistro --json validate`. This preserves the previous projects array, status
-object, and one JSON object per validated project. Control commands remain silent
+object; validation emits one JSON object per connectivity check with `component` and `connected` fields. Control commands remain silent
 in JSON mode. Logs go to stderr (JSON with `--json`, plain text otherwise).
 `project add` remains interactive, with prompts on stderr and a JSON result on
 stdout when `--json` is set. Internal bridge and MCP stdout protocols are unchanged.
