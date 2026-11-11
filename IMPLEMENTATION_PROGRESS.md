@@ -272,3 +272,11 @@ worktrees also passed their configured `cargo test --locked --offline` and
 strict Clippy commands in the repaired sandbox, without manual source changes.
 Evidence is retained under `/tmp/maistro-verify-6_9e60jb/logs/`. All three stories
 were restored to Ready for recovery. Automatic merging remains disabled.
+
+Live recovery verification: Luna accepted all three Ready stories and read the
+linked writing guide. Cleanup doc's persisted task context contains its full
+contents and one grounded page reference. The installed release passed compiler
+preflight and the daemon is active with zero restarts. Cleanup doc was dispatched;
+the existing installer and CLI runs were explicitly retried after confirming
+unchanged requirements and are queued behind it. Their worktrees and histories
+were retained. Actual story review/CI completion has not been claimed.
