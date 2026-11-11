@@ -245,3 +245,34 @@ fn competing_claims_are_transactionally_exclusive() {
         .count();
     assert_eq!(claimed, 1);
 }
+
+#[tokio::test]
+#[ignore = "requires host user namespaces"]
+async fn sandbox_preflight_hides_main_checkout_git_directory() {
+    let t = tempfile::tempdir().unwrap();
+    let c = common::config(t.path());
+    let p = &c.projects[0];
+    maistro::git::git(&p.repo, &["init", "-b", "main"])
+        .await
+        .unwrap();
+    let original = std::fs::read(p.repo.join(".git/config")).unwrap();
+    for writable in [false, true] {
+        let mut cmd = maistro::sandbox::command(p, &p.repo, writable, false).unwrap();
+        cmd.args([
+            "--", "/bin/sh", "-c",
+            "test -d /work/.git && test ! -e /work/.git/config && test ! -e /work/.git/HEAD && ! touch /work/.git/injected",
+        ]);
+        let result = maistro::process::run(
+            cmd,
+            "",
+            std::time::Duration::from_secs(10),
+            &tokio_util::sync::CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.code, 0, "{}", result.stderr);
+    }
+    assert_eq!(std::fs::read(p.repo.join(".git/config")).unwrap(), original);
+    assert!(!p.repo.join(".git/injected").exists());
+}

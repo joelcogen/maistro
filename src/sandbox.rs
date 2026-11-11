@@ -99,7 +99,10 @@ pub fn command(p: &Project, worktree: &Path, writable: bool, network: bool) -> R
     c.arg(if writable { "--bind" } else { "--ro-bind" })
         .arg(worktree)
         .arg("/work");
-    if worktree.join(".git").exists() {
+    if worktree.join(".git").is_dir() {
+        // Preflight probes the main checkout, whose metadata is a directory.
+        c.args(["--tmpfs", "/work/.git", "--remount-ro", "/work/.git"]);
+    } else if worktree.join(".git").exists() {
         c.args(["--ro-bind", "/dev/null", "/work/.git"]);
     }
     // Project Codex configuration must not expand capabilities.
