@@ -1,143 +1,172 @@
-# Implementation progress — 2026-11-10
+# Implementation status and limitations
 
-Specification v1.0 was read in full and retained as `maistro-spec.md`.
-The initial attachment-access blocker was resolved. M1 → M2 → M3 → M4 were
-implemented in order, with build/test/static-check gates between milestones.
+Maistro has the local orchestration pipeline in place: board polling, isolated
+implementation, independent review, test and CI gates, squash merging, and restart
+recovery. That doesn't establish that unattended operation works with a particular
+AppFlowy board or GitHub repository. Live integration still needs validation.
 
-## Milestone results
+This is the implementation reference. [README.md](README.md) covers installation,
+configuration and commands. The old specification, architecture, acceptance,
+operations and pilot documents have been consolidated here; their proposed work
+and one-time setup notes aren't current deployment status.
 
-| Milestone | Result | Verification at milestone gate |
-|---|---|---|
-| M1 — read-only integration | Complete | Build, six tests, formatting and strict Clippy passed; real Luna/existing AppFlowy MCP read passed |
-| M2 — single worker | Complete | Build, twelve tests plus explicit host isolation test passed; SQLite claims/outbox/reopen and real disposable worktrees verified; real GitHub writes unavailable |
-| M3 — verification/merge | Complete | Build, formatting, strict Clippy and 22 tests passed, including disposable end-to-end lost-response merge recovery and post-merge projection outage |
-| M4 — operations | Complete | Concurrent polling/fair scheduling, repository locks, cancellation, pause/resume/reload/retry, dependency reconsideration, process recovery, CLI/docs/systemd implemented; expanded acceptance suite passed |
+## What's implemented
 
-## Implementation
+- Multi-project TOML configuration, strict agent JSON contracts and board scans.
+  Rust rejects incomplete scans, ambiguous boards and identifiers without MCP
+  evidence. Requirements fingerprints exclude status and progress metadata.
+- SQLite claims, one active run per story, repository locks and a daemon singleton
+  lock. Scheduling rotates between projects and respects priority and worker
+  limits. Each repository is limited to one worker; independent repositories can
+  run concurrently.
+- One worktree per execution, bounded implementation and repair attempts, a fresh
+  reviewer session, deterministic tests, branch pushes and linked pull requests.
+  Rust owns Git operations and GitHub credentials.
+- Merge gates check current authorization, unchanged requirements, PR identity,
+  independent review, local tests and required CI checks for the exact head SHA.
+  Protected paths require human handling. A merge uses squash and is only complete
+  after Rust confirms the returned commit on the configured base branch.
+- Pause/resume, cancellation, retry, configuration reload and restart recovery.
+  The CLI and user systemd unit are included. Runtime paths default to the service
+  user's `~/.local/state/maistro/`; explicit overrides remain supported.
 
-Rust owns scheduling, SQLite state, transactional claims, repository and singleton
-locks, subprocess groups/PID namespaces, test execution, Git writes, PR identity,
-review evidence, CI verification and squash merge policy. Multi-project TOML and
-agent JSON are strict and typed. Existing Codex AppFlowy MCP configuration is
-reused without changing user configuration.
+The original milestones were read-only integration (M1), single-worker execution
+(M2), verification and merging (M3), and multi-project operations (M4). Their code
+and tests are present. The later naming and per-user storage changes are also in
+place. There is no deployment step, web UI, notification system, monetary usage
+accounting or atomic change across repositories.
 
-Workers receive one isolated source tree, hidden Git metadata, selected read-only
-toolchains, private output and read-only Codex authentication. Reviewers receive
-read-only source. Tests receive no network or model credential. The host rejects
-nested Bubblewrap namespaces, so Codex runs in mandatory external Bubblewrap
-confinement with a network namespace and Rust model-host-only CONNECT proxy;
-there is no host-unsandboxed fallback. Companion Codex executables are mounted.
-A live Astra fixed-file smoke test passed through this boundary.
+## Authorization and isolation
 
-AppFlowy writes use a Rust stdio MCP guard, scoped to the committed run/row,
-exact permitted status/metadata values and exact progress comment. The guard
-rejects superseded state, requirement-field writes and other mutation tools.
-Durable status/comment receipts are required; model-reported success alone is
-insufficient. The production write transport reuses the existing stdio server.
+Only Ready authorizes new work; the label is configurable. Missing dependencies
+hold the run until they become Done. Unclear requirements become Blocked. Changed
+requirements or revoked authorization prevent stale work from merging.
 
-SQLite uses WAL/FULL durability, immediate transactions, a partial active-story
-uniqueness index, audited state changes, leases and a durable projection outbox.
-Remote PR lookup precedes creation. Merge intent commits before the HTTP mutation;
-uncertain responses reconcile against remote identity and actual Git ancestry.
-Interrupted process records contain boot/start identity; verified termination is
-recorded separately. A process whose exit cannot be confirmed holds its run.
+The coordinator uses the existing AppFlowy MCP configuration with a read
+allowlist. It has no shell or delegation. Status and comment writes go through a
+Rust stdio MCP guard tied to the committed run and row. The guard permits exact
+status, metadata and comment values, rejects requirement edits and other writes,
+and requires receipts before acknowledging an outgoing update.
 
-Ready is the default authorization label, configurable to To Do. Dependency waits
-preserve Ready authorization and automatically reconsider the same run when
-prerequisites become Done. Ambiguous requirements become Blocked. Revision changes
-and cancellation stop stale work. Pause holds new dispatch and merges while local
-work can finish. Reload drains tasks, validates and preserves project identity;
-invalid reloads retain the prior configuration.
+Workers get their assigned source, selected read-only tools and caches, private
+output, and read-only Codex file authentication. Git metadata, other repositories,
+daemon state and GitHub credentials aren't exposed. Reviewers get read-only
+source. Tests have no network access or model credentials.
 
-## Verification
+Codex runs inside mandatory Bubblewrap confinement. A network namespace and Rust
+CONNECT proxy restrict worker egress to `chatgpt.com`, `api.openai.com`,
+`auth.openai.com` and `ab.chatgpt.com` on port 443. Tests have no proxy. If the host
+can't provide the sandbox, execution fails; there's no unsandboxed fallback.
+See [sandbox.rs](src/sandbox.rs), [network.rs](src/network.rs) and
+[mcp_guard.rs](src/mcp_guard.rs) for these boundaries.
 
-- Optimized release build produced `target/release/maistro`.
-- Debug build, `cargo fmt --all --check`, and strict Clippy passed.
-- All 12 acceptance scenarios are mapped to tests in `docs/ACCEPTANCE.md`.
-- Full tests are run on the host with `--include-ignored`: the coding-session
-  sandbox disallows localhost listeners/nested namespaces. Host fixture tests use
-  disposable Git repositories, fake model responses and fake GitHub HTTP services.
-- Live Luna + AppFlowy read and isolated Astra implementation passed.
-- Release CLI smoke checks passed for help, projects, status, global/project pause
-  and resume, and reload using disposable configuration/state.
-- User systemd unit validation passed with the built executable path substituted.
-  A NoNewPrivileges namespace probe also passed. Service not installed/enabled.
-- Final regression: **36 passed, 0 failed, 0 ignored** with
-  `cargo test --offline --locked -- --include-ignored` on the Linux host
-  (9 library, 6 M1, 8 M2, 5 M3 and 8 M4 tests).
-- Final `cargo fmt --all --check`,
-  `cargo clippy --offline --locked --all-targets -- -D warnings` and
-  `cargo build --offline --locked --release` all exited successfully.
-- Implementation work is complete. Remaining deployment work is the external
-  configuration and live integration validation described below; no unattended
-  service or real automatic merging was enabled during implementation.
+## Recovery and operational limits
 
-## External prerequisites and limitations
+SQLite uses WAL with FULL synchronization. State transitions and pending AppFlowy
+updates commit together. Recovery looks for existing PRs before creating one and
+records merge intent before sending the request. An uncertain merge stays in
+reconciliation until remote identity and Git ancestry resolve it. AppFlowy updates
+retry separately, so an outage after a merge doesn't rerun implementation.
 
-No daemon GitHub token or real project mappings were supplied. Real GitHub
-protection/PR/CI/merge operations and real AppFlowy guarded writes remain
-unverified. Examples keep auto_merge=false. Deployment requires configuring board
-mappings, offline test environments and required checks, supplying a protected
-least-privilege GitHub credential, and running `maistro validate` plus a disposable
-real-project trial before enabling unattended auto-merge.
+Pause holds new dispatch and merges while active local work and review can finish.
+Cancellation stops local work and retains the branch and PR. Reload drains tasks
+and validates the new configuration; invalid changes keep the old configuration.
+Project identity and runtime paths can't change through reload.
 
-Linux/GitHub.com and existing stdio AppFlowy MCP are supported. Isolated Codex
-requires file authentication. Auto-merge conservatively requires strict classic
-branch protection as well as inspection of active rulesets; ruleset-only setups
-fail closed. No production deployment, web UI, notifications, monetary accounting
-or cross-repository atomic changes were added (optional/non-goals in the spec).
-AppFlowy/GitHub do not offer a shared transaction; eventual-read and in-flight
-merge timing limits are documented in the acceptance report.
+Process records include boot and start identity. A timeout or expired lease isn't
+proof that a process has stopped. Unconfirmed termination holds the run, and
+recovery doesn't kill an unrelated process just because its PID matches a record.
+Operational retries use backoff capped at one hour and a configured attempt
+budget. Polls and pending board updates keep retrying with bounded backoff.
 
-Documentation: README.md, config.example.toml, docs/ARCHITECTURE.md,
-docs/OPERATIONS.md, docs/ACCEPTANCE.md, systemd/maistro.service.
+Restart with the same configuration, database and worktree root. Don't delete the
+database to retry a failed update. For failed tests, review or CI, inspect the
+retained worktree and logs, fix the cause, return an unchanged story to Ready and
+use `maistro retry RUN_ID`. Changed requirements create a separate revision.
 
-No unrelated repository was changed. No credentials were printed. This project's
-Git repository was initialized locally with no remote, commits, merges or deploys.
+Runtime files are private (umask 0077). Logs include session JSONL, stderr,
+structured output and process evidence; output is capped at 16 MiB per stream.
+Treat logs and SQLite snapshots as sensitive project data. Use a local filesystem
+with reliable SQLite locking. Back up through SQLite's online backup API, or stop
+the service and copy DB/WAL/SHM consistently. Copying only the database during WAL
+writes can lose state. Worktrees are retained by default; optional cleanup removes
+only clean, completed worktrees, leaving branches, PRs and logs.
 
-## Pilot CI — 2026-11-11
+Nothing runs while the host sleeps. On resume, wall-clock deadlines still apply
+and board scans reconcile missed changes. Authentication and quota failures become
+recorded errors and retries. Refresh Codex authentication as the service user.
 
-Added `.github/workflows/ci.yml`: read-only GitHub Actions on branch pushes,
-pull requests and manual dispatch, with a stable `test` check matching the pilot's
-`required_checks`. It checks formatting, strict Clippy, all tests including host
-isolation fixtures, and release compilation. Checkout is pinned and its release
-SHA was verified. Rust is pinned to 1.93.1. No deployment or merge step is present.
+## Test coverage and evidence
 
-Actionlint 1.7.12, YAML/shell validation, check-name alignment, formatting, Clippy,
-debug/release builds and all 36 host tests passed. No remote workflow run was
-possible yet. Repository destination and daemon credential remain pending; the
-pilot is disabled and automatic merge remains off. No daemon was started.
+The automated suites use disposable repositories and controlled external responses.
+The engine fixtures exercise real SQLite, Git, process supervision and, when run
+explicitly on a suitable host, Bubblewrap. They don't verify live GitHub or
+AppFlowy behavior.
 
-## Maistro naming — 2026-11-11
+| Coverage | Tests |
+| --- | --- |
+| Configuration, runtime paths, strict contracts, requirement revisions, cancellation and argument handling | [tests/m1.rs](tests/m1.rs), [src/config.rs](src/config.rs) |
+| Ready-only claims, restart deduplication, dependency blocking, projection retries, worktree recovery and isolation | [tests/m2.rs](tests/m2.rs) |
+| Protected files, exact-head CI, changed/cancelled stories, independent review evidence and durable merge intent | [tests/m3.rs](tests/m3.rs) |
+| Fair scheduling, pause/resume, repository slots, backoff, configuration identity, concurrent isolation and process termination | [tests/m4.rs](tests/m4.rs) |
+| Independent board polling, bounded reviewer rejection, CI repair, stale authorization, paused merging, lost merge response and post-merge AppFlowy outage | [src/acceptance.rs](src/acceptance.rs) |
+| Model-only egress, MCP write guard and GitHub PR reconciliation | [src/network.rs](src/network.rs), [src/mcp_guard.rs](src/mcp_guard.rs), [src/github.rs](src/github.rs) |
 
-Renamed the Rust package and CLI to `maistro`, the unit to `maistro.service`,
-installed configuration paths to `~/.config/maistro/`, and the credential variable
-to `MAISTRO_GITHUB_TOKEN`. Updated source, tests, schemas/references, CI comments,
-Git metadata labels, documentation and `maistro-spec.md`. The pilot uses
-`/home/jole/dev/maistro` and `/home/jole/.local/state/maistro`; the empty provisional
-database identity was migrated and integrity checked. The AppFlowy parent page,
-Kanban container and setup text now use Maistro while retaining their stable IDs.
+The supplied deterministic checks are:
 
-Formatting, strict Clippy, debug/release builds and all 36 host tests passed.
-The renamed systemd unit validated against the built binary. The source/config
-audit found no stale prior-name references. No installed daemon/configuration
-existed to migrate; installation paths and instructions were updated. The service
-remains uninstalled and stopped, and automatic merge remains off.
+```sh
+cargo test --locked --offline
+cargo clippy --locked --offline -- -D warnings
+```
 
-## Per-user runtime storage — 2026-11-11
+HTTP fixtures listen on `127.0.0.1`. If the host uses an HTTP proxy, include
+`127.0.0.1,localhost` in `NO_PROXY` so fixture requests stay local. An empty
+`NO_PROXY` caused HTTP 403 responses in this worktree; the full default suite
+passed with that local routing correction (34 passed, four ignored).
 
-Runtime defaults now resolve to `~/.local/state/maistro/` using the current user's
-absolute `HOME`: `state.db`, `logs/` and `worktrees/`. Both configuration loading
-and interactive project creation resolve these paths. Explicit absolute and
-configuration-relative overrides remain supported. Missing or invalid HOME is
-an error when a home-relative runtime path needs resolution.
+The default test command skips four namespace-dependent tests. The README has the
+full host-check commands, including `--include-ignored` and a helper binary build.
+[CI](.github/workflows/ci.yml) runs those fixtures, formatting, all-target Clippy
+and a release build on Ubuntu 22.04 with Rust 1.93.1. Its check name is `test`.
+[worker_probe.rs](examples/worker_probe.rs) is a separate live model probe.
 
-Moved this pilot's runtime directory to `/home/jole/.local/state/maistro`, with all
-five files checksum-verified. The directory is mode 0700 and the database 0600.
-There were no running daemon processes or execution runs to migrate. Updated the
-pilot/example configuration, README, operations/pilot documentation, specification
-example and AppFlowy setup text. The example omits path keys to use the defaults.
+Earlier implementation notes recorded 38 passing host tests on 2026-11-11,
+including the namespace fixtures, plus formatting, Clippy and release compilation.
+They also recorded a live Luna AppFlowy read, an isolated Astra file-writing probe,
+CLI smoke checks and systemd unit validation. These are historical results, not a
+fresh check of the current host or deployment.
 
-Formatting, strict Clippy, debug/release compilation and all 38 host tests passed,
-including default-path loading, interactive setup path resolution, override
-preservation and invalid HOME handling. The service remains stopped.
+## Remaining integration limits
+
+- Supported deployment is Linux, GitHub.com and existing stdio AppFlowy MCP.
+  Workers require Codex `auth.json`; keyring-only authentication isn't supported.
+- Automatic merge defaults to off. It requires strict classic branch protection
+  and inspection of active rulesets; ruleset-only protection isn't enough.
+  Repository administrators are rejected as daemon identities. The README covers
+  the dedicated account and token requirements.
+- The retained implementation notes don't establish live GitHub permission and
+  protection reads, PR creation, CI, squash merging or remote commit confirmation.
+  They also don't establish real guarded AppFlowy status/comment writes. Validate
+  these on a disposable project before relying on unattended automatic merging.
+- AppFlowy reads can be eventually consistent. Fingerprints and authorization
+  checks reduce stale execution risk but can't make AppFlowy and GitHub one
+  transaction. Cancellation can't undo a merge GitHub has already accepted.
+
+## Existing pilot reference
+
+The earlier pilot setup recorded these identifiers and paths. They are retained
+so the board can be found, not as evidence that its service is running or ready:
+
+- Parent page: `f7b2406b-c5de-4f36-b5d1-c4935627b150`
+- [Board](https://appflowy.com/app/f757bab8-f38b-49a2-9338-6a524d0646e2/8983b67b-9d14-42c0-a0fa-b9cdad15c501)
+- Database: `7606135a-e2a1-4426-8984-3a0d9c6e177c`
+- Repository and ignored local configuration: `/home/jole/dev/maistro` and its
+  `config.toml`
+- Runtime root: `/home/jole/.local/state/maistro`
+- Preserved provisional database: `preflight-unconfigured.db` under that root
+
+The old notes used `unconfigured/maistro` as a placeholder GitHub repository and
+reported a missing token and a stopped service. Those observations aren't current
+status. Check the installed configuration and remote integration using the README
+before operating the pilot. The systemd service reads the installed configuration,
+not the repository copy.

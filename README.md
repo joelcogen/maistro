@@ -125,7 +125,7 @@ requirements become Blocked.
 
 Optional fields are `Execution ID`, `PR URL`, `Last error` and `Retry count`.
 Maistro fills these in; underscore spellings also work. See the
-[pilot setup](docs/PILOT.md) for the existing board and local paths.
+[pilot reference](IMPLEMENTATION_PROGRESS.md#existing-pilot-reference) for the existing board and local paths.
 
 The included [GitHub Actions workflow](.github/workflows/ci.yml) runs formatting,
 Clippy, all automated tests and a release build. Its check is named `test`, so the
@@ -238,8 +238,6 @@ doesn't rerun implementation. Worktrees are retained by default. Setting
 `retain_worktrees = false` removes only clean, completed worktrees; branches, PRs
 and logs remain.
 
-See [architecture](docs/ARCHITECTURE.md) for isolation and recovery details,
-[operations](docs/OPERATIONS.md) for retries and backups, and
-[acceptance evidence](docs/ACCEPTANCE.md) for passed tests and unverified live
-integrations. Maistro currently supports Linux, GitHub.com and stdio AppFlowy MCP.
+See [implementation status and limitations](IMPLEMENTATION_PROGRESS.md) for
+isolation, recovery, test coverage and remaining live integration checks. Maistro currently supports Linux, GitHub.com and stdio AppFlowy MCP.
 It doesn't deploy the changes it merges.
