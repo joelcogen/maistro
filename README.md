@@ -11,8 +11,10 @@ Automatic merging is off by default.
 
 ## Install
 
-You need Linux, Git, Bubblewrap, Rust 1.89 or newer, and a logged-in Codex CLI with
-AppFlowy MCP configured. The host must allow Bubblewrap's user, process and network
+You need Linux, Git, Bubblewrap, Rust 1.89 or newer, a C compiler/linker (`cc`),
+and a logged-in Codex CLI with AppFlowy MCP configured. On Debian or Ubuntu,
+install `build-essential` to provide the compiler and linker needed by the Rust
+build and bundled SQLite. The host must allow Bubblewrap's user, process and network
 namespaces. Development used Codex 0.167.0; CI uses Rust 1.93.1. Keep Codex's helper
 executables beside its main binary.
 
@@ -232,6 +234,14 @@ branch. Invalid reloads keep the previous configuration. Keep a project enabled
 while an uncertain `merging` run is being reconciled.
 
 ## Test and recover
+
+Check the interactive installer with local fake tools (no credentials or network
+access required):
+
+```sh
+bash -n install.sh
+python3 -m unittest discover -s tests -p 'test_install.py'
+```
 
 Run the full checks on a Linux host that permits namespaces and local listeners:
 
