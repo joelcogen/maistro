@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Maistro · Status</title>
+<link rel="stylesheet" href="status.css">
+<script src="status.js" defer></script>
+</head>
+<body>
+<header><div><p class="eyebrow">MAISTRO</p><h1>Work in progress</h1></div><span class="badge">Read only</span></header>
+<main>
+<p id="connection" class="notice" role="status" aria-live="polite">Connecting… No status received yet.</p>
+<noscript><p class="notice">JavaScript is required to load and refresh status.</p></noscript>
+<section aria-labelledby="daemon-heading"><h2 id="daemon-heading">This daemon</h2><div id="daemon"></div></section>
+<section aria-labelledby="overall-heading"><h2 id="overall-heading">Observed AppFlowy counts</h2><p>Ready is queued work. In Progress is active or interrupted work on the board. Backlog, Cancelled, Review, Blocked and Done are not automatically processed. Counts do not authorize work.</p><div id="overall"></div></section>
+<div id="projects" class="projects"></div>
+<footer>Current-process activity and board observations are separate. Refreshes every 3 seconds; no board requests are made by this page.</footer>
+</main>
+</body>
+</html>

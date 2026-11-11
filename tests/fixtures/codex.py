@@ -57,7 +57,14 @@ if model == 'gpt-6-luna':
     with (ROOT / 'board.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         board = json.loads((ROOT / 'board.json').read_text())
-        result = dict(assignments=[], cancel=[], acknowledged=[], notes=[])
+        result = dict(assignments=[], cancel=[], acknowledged=[], notes=[], observations=[])
+        for project in projects:
+            counts = dict(ready=0, in_progress=0, blocked=0, review=0, backlog=0, done=0)
+            key = board[project['id']]['status'].lower().replace(' ', '_')
+            if key in counts:
+                counts[key] += 1
+            result['observations'].append(dict(project_id=project['id'], counts=counts,
+                                               read='complete', reason='no_eligible_work'))
         for active in snapshot['active']:
             if board[active['project_id']]['status'] == 'Cancelled':
                 result['cancel'].append(active)
@@ -79,7 +86,7 @@ if model == 'gpt-6-luna':
             if project['id'] in busy or story['status'] not in ('Ready', 'In Progress'):
                 continue
             result['assignments'].append(dict(project_id=project['id'], story_id=story['id'],
-                                             title='Fixture story', context='Complete fixture requirements',
+                                             title='Fixture story', story_url='https://appflowy.example/story', context='Complete fixture requirements',
                                              recovery=story['status'] == 'In Progress'))
             story['status'] = 'In Progress'
         (ROOT / 'board.json').write_text(json.dumps(board))

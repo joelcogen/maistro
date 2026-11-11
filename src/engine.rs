@@ -3,6 +3,7 @@ use crate::{
     config::Config,
     model::{Assignment, Completion, Coordination, Report, Snapshot, StoryRef},
     process,
+    status::{self, Status},
 };
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
@@ -10,6 +11,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs::{File, OpenOptions},
     path::Path,
+    sync::Arc,
     time::Duration,
 };
 use tokio::{process::Command, task::JoinSet, time::Instant};
@@ -154,6 +156,16 @@ impl Engine {
             repo_locks.push(Lock::acquire(&Path::new(&common).join("maistro.lock"))?);
         }
         let stop = shutdown.child_token();
+        let mut diagnostics = Status::new(&self.config);
+        let (published, receiver) = tokio::sync::watch::channel(Arc::new(diagnostics.snapshot()));
+        let mut server = JoinSet::new();
+        if self.config.status.enabled {
+            let listener = status::bind(self.config.status.port).await?;
+            tracing::info!(address=%listener.local_addr()?, "read-only status server listening");
+            server.spawn(status::serve(listener, receiver, stop.child_token()));
+        }
+        let mut status_tick = tokio::time::interval(Duration::from_secs(1));
+        status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut workers = JoinSet::new();
         let mut coordinator = JoinSet::new();
         let mut state = State::default();
@@ -165,6 +177,7 @@ impl Engine {
                 if stop.is_cancelled() { break; }
                 if coordinator.is_empty() && Instant::now() >= next_poll {
                     if !repo_locks.is_empty() {
+                        diagnostics.coordinator_started();
                         let snapshot = state.snapshot();
                         let codex = self.codex.clone();
                         let cancel = stop.child_token();
@@ -172,17 +185,25 @@ impl Engine {
                     }
                     next_poll = Instant::now() + interval;
                 }
+                published.send_replace(Arc::new(diagnostics.snapshot()));
                 tokio::select! {
                     biased;
                     _ = stop.cancelled() => break,
+                    outcome = server.join_next(), if !server.is_empty() => {
+                        outcome.context("status server disappeared")???;
+                        anyhow::bail!("status server stopped unexpectedly");
+                    }
+                    _ = status_tick.tick() => {},
                     outcome = coordinator.join_next(), if !coordinator.is_empty() => {
                         match outcome.context("coordinator disappeared")?? {
                             Ok(update) => {
+                                diagnostics.coordinator_finished(Some(&update.observations));
                                 let ready_again = !update.acknowledged.is_empty();
-                                self.apply(update, &mut state, &mut workers, &stop)?;
+                                self.apply(update, &mut state, &mut workers, &stop, &mut diagnostics)?;
                                 if ready_again { next_poll = Instant::now(); }
                             }
                             Err(e) => {
+                                diagnostics.coordinator_finished(None);
                                 if e.downcast_ref::<process::UnconfirmedTermination>().is_some() { return Err(e); }
                                 tracing::warn!(error=%format!("{e:#}"), "coordinator failed; retrying without releasing pending work");
                                 next_poll = Instant::now() + interval;
@@ -191,7 +212,10 @@ impl Engine {
                     }
                     outcome = workers.join_next(), if !workers.is_empty() => {
                         let (assignment, result) = outcome.context("worker disappeared")??;
+                        let id = assignment.project_id.clone();
+                        let failed = result.is_err();
                         state.finish(assignment, result)?;
+                        diagnostics.worker_finished(&id, state.pending.get(&id).map(|c| c.report.outcome), failed);
                         next_poll = Instant::now();
                     }
                     _ = tokio::time::sleep_until(next_poll), if coordinator.is_empty() => {}
@@ -207,6 +231,8 @@ impl Engine {
         while let Some(outcome) = coordinator.join_next().await {
             record_shutdown(outcome.map(|update| update.map(|_| ())), &mut result);
         }
+        // Idle/slow HTTP clients must not delay daemon shutdown.
+        server.shutdown().await;
         tracing::info!("maistro stopped; AppFlowy will drive recovery on next start");
         result
     }
@@ -216,12 +242,25 @@ impl Engine {
         state: &mut State,
         workers: &mut JoinSet<(Assignment, Result<Report>)>,
         stop: &CancellationToken,
+        diagnostics: &mut Status,
     ) -> Result<()> {
         for note in update.notes {
             tracing::info!(note, "coordinator");
         }
         for story in update.cancel {
             state.cancel(&story);
+            if state.active.contains_key(&story.project_id) {
+                diagnostics.cancelling(&story.project_id);
+            } else {
+                diagnostics.released(&story.project_id, false);
+            }
+        }
+        for c in state
+            .pending
+            .values()
+            .filter(|c| update.acknowledged.contains(&c.id))
+        {
+            diagnostics.released(&c.story.project_id, true);
         }
         state
             .pending
@@ -246,6 +285,7 @@ impl Engine {
                     cancel: cancel.clone(),
                 },
             );
+            diagnostics.worker_started(&assignment);
             tracing::info!(project=%project.id, story=%assignment.story_id, recovery=assignment.recovery, "dispatching story");
             let codex = self.codex.clone();
             workers.spawn(async move {
@@ -291,6 +331,7 @@ mod tests {
             project_id: "p".into(),
             story_id: "s".into(),
             title: "Story".into(),
+            story_url: None,
             context: "Requirements".into(),
             recovery: false,
         };

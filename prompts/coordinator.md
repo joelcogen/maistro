@@ -57,3 +57,20 @@ if you acknowledge its result in this pass. The next pass will pick up new work.
 Return only the requested structured result. Empty arrays are valid when idle.
 Keep notes brief and actionable. Never claim that a tool operation succeeded
 unless its result and required read-back actually confirm it.
+
+Display observations: return one observations entry per enabled project, using
+ONLY the board reads already performed in this pass. Do not perform extra reads
+for diagnostics. Count every row across all pages using the project's exact
+labels: ready, in_progress, blocked, review, backlog, done. Ignore Cancelled and
+unmapped statuses. Counts describe the last COMPLETE board read in this pass,
+not inferred totals after your writes. Set read=complete and include counts only
+if all row statuses/pages were successfully read. For partial/failed/not_read,
+counts MUST be null, never partial totals or zero. A failed write does not erase
+a successful read. Select the concise reason enum that best explains this pass
+(no_eligible_work, dependencies, occupied, read_failed, ambiguous_board,
+incomplete_read, claim_failed, requirements_blocked, update_failed, work_selected).
+These observations are display-only and must never replace fresh reads or claims.
+For assignments, include story_url from an actual AppFlowy story link already
+available in the read results, otherwise null. Never invent a link or fetch one
+solely for display. Do not put credentials, raw tool errors or prompts in display
+fields. Keep titles concise.

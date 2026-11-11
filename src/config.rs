@@ -12,7 +12,25 @@ pub struct Config {
     pub orchestrator: Orchestrator,
     #[serde(default)]
     pub agents: Agents,
+    #[serde(default)]
+    pub status: StatusServer,
     pub projects: Vec<Project>,
+}
+
+/// Deliberately no listen-address option: private access uses a localhost proxy.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StatusServer {
+    pub enabled: bool,
+    pub port: u16,
+}
+impl Default for StatusServer {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 8044,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -136,6 +154,10 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<()> {
+        ensure!(
+            self.status.port > 0,
+            "status.port must be between 1 and 65535"
+        );
         ensure!(!self.projects.is_empty(), "configure at least one project");
         ensure!(
             self.orchestrator.poll_interval_seconds > 0

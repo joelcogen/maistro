@@ -137,6 +137,87 @@ repositories. No history, retry queue, project configuration, or story state is
 persisted there. Transient result/schema files are deleted on normal completion;
 crash leftovers are ignored and can be removed while the service is stopped.
 
+## Read-only status page
+
+Enable the optional server in `~/.config/maistro/config.toml`, then restart Maistro:
+
+```toml
+[status]
+enabled = true
+port = 8044
+```
+
+Open `http://127.0.0.1:8044/`. The server always binds to **127.0.0.1**, never a
+LAN or tailnet interface. It is disabled by default; port defaults to 8044.
+A bind failure stops startup with the address and OS error. `validate` checks
+configuration but does not bind the port.
+
+The static page refreshes `GET /api/status` every three seconds and marks retained
+data disconnected/stale on failure. GET/HEAD are the only supported methods;
+there are no workflow controls, file/log endpoints, or credentials in the status
+snapshot. Titles are rendered as text and links allow only HTTP(S). Detailed
+failure output stays in private daemon logs/AppFlowy, not the web response.
+There is no application login; local users and permitted tailnet users can read
+project IDs, story titles/IDs, safe AppFlowy links, and concise diagnostics.
+
+Current-process activity shows parallel workers, start times, elapsed durations,
+cancellation, and completed/blocked results still awaiting AppFlowy recording.
+Idle and disabled projects remain visible. Coordinator activity and daemon uptime
+are separate from AppFlowy observations. Observations are in memory only and reset
+on restart. Luna returns counts from its existing reads; viewing the page makes
+no agent or AppFlowy calls. Counts never select or authorize work.
+
+Ready means queued work; In Progress includes both active and interrupted work.
+Backlog, Cancelled, Review, Blocked and Done are not automatically processed.
+Counts use each project's configured status labels. Before a complete read,
+counts are unknown. Failed, partial, missing or invalid observations retain the
+last complete counts and mark them stale, even when other projects succeed.
+Successful reads with failed writes still supply counts. Each successful read is
+labelled with its coordinator pass start and receipt time: it happened within
+that window and may precede status writes in the same pass. These are observations,
+not a live or atomic board view. Overall counts sum known observations across all
+configured projects, including stale ones, with coverage shown; missing projects
+(including disabled projects) make it an explicitly partial subtotal.
+
+### Private access over Tailscale
+
+Inspect existing Serve mappings first. If the default HTTPS root is unused:
+
+```sh
+tailscale serve status
+tailscale serve --bg http://127.0.0.1:8044
+tailscale serve status
+```
+
+Open the private `https://<machine>.<tailnet>.ts.net` URL printed by Serve.
+Follow Tailscale's setup link if prompted to enable HTTPS certificates; enable
+MagicDNS in the tailnet DNS settings if needed. Access follows tailnet access
+rules. Use **Serve**, not public **Funnel**.
+
+Preserve existing mappings. If HTTPS 443 already serves another application,
+choose an unused HTTPS port, for example:
+
+```sh
+tailscale serve --bg --https=8443 http://127.0.0.1:8044
+```
+
+Use the printed URL including `:8443`. To remove only the mapping you added,
+repeat its flags and target with `off`:
+
+```sh
+# Default mapping, only if you added it:
+tailscale serve --bg http://127.0.0.1:8044 off
+# Or the separate 8443 mapping, only if you added that one:
+tailscale serve --bg --https=8443 http://127.0.0.1:8044 off
+tailscale serve status
+```
+
+Do not use `tailscale serve reset`, which removes unrelated mappings. If you
+choose another Maistro port, replace 8044 in the targets above. Maistro does not
+change Tailscale configuration. See the official
+[Serve CLI reference](https://tailscale.com/docs/reference/tailscale-cli/serve)
+and [Serve setup](https://tailscale.com/docs/features/tailscale-serve).
+
 ## AppFlowy behavior and recovery
 
 Use Backlog, Ready, In Progress, Review, Done, Blocked, and Cancelled, or map their
@@ -199,8 +280,12 @@ cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 python3 -m unittest discover -s tests -p 'test_install.py'
+node --test tests/status_ui.test.cjs
 cargo build --release --locked
 ```
+
+The UI tests use Node.js 20+ and its built-in test runner; there are no frontend
+dependencies or build steps.
 
 Tests use simulated Codex agents, AppFlowy fixtures, and local Git remotes. They
 never call live models, write a real board, or push to an external repository.

@@ -85,6 +85,7 @@ impl Fixture {
         fs::write(&github_token_file, "github_pat_fixture_secret\n").unwrap();
         fs::set_permissions(&github_token_file, fs::Permissions::from_mode(0o600)).unwrap();
         let config = Config {
+            status: Default::default(),
             agents: Agents {
                 codex: executable,
                 codex_home: home,
@@ -100,6 +101,25 @@ impl Fixture {
             projects,
         };
         Self { temp, config }
+    }
+    fn enable_status(&mut self) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        self.config.status.enabled = true;
+        self.config.status.port = listener.local_addr().unwrap().port();
+    }
+    async fn status_snapshot(&self) -> Value {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut socket = tokio::net::TcpStream::connect(("127.0.0.1", self.config.status.port))
+            .await
+            .unwrap();
+        socket
+            .write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        socket.read_to_string(&mut response).await.unwrap();
+        assert!(response.starts_with("HTTP/1.1 200"));
+        serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap()
     }
     fn events(&self) -> Vec<Value> {
         fs::read_to_string(self.temp.path().join("events"))
@@ -182,6 +202,7 @@ async fn workers_reload_rotated_tokens_without_putting_them_in_logs() {
                 project_id: project.id.clone(),
                 story_id: format!("story-{i}"),
                 title: "Token test".into(),
+                story_url: None,
                 context: "Verify authentication".into(),
                 recovery: false,
             };
@@ -260,12 +281,19 @@ async fn projects_run_in_parallel_and_workers_commit_and_push_both_modes() {
 
 #[tokio::test]
 async fn pending_completion_survives_appflowy_outage_in_memory_without_redispatch() {
-    let f = Fixture::new(&[Mode::Master]);
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.enable_status();
     f.touch("outage");
     let (token, job) = f.start();
     let retried = f
         .wait(|| f.events().iter().filter(|e| e["kind"] == "outage").count() >= 2)
         .await;
+    let view = f.status_snapshot().await;
+    assert_eq!(view["projects"][0]["worker"]["state"], "pending_update");
+    assert_eq!(view["projects"][0]["story"]["id"], "story-0");
+    assert_eq!(view["projects"][0]["observation"]["stale"], true);
+    assert_eq!(view["projects"][0]["observation"]["counts"]["ready"], 1);
+    assert!(view["coordinator"]["last_error"].is_string());
     let held = f.board()["p0"]["status"] == "In Progress";
     fs::remove_file(f.temp.path().join("outage")).unwrap();
     let completed = f.wait(|| f.board()["p0"]["status"] == "Done").await;
@@ -423,4 +451,56 @@ async fn linked_worktrees_cannot_be_configured_as_parallel_projects() {
     let error = Engine::new(f.config.clone()).validate().await.unwrap_err();
     assert!(error.to_string().contains("cannot share a Git repository"));
     assert!(f.events().is_empty());
+}
+
+#[tokio::test]
+async fn status_traffic_does_not_coordinate_or_dispatch_and_shows_parallel_idle_disabled_projects()
+{
+    let mut f = Fixture::new(&[Mode::Master, Mode::Pr, Mode::Master, Mode::Pr]);
+    f.enable_status();
+    f.config.orchestrator.poll_interval_seconds = 60;
+    f.config.projects[2].enabled = false;
+    f.status("p3", "Backlog");
+    f.touch("hang");
+    let (token, job) = f.start();
+    let started = f
+        .wait(|| {
+            f.events()
+                .iter()
+                .filter(|e| e["kind"] == "worker_start")
+                .count()
+                == 2
+        })
+        .await;
+    assert!(started, "events: {:?}", f.events());
+    let events_before = f.events();
+    let board_before = f.board();
+    for _ in 0..20 {
+        let view = f.status_snapshot().await;
+        assert_eq!(view["projects"][0]["worker"]["state"], "active");
+        assert_eq!(view["projects"][1]["worker"]["state"], "active");
+        assert_eq!(view["projects"][2]["worker"]["state"], "disabled");
+        assert_eq!(view["projects"][3]["worker"]["state"], "idle");
+        assert_eq!(view["projects"][0]["mode"], "master");
+        assert_eq!(view["projects"][1]["mode"], "pr");
+        assert_eq!(view["overall"]["observed_projects"], 3);
+        assert_eq!(view["overall"]["counts"]["ready"], 2);
+        assert_eq!(view["overall"]["counts"]["backlog"], 1);
+        assert_eq!(
+            view["projects"][0]["story"]["url"],
+            "https://appflowy.example/story"
+        );
+        let json = view.to_string();
+        for secret in [
+            "github_pat_fixture_secret",
+            "Complete fixture requirements",
+            "prompt_file",
+            "codex_home",
+        ] {
+            assert!(!json.contains(secret));
+        }
+    }
+    assert_eq!(events_before, f.events());
+    assert_eq!(board_before, f.board());
+    f.stop(token, job).await;
 }

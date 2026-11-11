@@ -9,6 +9,7 @@ fn assignment(project: &str) -> Assignment {
         project_id: project.into(),
         story_id: "story-1".into(),
         title: "A story".into(),
+        story_url: None,
         context: "Full requirements".into(),
         recovery: false,
     }
@@ -150,4 +151,18 @@ fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
     let second = maistro::codex::worker_prompt(&project, &assignment("p0")).unwrap();
     assert!(second.contains("Revised test command") && second.contains("\"story_branch\":null"));
     assert!(second.contains("\"base_branch\":\"trunk\""));
+}
+
+#[test]
+fn status_server_defaults_to_optional_local_port_8044_and_rejects_invalid_ports() {
+    let minimal = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Board'\nmode='master'\nbase_branch='master'\n";
+    let config: Config = toml::from_str(minimal).unwrap();
+    assert!(!config.status.enabled);
+    assert_eq!(config.status.port, 8044);
+    for port in ["0", "65536", "-1"] {
+        let parsed =
+            toml::from_str::<Config>(&format!("[status]\nenabled=true\nport={port}\n{minimal}"));
+        assert!(parsed.is_err() || parsed.unwrap().validate().is_err());
+    }
+    assert!(toml::from_str::<Config>(&format!("[status]\nlisten='0.0.0.0'\n{minimal}")).is_err());
 }

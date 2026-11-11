@@ -1,3 +1,8 @@
+# Optional read-only page and /api/status. Always binds to 127.0.0.1.
+[status]
+enabled = false
+port = 8044
+
 [orchestrator]
 poll_interval_seconds = 30
 coordinator_timeout_seconds = 300

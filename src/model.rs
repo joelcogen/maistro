@@ -10,6 +10,7 @@ pub struct Assignment {
     pub project_id: String,
     pub story_id: String,
     pub title: String,
+    pub story_url: Option<String>,
     /// Complete requirements, human comments and relevant linked documents.
     pub context: String,
     pub recovery: bool,
@@ -110,6 +111,9 @@ pub struct Coordination {
     pub cancel: Vec<StoryRef>,
     pub acknowledged: Vec<String>,
     pub notes: Vec<String>,
+    /// Display observations only; never used to select or authorize work.
+    #[serde(default)]
+    pub observations: Vec<crate::status::BoardRead>,
 }
 impl Coordination {
     pub fn validate(&self, projects: &[String], snapshot: &Snapshot) -> Result<()> {
@@ -159,10 +163,23 @@ pub fn coordination_schema() -> Value {
     object(json!({
         "assignments":{"type":"array","items":object(json!({
             "project_id":{"type":"string"}, "story_id":{"type":"string"},
-            "title":{"type":"string"}, "context":{"type":"string"}, "recovery":{"type":"boolean"}
+            "title":{"type":"string"}, "story_url":{"type":["string","null"]}, "context":{"type":"string"}, "recovery":{"type":"boolean"}
         }))},
         "cancel":{"type":"array","items":object(json!({"project_id":{"type":"string"},"story_id":{"type":"string"}}))},
-        "acknowledged":strings(), "notes":strings()
+        "acknowledged":strings(), "notes":strings(),
+        "observations":{"type":"array","items":object(json!({
+            "project_id":{"type":"string"},
+            "counts":{"anyOf":[object(json!({
+                "ready":{"type":"integer","minimum":0,"maximum":1000000000},
+                "in_progress":{"type":"integer","minimum":0,"maximum":1000000000},
+                "blocked":{"type":"integer","minimum":0,"maximum":1000000000},
+                "review":{"type":"integer","minimum":0,"maximum":1000000000},
+                "backlog":{"type":"integer","minimum":0,"maximum":1000000000},
+                "done":{"type":"integer","minimum":0,"maximum":1000000000}
+            })), {"type":"null"}]},
+            "read":{"type":"string","enum":["complete","partial","failed","not_read"]},
+            "reason":{"type":"string","enum":["no_eligible_work","dependencies","occupied","read_failed","ambiguous_board","incomplete_read","claim_failed","requirements_blocked","update_failed","work_selected"]}
+        }))}
     }))
 }
 pub fn report_schema() -> Value {
