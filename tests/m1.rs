@@ -77,20 +77,25 @@ fn two_projects_and_invalid_config() {
 #[test]
 fn strict_contract_and_grounded_identifiers() {
     let id = uuid::Uuid::new_v4().to_string();
+    let view_id = uuid::Uuid::new_v4().to_string();
+    let evidence = format!("{id} {view_id}");
     let mut scan = Scan {
         project_id: "a".into(),
         workspace_id: id.clone(),
         board_id: id.clone(),
-        view_id: id.clone(),
+        view_id: view_id.clone(),
         matches: 1,
         complete: true,
         fields_readable: true,
         stories: vec![],
     };
-    scan.validate("a", &id).unwrap();
+    scan.validate("a", &evidence).unwrap();
     scan.matches = 2;
-    assert!(scan.validate("a", &id).is_err());
+    assert!(scan.validate("a", &evidence).is_err());
     scan.matches = 1;
+    scan.view_id = scan.board_id.clone();
+    assert!(scan.validate("a", &evidence).is_err());
+    scan.view_id = view_id;
     assert!(scan.validate("a", "").is_err());
     let mut v = serde_json::to_value(scan).unwrap();
     v["unknown"] = true.into();

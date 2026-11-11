@@ -81,6 +81,10 @@ impl Scan {
             self.complete && self.fields_readable,
             "incomplete board read or unreadable fields"
         );
+        ensure!(
+            self.board_id != self.view_id,
+            "board_id must be the database ID, distinct from view_id"
+        );
         for id in [&self.workspace_id, &self.board_id, &self.view_id] {
             ensure!(
                 uuid::Uuid::parse_str(id).is_ok() && evidence.contains(id),

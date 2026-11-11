@@ -141,3 +141,25 @@ example and AppFlowy setup text. The example omits path keys to use the defaults
 Formatting, strict Clippy, debug/release compilation and all 38 host tests passed,
 including default-path loading, interactive setup path resolution, override
 preservation and invalid HOME handling. The service remains stopped.
+
+## Installed pilot startup fixes — 2026-11-11
+
+Repository access validation now permits an owner account when automatic merging
+is disabled. Automatic merge protection checks still reject administrator
+accounts; push access and squash support remain required. The `admin` repository
+role reported by GitHub is independent of the classic token's `admin:*` scopes.
+
+Sandbox preflight now hides a main checkout's `.git` directory using a read-only
+empty mount, while retaining the file mount for linked worktrees. A host test
+verifies both read-only and writable sandbox modes without changing host metadata.
+
+The first live Luna scan read all three Ready stories but returned the story count
+as the board match count and confused the board view with its database. Clarified
+both fields in the prompt and JSON schema; validation also rejects identical
+database and view IDs. Ambiguous scans continue to fail closed.
+
+Formatting, strict Clippy, debug/release builds and all 42 tests passed, including
+host isolation, owner-account validation, identifier validation and merge gates.
+The installed pilot retains `auto_merge = false`. Live scan and status projection
+verification follows installation of this build; the earlier rejected scan did
+not create execution runs.
