@@ -6,7 +6,47 @@ use std::{path::Path, process::Command};
 fn cli(root: &Path) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_maistro"));
     command.current_dir(root);
+    command.env("HOME", root);
     command
+}
+
+#[test]
+fn installed_config_is_used_from_home_and_unrelated_directories() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path();
+    let installed = home.join(".config/maistro/config.toml");
+    std::fs::create_dir_all(installed.parent().unwrap()).unwrap();
+    let config = common::config(home);
+    std::fs::write(&installed, toml::to_string(&config).unwrap()).unwrap();
+    let elsewhere = home.join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    for cwd in [home, elsewhere.as_path()] {
+        let result = cli(cwd).env("HOME", home).arg("reload").output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(
+            Store::open(&config.orchestrator.state_db)
+                .unwrap()
+                .control("reload")
+                .unwrap()
+                .is_some()
+        );
+    }
+    // Explicit paths must never silently fall back to a different configuration.
+    let result = cli(home)
+        .args(["-c", "missing.toml", "reload"])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("missing.toml"));
+    // Preserve local configuration precedence, including errors in that file.
+    std::fs::write(home.join("config.toml"), "invalid TOML [").unwrap();
+    let result = cli(home).arg("reload").output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("invalid TOML"));
 }
 
 fn output(root: &Path, args: &[&str]) -> String {

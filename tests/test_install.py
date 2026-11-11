@@ -83,14 +83,16 @@ printf '\n# edited\n' >> "$2"
     def test_rerun_preserves_configuration_and_other_environment_settings(self):
         self.config.mkdir(parents=True)
         (self.config / "config.toml").write_text("# existing config\n")
-        (self.config / "environment").write_text(
-            "OTHER=value\nMAISTRO_GITHUB_TOKEN=old\nexport MAISTRO_GITHUB_TOKEN=older")
-        self.assertEqual(self.run_install().returncode, 0)
+        saved = "OTHER=value\nexport MAISTRO_GITHUB_TOKEN=ghp_test_123\n"
+        (self.config / "environment").write_text(saved)
+        result = self.run_install(token="")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("GitHub token (input hidden)", result.stderr)
+        self.assertNotIn("https://github.com/settings/tokens/new", result.stdout)
         self.assertTrue((self.config / "config.toml").read_text().startswith("# existing config"))
-        environment = (self.config / "environment").read_text()
-        self.assertIn("OTHER=value\n", environment)
-        self.assertNotIn("old", environment)
-        self.assertEqual(environment.count("MAISTRO_GITHUB_TOKEN="), 1)
+        self.assertEqual((self.config / "environment").read_text(), saved)
+        self.assertEqual((self.config / "environment").stat().st_mode & 0o777, 0o600)
+        self.assertEqual((self.home / "events").read_text(), "build\nedit\nvalidate\n")
 
     def test_local_config_is_used_on_first_install(self):
         (self.checkout / "config.toml").write_text("# pilot config\n")

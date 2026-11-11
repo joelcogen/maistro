@@ -33,7 +33,9 @@ token. Set an editor that waits for editing to finish, for example
 
 Existing installed configuration is preserved; on first installation, the script
 copies the checkout's `config.toml` if present, otherwise `config.example.toml`.
-Rerunning prompts for a replacement token and retains other environment settings.
+Rerunning reuses the existing environment file without prompting for a token.
+Saved environment settings are loaded for validation; edit the environment file
+directly if you need to replace the token.
 Validation accesses GitHub and AppFlowy and writes local diagnostics. The script
 stops on errors and does not start the daemon. After successful validation, follow
 the service commands under [Validate and start](#validate-and-start).
@@ -276,7 +278,10 @@ Use `validate` when you only want to check the setup.
 ## Commands
 
 All commands accept `-c PATH`. Without it, Maistro reads `config.toml` from the
-current directory. The systemd unit explicitly uses `~/.config/maistro/config.toml`.
+current directory if present, otherwise the installed `~/.config/maistro/config.toml`.
+This lets commands such as `maistro status` and `maistro reload` work from your
+home directory after installation. An explicit `-c PATH` always takes precedence.
+The systemd unit explicitly uses `~/.config/maistro/config.toml`.
 
 | Command | What it does |
 | --- | --- |
@@ -324,7 +329,7 @@ Run `EDITOR=nano maistro config` or `EDITOR='code --wait' maistro -c PATH config
 The command waits for the editor and reports a failure if it exits unsuccessfully.
 `EDITOR` is required and interpreted as a shell command, supporting arguments and
 quoted executable paths; the config path is passed as a separate literal argument.
-It opens the same path selected by `-c` (default: `./config.toml`) without parsing
+It opens the same path selected by `-c` or the default lookup above without parsing
 or validating it, allowing broken files to be repaired and missing files to be
 created by the editor. Parent directories must already exist. Editing does not
 reload a running daemon; use `reload` separately. `--json` does not change editor I/O.

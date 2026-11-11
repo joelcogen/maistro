@@ -155,7 +155,12 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self> {
         let path = path
             .canonicalize()
-            .context("configuration file not found")?;
+            .with_context(|| {
+                format!(
+                    "could not open configuration file {}; use --config PATH to select your configuration",
+                    path.display()
+                )
+            })?;
         let mut c: Self = toml::from_str(&std::fs::read_to_string(&path)?)
             .context("invalid TOML configuration")?;
         let root = path.parent().unwrap();

@@ -19,7 +19,8 @@ use std::{
     about = "Durable AppFlowy/Codex coding orchestrator"
 )]
 struct Cli {
-    #[arg(short, long, global = true, default_value = "config.toml")]
+    /// Configuration file (defaults to local config.toml, then ~/.config/maistro/config.toml).
+    #[arg(short, long, global = true, default_value_os_t = default_config_path())]
     config: PathBuf,
     /// Emit JSON for scripts instead of human-readable output.
     #[arg(long, global = true)]
@@ -83,6 +84,20 @@ enum ProjectAction {
     Pause { id: String },
     Resume { id: String },
 }
+
+fn default_config_path() -> PathBuf {
+    let local = PathBuf::from("config.toml");
+    if !local.exists()
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        let installed = PathBuf::from(home).join(".config/maistro/config.toml");
+        if installed.exists() {
+            return installed;
+        }
+    }
+    local
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     unsafe {

@@ -24,7 +24,10 @@ if [[ ! -e "$config_file" ]]; then
 fi
 chmod 600 -- "$config_file"
 
-cat <<'INSTRUCTIONS'
+if [[ -f "$environment_file" ]]; then
+    printf 'Using existing environment file: %s\n' "$environment_file"
+else
+    cat <<'INSTRUCTIONS'
 Create a GitHub personal access token (classic):
   https://github.com/settings/tokens/new
 1. Sign in with an account that has Write access to your repositories.
@@ -41,33 +44,33 @@ cover all repositories available to the account, so limit that account's access.
 Organizations that block classic tokens cannot use this setup.
 INSTRUCTIONS
 
-while true; do
-    printf 'GitHub token (input hidden): ' >&2
-    if ! IFS= read -r -s token; then
-        printf '\nNo token supplied; installation stopped before validation.\n' >&2
-        exit 1
-    fi
-    printf '\n' >&2
-    # GitHub tokens contain only these characters; keep the environment file
-    # compatible with both shell sourcing and systemd without interpreting input.
-    if [[ "$token" =~ ^[a-zA-Z0-9_]+$ ]]; then
-        break
-    fi
-    printf 'Enter a nonempty GitHub token using letters, digits and underscores.\n' >&2
-done
+    while true; do
+        printf 'GitHub token (input hidden): ' >&2
+        if ! IFS= read -r -s token; then
+            printf '\nNo token supplied; installation stopped before validation.\n' >&2
+            exit 1
+        fi
+        printf '\n' >&2
+        # GitHub tokens contain only these characters; keep the environment file
+        # compatible with both shell sourcing and systemd without interpreting input.
+        if [[ "$token" =~ ^[a-zA-Z0-9_]+$ ]]; then
+            break
+        fi
+        printf 'Enter a nonempty GitHub token using letters, digits and underscores.\n' >&2
+    done
 
-# Replace only our token assignment, retaining other environment settings.
-temporary_environment=$(mktemp "$config_dir/.environment.XXXXXX")
-trap 'rm -f -- "$temporary_environment"' EXIT
-if [[ -f "$environment_file" ]]; then
-    sed '/^[[:space:]]*\(export[[:space:]]\+\)\?MAISTRO_GITHUB_TOKEN[[:space:]]*=/d' \
-        "$environment_file" > "$temporary_environment"
+    temporary_environment=$(mktemp "$config_dir/.environment.XXXXXX")
+    trap 'rm -f -- "$temporary_environment"' EXIT
+    printf 'MAISTRO_GITHUB_TOKEN=%s\n' "$token" > "$temporary_environment"
+    chmod 600 -- "$temporary_environment"
+    mv -- "$temporary_environment" "$environment_file"
+    unset token
 fi
-printf '\nMAISTRO_GITHUB_TOKEN=%s\n' "$token" >> "$temporary_environment"
-chmod 600 -- "$temporary_environment"
-mv -- "$temporary_environment" "$environment_file"
-export MAISTRO_GITHUB_TOKEN="$token"
-unset token
+chmod 600 -- "$environment_file"
+# Load saved settings for validation, just as in the manual startup instructions.
+set -a
+. "$environment_file"
+set +a
 
 printf '\nEdit %s: configure your projects and keep github.token_env = "MAISTRO_GITHUB_TOKEN".\n' "$config_file"
 # EDITOR is a user-selected shell command (e.g. "code --wait"). Pass the
