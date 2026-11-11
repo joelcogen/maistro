@@ -1,0 +1,16 @@
+{
+  "type": "object",
+  "properties": {
+    "story_id": {
+      "type": "string"
+    },
+    "applied": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "story_id",
+    "applied"
+  ],
+  "additionalProperties": false
+}

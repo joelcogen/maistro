@@ -1,0 +1,30 @@
+{
+  "type": "object",
+  "properties": {
+    "head_sha": {
+      "type": "string"
+    },
+    "approved": {
+      "type": "boolean"
+    },
+    "blocking": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "nonblocking": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "head_sha",
+    "approved",
+    "blocking",
+    "nonblocking"
+  ],
+  "additionalProperties": false
+}

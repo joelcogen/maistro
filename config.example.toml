@@ -1,0 +1,53 @@
+[orchestrator]
+poll_interval_seconds = 60
+max_concurrent_workers = 2
+# Runtime paths default to the current user's ~/.local/state/maistro/.
+# Omit these keys to use the defaults; ~/ expands using HOME.
+# state_db = "~/.local/state/maistro/state.db"
+# worktree_root = "~/.local/state/maistro/worktrees"
+# log_root = "~/.local/state/maistro/logs"
+max_attempts = 3
+process_timeout_seconds = 3600
+ci_timeout_seconds = 7200
+retain_worktrees = true
+
+[agents]
+coordinator_model = "gpt-6-luna"
+developer_model = "gpt-6-astra"
+reviewer_model = "gpt-6-astra"
+# Defaults discover CODEX_HOME, otherwise $HOME/.codex; existing appflowy MCP reused.
+# codex = "/home/you/.local/bin/codex"
+mcp_server = "appflowy"
+coordinator_timeout_seconds = 300
+
+[github]
+auto_merge = false
+merge_method = "squash"
+token_env = "MAISTRO_GITHUB_TOKEN"
+
+[[projects]]
+id = "example"
+name = "Example project"
+appflowy_page = "Example Backlog"
+# Prefer appflowy_url instead when the page name is not unique.
+repo = "/absolute/path/to/repo"
+github_repo = "owner/repo"
+base_branch = "main"
+max_workers = 1
+enabled = true
+required_checks = ["test"]
+test_commands = [["cargo", "test", "--locked", "--offline"], ["cargo", "clippy", "--locked", "--offline", "--", "-D", "warnings"]]
+# Read-only toolchains/caches to expose inside isolated workers; never credential directories.
+toolchain_paths = []
+# Prefixes are relative, case-insensitive. Built-in protections always apply.
+protected_paths = []
+allowed_paths = []
+
+[projects.statuses]
+backlog = "Backlog"
+ready = "Ready"
+in_progress = "In Progress"
+review = "Review"
+done = "Done"
+blocked = "Blocked"
+cancelled = "Cancelled"
