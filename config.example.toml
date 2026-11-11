@@ -1,49 +1,29 @@
 [orchestrator]
-poll_interval_seconds = 60
-max_concurrent_workers = 2
-# Runtime paths default to the current user's ~/.local/state/maistro/.
-# Omit these keys to use the defaults; ~/ expands using HOME.
-# state_db = "~/.local/state/maistro/state.db"
-# worktree_root = "~/.local/state/maistro/worktrees"
-# log_root = "~/.local/state/maistro/logs"
-max_attempts = 3
-process_timeout_seconds = 3600
-ci_timeout_seconds = 7200
-retain_worktrees = true
+poll_interval_seconds = 30
+coordinator_timeout_seconds = 300
+worker_timeout_seconds = 3600
+# Diagnostic logs and OS locks only. No local story database.
+# runtime_dir = "~/.local/state/maistro"
 
 [agents]
-coordinator_model = "gpt-6-luna"
-developer_model = "gpt-6-astra"
-reviewer_model = "gpt-6-astra"
-# Defaults discover CODEX_HOME, otherwise $HOME/.codex; existing appflowy MCP reused.
+# One global gpt-6-luna coordinator and one gpt-6-astra worker per project.
+# Uses the existing Codex login and AppFlowy MCP configuration.
 # codex = "/home/you/.local/bin/codex"
+# codex_home = "~/.codex"
 mcp_server = "appflowy"
-coordinator_timeout_seconds = 300
-
-[github]
-auto_merge = false
-merge_method = "squash"
-token_env = "MAISTRO_GITHUB_TOKEN"
 
 [[projects]]
 id = "example"
-name = "Example project"
-appflowy_page = "Example Backlog"
-# Prefer appflowy_url instead when the page name is not unique.
 repo = "/absolute/path/to/repo"
-github_repo = "owner/repo"
-base_branch = "main"
-max_workers = 1
-# Keep implementing Ready stories while earlier PRs await CI or manual merging.
-continue_while_prs_pending = true
+appflowy_page = "Example Backlog"
+# Use appflowy_url instead of appflowy_page if the name is ambiguous.
+mode = "pr" # "pr": push a story branch and open a PR; "master": commit/push base_branch
+base_branch = "main" # May be main, master, or another branch.
+remote = "origin"
 enabled = true
-required_checks = ["test"]
-test_commands = [["cargo", "test", "--locked", "--offline"], ["cargo", "clippy", "--locked", "--offline", "--", "-D", "warnings"]]
-# Read-only toolchains/caches to expose inside isolated workers; never credential directories.
-toolchain_paths = []
-# Prefixes are relative, case-insensitive. Built-in protections always apply.
-protected_paths = []
-allowed_paths = []
+# Relative paths resolve from this configuration file's directory.
+# Additional instructions appended to the complete built-in worker prompt.
+# prompt_file = "prompts/example.md"
 
 [projects.statuses]
 backlog = "Backlog"

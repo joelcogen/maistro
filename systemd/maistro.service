@@ -1,5 +1,5 @@
 [Unit]
-Description=Maistro AppFlowy coding orchestrator
+Description=Maistro AppFlowy coordinator and project workers
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300
@@ -8,16 +8,16 @@ StartLimitBurst=5
 [Service]
 Type=simple
 WorkingDirectory=%h
-Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Override PATH/environment in a user service drop-in for custom toolchains.
+Environment=PATH=%h/.local/bin:%h/.cargo/bin:/usr/local/bin:/usr/bin:/bin
 Environment=RUST_LOG=info
-EnvironmentFile=%h/.config/maistro/environment
+EnvironmentFile=-%h/.config/maistro/environment
 ExecStart=%h/.local/bin/maistro --config %h/.config/maistro/config.toml run
 Restart=on-failure
 RestartSec=15
 TimeoutStopSec=30
 KillMode=control-group
 UMask=0077
-NoNewPrivileges=true
 
 [Install]
 WantedBy=default.target

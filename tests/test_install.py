@@ -1,8 +1,4 @@
-"""Installer integration tests using local tools; no network or real credentials.
-
-Run with: python3 -m unittest discover -s tests -p 'test_install.py'
-"""
-
+"""Installer smoke tests; never build real code or change the user's services."""
 import os
 from pathlib import Path
 import shutil
@@ -13,119 +9,63 @@ import unittest
 
 class InstallTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        root = Path(self.temporary.name)
-        self.checkout = root / "source checkout"
-        self.checkout.mkdir()
-        self.home = root / "home with spaces"
-        self.home.mkdir()
-        self.config = self.home / ".config/maistro"
-        self.tools = root / "tools"
-        self.tools.mkdir()
-        repository = Path(__file__).resolve().parents[1]
-        shutil.copy2(repository / "install.sh", self.checkout)
-        shutil.copy2(repository / "config.example.toml", self.checkout)
-        self.tool("cargo", """
-test "$*" = 'build --release --locked' || exit 90
-printf 'build\n' >> "$HOME/events"
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = Path(self.temp.name)
+        self.checkout = root / 'source checkout'
+        self.home = root / 'home with spaces'
+        self.tools = root / 'tools'
+        for path in (self.checkout, self.home, self.tools):
+            path.mkdir()
+        repo = Path(__file__).resolve().parents[1]
+        for name in ('install.sh', 'config.example.toml', 'systemd/maistro.service', 'examples/project-prompt.md'):
+            target = self.checkout / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(repo / name, target)
+        cargo = self.tools / 'cargo'
+        cargo.write_text('''#!/bin/bash
+set -eu
+test "$*" = 'build --release --locked'
 [ "${FAIL_BUILD:-0}" = 0 ] || exit 21
 mkdir -p target/release
-cp "$FAKE_BINARY" target/release/maistro
-""")
-        self.tool("fake-maistro", """
-test "$#" = 3 && test "$1" = -c && test "$3" = validate || exit 91
-test "$2" = "$HOME/.config/maistro/config.toml" || exit 92
-test "$MAISTRO_GITHUB_TOKEN" = ghp_test_123 || exit 93
-grep -q '# edited' "$2" || exit 94
-printf 'validate\n' >> "$HOME/events"
-if [ "${FAIL_VALIDATE:-0}" != 0 ]; then
-    printf 'incomplete board read or unreadable fields\n' >&2
-fi
-exit "${FAIL_VALIDATE:-0}"
-""")
-        self.tool("editor", """
-test "$1" = --wait && test "$#" = 2 || exit 95
-printf 'edit\n' >> "$HOME/events"
-[ "${FAIL_EDITOR:-0}" = 0 ] || exit 22
-printf '\n# edited\n' >> "$2"
-""")
-        self.env = dict(os.environ, HOME=str(self.home),
-                        PATH=f"{self.tools}:/usr/bin:/bin", EDITOR="editor --wait",
-                        FAKE_BINARY=str(self.tools / "fake-maistro"))
+printf '#!/bin/sh\\nexit 0\\n' > target/release/maistro
+''')
+        cargo.chmod(0o755)
+        systemctl = self.tools / 'systemctl'
+        systemctl.write_text('#!/bin/sh\necho unexpected-service-operation >&2\nexit 99\n')
+        systemctl.chmod(0o755)
+        self.env = dict(os.environ, HOME=str(self.home), PATH=f'{self.tools}:/usr/bin:/bin')
+        self.config = self.home / '.config/maistro'
 
-    def tool(self, name, body):
-        path = self.tools / name
-        path.write_text("#!/bin/bash\nset -eu\n" + body)
-        path.chmod(0o755)
+    def install(self, **env):
+        return subprocess.run([str(self.checkout / 'install.sh')], cwd=self.home,
+                              env=dict(self.env, **env), input='', text=True, capture_output=True)
 
-    def run_install(self, token="ghp_test_123\n", **variables):
-        result = subprocess.run(
-            [str(self.checkout / "install.sh")], cwd=self.home,
-            env=dict(self.env, **variables), input=token, text=True,
-            capture_output=True,
-        )
-        self.assertNotIn("ghp_test_123", result.stdout + result.stderr)
-        return result
-
-    def test_install_edits_then_validates_with_private_credentials(self):
-        result = self.run_install()
+    def test_install_without_credentials_or_starting_service(self):
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("https://github.com/settings/tokens/new", result.stdout)
-        self.assertEqual((self.home / "events").read_text(), "build\nedit\nvalidate\n")
-        self.assertEqual(self.config.stat().st_mode & 0o777, 0o700)
-        for name in ("config.toml", "environment"):
-            self.assertEqual((self.config / name).stat().st_mode & 0o777, 0o600)
-        self.assertEqual((self.config / "environment").read_text().strip(),
-                         "MAISTRO_GITHUB_TOKEN=ghp_test_123")
-        self.assertTrue(os.access(self.home / ".local/bin/maistro", os.X_OK))
+        self.assertTrue(os.access(self.home / '.local/bin/maistro', os.X_OK))
+        self.assertTrue((self.home / '.config/systemd/user/maistro.service').exists())
+        self.assertTrue((self.config / 'prompts/example.md').exists())
+        self.assertFalse((self.config / 'environment').exists())
+        self.assertEqual((self.config / 'config.toml').stat().st_mode & 0o777, 0o600)
+        self.assertIn('systemctl --user start maistro', result.stdout)
 
-    def test_rerun_preserves_configuration_and_other_environment_settings(self):
+    def test_preserves_existing_configuration_and_environment(self):
         self.config.mkdir(parents=True)
-        (self.config / "config.toml").write_text("# existing config\n")
-        saved = "OTHER=value\nexport MAISTRO_GITHUB_TOKEN=ghp_test_123\n"
-        (self.config / "environment").write_text(saved)
-        result = self.run_install(token="")
+        (self.config / 'config.toml').write_text('old config needing migration\n')
+        (self.config / 'environment').write_text('PATH=/custom/bin\n')
+        result = self.install()
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertNotIn("GitHub token (input hidden)", result.stderr)
-        self.assertNotIn("https://github.com/settings/tokens/new", result.stdout)
-        self.assertTrue((self.config / "config.toml").read_text().startswith("# existing config"))
-        self.assertEqual((self.config / "environment").read_text(), saved)
-        self.assertEqual((self.config / "environment").stat().st_mode & 0o777, 0o600)
-        self.assertEqual((self.home / "events").read_text(), "build\nedit\nvalidate\n")
+        self.assertEqual((self.config / 'config.toml').read_text(), 'old config needing migration\n')
+        self.assertEqual((self.config / 'environment').read_text(), 'PATH=/custom/bin\n')
+        self.assertIn('require migration', result.stdout)
 
-    def test_local_config_is_used_on_first_install(self):
-        (self.checkout / "config.toml").write_text("# pilot config\n")
-        self.assertEqual(self.run_install().returncode, 0)
-        self.assertTrue((self.config / "config.toml").read_text().startswith("# pilot config"))
-
-    def test_failures_propagate_and_stop_later_steps(self):
-        for variable, code, events in (
-            ("FAIL_BUILD", 21, "build\n"),
-            ("FAIL_EDITOR", 22, "build\nedit\n"),
-            ("FAIL_VALIDATE", 23, "build\nedit\nvalidate\n"),
-        ):
-            with self.subTest(variable=variable):
-                (self.home / "events").write_text("")
-                result = self.run_install(**{variable: str(code)})
-                self.assertEqual(result.returncode, code)
-                self.assertEqual((self.home / "events").read_text(), events)
-                self.assertNotIn("Installation and validation succeeded", result.stdout)
-                if variable == "FAIL_VALIDATE":
-                    self.assertIn("incomplete board read or unreadable fields", result.stderr)
-
-    def test_empty_or_shell_input_is_rejected_and_eof_stops(self):
-        result = self.run_install("\n$(touch should-not-exist)\n")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.checkout / "should-not-exist").exists())
-        self.assertFalse((self.config / "environment").exists())
-        self.assertEqual((self.home / "events").read_text(), "build\n")
-
-    def test_unset_editor_falls_back_to_vi(self):
-        self.tool("vi", 'printf "\\n# edited\\n" >> "$1"\n')
-        self.env.pop("EDITOR")
-        self.assertEqual(self.run_install().returncode, 0)
+    def test_build_failure_stops_install(self):
+        result = self.install(FAIL_BUILD='1')
+        self.assertEqual(result.returncode, 21)
+        self.assertFalse((self.home / '.local/bin/maistro').exists())
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

@@ -128,21 +128,6 @@ pub async fn run(
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
-    if let Some(p) = log {
-        if let Some(parent) = p.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let terminated = p.with_extension("terminated");
-        if terminated.exists() {
-            std::fs::remove_file(terminated)?;
-        }
-        std::fs::write(
-            p.with_extension("pid"),
-            serde_json::to_vec(
-                &serde_json::json!({"pid":pid,"start":process_start(pid),"boot":boot_id()}),
-            )?,
-        )?;
-    }
     let operation = async {
         let write = async {
             stdin.write_all(input.as_bytes()).await?;
@@ -165,12 +150,6 @@ pub async fn run(
     let result = tokio::select! {r=tokio::time::timeout(timeout,operation)=>match r{Ok(r)=>r,Err(_)=>Err(anyhow::anyhow!("subprocess timed out"))},_=cancel.cancelled()=>Err(anyhow::anyhow!("subprocess cancelled"))};
     terminate(&mut child, pid).await?;
     group.armed = false;
-    if let Some(p) = log {
-        std::fs::write(
-            p.with_extension("terminated"),
-            "process group confirmed gone\n",
-        )?;
-    }
     if let (Some(p), Ok(o)) = (log, &result) {
         std::fs::write(p, &o.stdout)?;
         std::fs::write(p.with_extension("stderr"), &o.stderr)?;
@@ -186,61 +165,4 @@ pub async fn checked(cmd: Command, timeout: Duration) -> Result<String> {
         o.stderr.chars().take(2000).collect::<String>()
     );
     Ok(o.stdout.trim().into())
-}
-
-fn boot_id() -> String {
-    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
-        .unwrap_or_default()
-        .trim()
-        .into()
-}
-fn process_start(pid: u32) -> Option<u64> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat.rsplit_once(") ")?
-        .1
-        .split_whitespace()
-        .nth(19)?
-        .parse()
-        .ok()
-}
-/// Only unfinished process records are checked; PID identity prevents killing/reusing unrelated PIDs.
-pub fn reconcile_groups(root: &Path) -> Result<()> {
-    if !root.exists() {
-        return Ok(());
-    }
-    for entry in std::fs::read_dir(root)? {
-        let entry = entry?;
-        let kind = entry.file_type()?;
-        if kind.is_symlink() {
-            continue;
-        }
-        let path = entry.path();
-        if kind.is_dir() {
-            reconcile_groups(&path)?;
-        } else if path.extension().is_some_and(|x| x == "pid")
-            && !path.with_extension("terminated").exists()
-        {
-            let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
-            let pid = value["pid"]
-                .as_u64()
-                .and_then(|p| u32::try_from(p).ok())
-                .context("invalid process identity record")?;
-            if value["boot"].as_str() != Some(&boot_id()) {
-                continue;
-            }
-            if let (Some(recorded), Some(current)) = (value["start"].as_u64(), process_start(pid))
-                && recorded != current
-            {
-                continue;
-            }
-            if group_exists(pid) {
-                return Err(UnconfirmedTermination { pid }.into());
-            }
-            std::fs::write(
-                path.with_extension("terminated"),
-                "recovery confirmed process group gone\n",
-            )?;
-        }
-    }
-    Ok(())
 }
