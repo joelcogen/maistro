@@ -40,6 +40,7 @@ pub struct Agents {
     pub codex: PathBuf,
     pub codex_home: PathBuf,
     pub mcp_server: String,
+    pub github_token_file: PathBuf,
 }
 impl Default for Agents {
     fn default() -> Self {
@@ -49,6 +50,7 @@ impl Default for Agents {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("~/.codex")),
             mcp_server: "appflowy".into(),
+            github_token_file: "~/.config/maistro/github-token".into(),
         }
     }
 }
@@ -116,6 +118,7 @@ impl Config {
         let root = path.parent().unwrap();
         config.orchestrator.runtime_dir = resolve(&config.orchestrator.runtime_dir, root)?;
         config.agents.codex_home = resolve(&config.agents.codex_home, root)?;
+        config.agents.github_token_file = resolve(&config.agents.github_token_file, root)?;
         if config.agents.codex.components().count() > 1 {
             config.agents.codex = resolve(&config.agents.codex, root)?;
         }

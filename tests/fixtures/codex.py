@@ -18,6 +18,8 @@ if args == ['login', 'status']:
     sys.exit(0)
 model = args[args.index('-m') + 1]
 prompt = sys.stdin.read()
+token = (ROOT / 'github-token').read_text().strip()
+assert token not in prompt and not any(token in arg for arg in args)
 output = Path(args[args.index('-o') + 1])
 assert 'features.multi_agent=false' in args
 assert '--no-daemon' in args and '--ephemeral' in args
@@ -43,6 +45,7 @@ def stopped(signum, frame):
 signal.signal(signal.SIGTERM, stopped)
 print(json.dumps({'type': 'thread.started', 'thread_id': str(os.getpid())}), flush=True)
 if model == 'gpt-6-luna':
+    assert 'GH_TOKEN' not in os.environ and 'GITHUB_TOKEN' not in os.environ
     assert '--ignore-user-config' in args
     assert args[args.index('--sandbox') + 1] == 'read-only'
     # Detect simultaneous coordinator processes independently of the test board lock.
@@ -88,6 +91,16 @@ else:
     assert args[args.index('--sandbox') + 1] == 'danger-full-access'
     assert 'mcp_servers.appflowy.enabled=false' in args
     assert os.environ['GIT_TERMINAL_PROMPT'] == '0'
+    assert os.environ['GH_TOKEN'] == token and os.environ['GITHUB_TOKEN'] == token
+    assert 'shell_environment_policy.ignore_default_excludes=true' in args
+    assert 'shell_environment_policy.exclude=[]' in args
+    assert 'shell_environment_policy.include_only=[]' in args
+    assert 'Use the supplied GH_TOKEN' in prompt
+    # Exercise Git's actual credential lookup without a network request.
+    credentials = subprocess.run(['git', 'credential', 'fill'],
+        input='protocol=https\nhost=github.com\n\n', text=True, capture_output=True)
+    assert credentials.returncode == 0
+    assert f'password={token}' in credentials.stdout
     assert 'PROJECT INSTRUCTIONS:\nRun fixture tests.' in prompt
     assignment = json.loads(prompt.split('\nASSIGNMENT=', 1)[1])
     git_config = json.loads(prompt.split('\nGIT=', 1)[1].split('\nASSIGNMENT=', 1)[0])

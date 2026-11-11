@@ -16,7 +16,7 @@ struct Cli {
 enum Action {
     /// Run in the foreground. Use systemctl --user start/stop maistro for the service.
     Run,
-    /// Check configuration, local repositories, Codex login and MCP settings; no model calls.
+    /// Check configuration, token file, repositories, Codex login and MCP; no model calls.
     Validate,
 }
 fn default_config() -> PathBuf {
@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
         Action::Validate => {
             engine.validate().await?;
             println!(
-                "Configuration, repositories, Codex login and AppFlowy MCP settings are valid. No remote access or model calls were tested."
+                "Configuration, private GitHub token file, repositories, Codex login and AppFlowy MCP settings are valid. No remote access, token permissions or model calls were tested."
             );
         }
         Action::Run => {

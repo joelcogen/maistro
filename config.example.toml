@@ -11,6 +11,8 @@ worker_timeout_seconds = 3600
 # codex = "/home/you/.local/bin/codex"
 # codex_home = "~/.codex"
 mcp_server = "appflowy"
+# Private file created by install.sh; loaded for each worker, never added to prompts.
+# github_token_file = "~/.config/maistro/github-token"
 
 [[projects]]
 id = "example"

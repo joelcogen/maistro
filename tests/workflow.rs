@@ -81,11 +81,15 @@ impl Fixture {
             });
         }
         fs::write(root.join("board.json"), serde_json::to_vec(&board).unwrap()).unwrap();
+        let github_token_file = root.join("github-token");
+        fs::write(&github_token_file, "github_pat_fixture_secret\n").unwrap();
+        fs::set_permissions(&github_token_file, fs::Permissions::from_mode(0o600)).unwrap();
         let config = Config {
             agents: Agents {
                 codex: executable,
                 codex_home: home,
                 mcp_server: "appflowy".into(),
+                github_token_file,
             },
             orchestrator: Orchestrator {
                 runtime_dir: root.join("runtime"),
@@ -164,6 +168,44 @@ impl Fixture {
             panic!("engine failed: {e:#}; events: {:?}", self.events());
         }
     }
+}
+
+#[tokio::test]
+async fn workers_reload_rotated_tokens_without_putting_them_in_logs() {
+    let f = Fixture::new(&[Mode::Master, Mode::Pr]);
+    let codex = maistro::codex::Codex::new(f.config.clone());
+    let tokens = ["github_pat_first", "github_pat_rotated"];
+    for token in tokens {
+        fs::write(&f.config.agents.github_token_file, token).unwrap();
+        for (i, project) in f.config.projects.iter().enumerate() {
+            let assignment = maistro::model::Assignment {
+                project_id: project.id.clone(),
+                story_id: format!("story-{i}"),
+                title: "Token test".into(),
+                context: "Verify authentication".into(),
+                recovery: false,
+            };
+            codex
+                .work(project, &assignment, &CancellationToken::new())
+                .await
+                .unwrap();
+        }
+    }
+    for entry in fs::read_dir(f.config.orchestrator.runtime_dir.join("logs")).unwrap() {
+        let content = fs::read_to_string(entry.unwrap().path()).unwrap();
+        for token in tokens {
+            assert!(!content.contains(token));
+        }
+    }
+}
+
+#[tokio::test]
+async fn missing_token_fails_validation_before_starting_agents() {
+    let f = Fixture::new(&[Mode::Master]);
+    fs::remove_file(&f.config.agents.github_token_file).unwrap();
+    let error = Engine::new(f.config.clone()).validate().await.unwrap_err();
+    assert!(error.to_string().contains("run install.sh"));
+    assert!(f.events().is_empty());
 }
 
 #[tokio::test]

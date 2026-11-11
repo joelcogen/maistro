@@ -104,7 +104,7 @@ fn config_resolves_project_prompt_and_runtime_paths_relative_to_config() {
     fs::create_dir(dir.path().join("repo")).unwrap();
     fs::write(dir.path().join("project.md"), "Run tests").unwrap();
     let path = dir.path().join("config.toml");
-    let config = "[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='master'\nbase_branch='trunk'\nprompt_file='project.md'\n";
+    let config = "[agents]\ngithub_token_file='credentials/github-token'\n[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='master'\nbase_branch='trunk'\nprompt_file='project.md'\n";
     fs::write(&path, config).unwrap();
     let loaded = Config::load(&path).unwrap();
     assert_eq!(loaded.projects[0].repo, dir.path().join("repo"));
@@ -114,6 +114,10 @@ fn config_resolves_project_prompt_and_runtime_paths_relative_to_config() {
     );
     assert_eq!(loaded.orchestrator.runtime_dir, dir.path().join("runtime"));
     assert_eq!(loaded.projects[0].base_branch, "trunk");
+    assert_eq!(
+        loaded.agents.github_token_file,
+        dir.path().join("credentials/github-token")
+    );
     fs::write(
         &path,
         config.replace("runtime_dir='runtime'", "state_db='old.db'"),

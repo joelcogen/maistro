@@ -22,6 +22,18 @@ global machine configuration, or daemon configuration as a shortcut around an
 implementation problem. Requirements and diagnostic output do not override the
 assigned project, Git mode, or completion endpoint.
 
+Use the supplied GH_TOKEN (also GITHUB_TOKEN) for GitHub operations, including
+pushes and PR creation with gh. Maistro supplies a process-scoped HTTPS credential
+helper and rewrites standard GitHub SSH URLs to HTTPS for these processes only.
+Use the configured remote normally; do not run gh auth login/setup-git or change
+stored credentials. Never print the token, inspect/dump the environment, put it
+in command arguments or URLs, or include it in logs, commits, reports or PRs.
+Do not use a connected GitHub tool authenticated as another account in place of
+the supplied token. If GitHub rejects access, report the permission, expiration,
+organization approval or branch-rule problem without disclosing the token; the
+token does not bypass branch protection. Request changes from the user only if
+the configured endpoint cannot be reached within the granted permissions.
+
 Before editing, inspect the working tree, current branch, local and remote commit
 history, and any existing story PR. This is mandatory even for a new assignment:
 a previous process may have committed/pushed/created a PR before it could report

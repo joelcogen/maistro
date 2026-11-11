@@ -1,5 +1,6 @@
 use crate::{
     config::{Config, Mode, Project},
+    github,
     model::{self, Assignment, Coordination, Report, Snapshot},
     process,
 };
@@ -68,6 +69,7 @@ impl Codex {
     }
 
     pub async fn validate_cli(&self) -> Result<()> {
+        github::read_token(&self.config.agents.github_token_file)?;
         let mut cmd = Command::new(&self.config.agents.codex);
         cmd.args(["exec", "--help"]);
         let help = process::checked(cmd, Duration::from_secs(15)).await?;
@@ -146,12 +148,22 @@ impl Codex {
             cmd.args(["-c", setting]);
         }
         if project.is_some() {
+            github::configure_worker(
+                &mut cmd,
+                &github::read_token(&self.config.agents.github_token_file)?,
+            )?;
             // Inherit normal configuration, tools, PATH and credentials. No outer sandbox.
             cmd.args([
                 "--sandbox",
                 "danger-full-access",
                 "-c",
                 "shell_environment_policy.inherit=\"all\"",
+                "-c",
+                "shell_environment_policy.ignore_default_excludes=true",
+                "-c",
+                "shell_environment_policy.exclude=[]",
+                "-c",
+                "shell_environment_policy.include_only=[]",
             ]);
             // Luna owns AppFlowy, even when it is enabled in the user's normal config.
             cmd.args([
@@ -162,6 +174,9 @@ impl Codex {
                 ),
             ]);
         } else {
+            cmd.env_remove("GH_TOKEN")
+                .env_remove("GITHUB_TOKEN")
+                .env_remove("MAISTRO_GITHUB_TOKEN");
             cmd.args(["--ignore-user-config", "--sandbox", "read-only"]);
             for setting in [
                 "features.shell_tool=false",
