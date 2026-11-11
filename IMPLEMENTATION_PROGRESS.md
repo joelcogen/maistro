@@ -352,3 +352,13 @@ and review evidence cleared. AppFlowy was restored to Review. After restart,
 Maistro completed the clean merge and fresh tests and independent review at head
 `7584cc784469408f12d50e024cd0510169622cd1`, still on attempt three. The daemon is
 active; automatic merging is disabled. Remote push/CI follow this verification.
+
+The verified head was pushed to PR #2. A subsequent base advance introduced an
+actual conflict in `src/github.rs`; the historical attempt count still included
+the earlier unnecessary coding invocation, so it exhausted the retained budget.
+Restored the unchanged story to Ready and used the supported CLI retry. SQLite
+confirms the same run/worktree/PR is queued with a fresh bounded budget; actual
+conflict repair is pending behind current work. Separately, the user merged
+Nicer CLI PR #3: Maistro verified merge commit
+`f428334987625a76ef4ab826e8f192847e0feffc` on the base and automatically moved its
+AppFlowy story to Done, confirmed by a direct board read.
