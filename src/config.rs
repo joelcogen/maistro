@@ -87,6 +87,10 @@ pub struct Project {
     pub repo: PathBuf,
     pub appflowy_url: Option<String>,
     pub appflowy_page: Option<String>,
+    /// Link identifying one Shortcut workflow in the configured MCP workspace.
+    pub shortcut_url: Option<String>,
+    /// Codex MCP server name; defaults to shortcut or agents.mcp_server.
+    pub mcp_server: Option<String>,
     pub mode: Mode,
     pub base_branch: String,
     #[serde(default = "origin")]
@@ -97,6 +101,33 @@ pub struct Project {
     #[serde(default)]
     pub statuses: Statuses,
 }
+impl Project {
+    pub fn is_shortcut(&self) -> bool {
+        self.shortcut_url.is_some()
+    }
+    pub fn source_name(&self) -> &'static str {
+        if self.is_shortcut() {
+            "Shortcut"
+        } else {
+            "AppFlowy"
+        }
+    }
+    pub fn mcp_server<'a>(&'a self, agents: &'a Agents) -> &'a str {
+        self.mcp_server.as_deref().unwrap_or_else(|| {
+            if self.is_shortcut() {
+                "shortcut"
+            } else {
+                &agents.mcp_server
+            }
+        })
+    }
+    pub fn board_url(&self) -> Option<&str> {
+        self.shortcut_url
+            .as_deref()
+            .or(self.appflowy_url.as_deref())
+    }
+}
+
 fn origin() -> String {
     "origin".into()
 }
@@ -171,6 +202,7 @@ impl Config {
         );
         let mut ids = HashSet::new();
         let mut repos = HashSet::new();
+        let mut servers = std::collections::HashMap::new();
         for p in &self.projects {
             ensure!(
                 identifier(&p.id) && ids.insert(&p.id),
@@ -187,14 +219,19 @@ impl Config {
                 "projects must have different repositories"
             );
             ensure!(
-                p.appflowy_url.is_some() != p.appflowy_page.is_some(),
-                "{}: specify exactly one appflowy_url or appflowy_page",
+                [&p.appflowy_url, &p.appflowy_page, &p.shortcut_url]
+                    .iter()
+                    .filter(|v| v.is_some())
+                    .count()
+                    == 1,
+                "{}: specify exactly one appflowy_url, appflowy_page or shortcut_url",
                 p.id
             );
             ensure!(
                 p.appflowy_url
                     .as_ref()
                     .or(p.appflowy_page.as_ref())
+                    .or(p.shortcut_url.as_ref())
                     .is_some_and(|s| !s.trim().is_empty()),
                 "empty board target"
             );
@@ -205,6 +242,29 @@ impl Config {
                     && !p.remote.starts_with('-'),
                 "invalid base branch or remote"
             );
+            let server = p.mcp_server(&self.agents);
+            ensure!(identifier(server), "{}: invalid MCP server name", p.id);
+            if let Some(previous) = servers.insert(server, p.is_shortcut()) {
+                ensure!(
+                    previous == p.is_shortcut(),
+                    "MCP server {server} cannot serve both AppFlowy and Shortcut"
+                );
+            }
+            if let Some(url) = &p.shortcut_url {
+                let url = reqwest::Url::parse(url).context("invalid shortcut_url")?;
+                ensure!(
+                    url.scheme() == "https"
+                        && url.host_str() == Some("app.shortcut.com")
+                        && url.username().is_empty()
+                        && url.password().is_none()
+                        && url.port().is_none()
+                        && url
+                            .path_segments()
+                            .is_some_and(|s| s.filter(|s| !s.is_empty()).count() >= 2),
+                    "{}: shortcut_url must be an https://app.shortcut.com/<workspace>/... workflow link",
+                    p.id
+                );
+            }
             let s = &p.statuses;
             let statuses = [
                 &s.backlog,

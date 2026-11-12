@@ -255,3 +255,143 @@ fn coordinator_retry_signal_is_required_scoped_and_unique() {
     );
     assert!(serde_json::from_value::<Coordination>(serde_json::json!({"assignments":[],"cancel":[],"acknowledged":[],"notes":[],"observations":[]})).is_err());
 }
+
+#[test]
+fn shortcut_configuration_is_exclusive_scoped_and_backward_compatible() {
+    let old = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Board'\nmode='master'\nbase_branch='master'\n";
+    let old_config: Config = toml::from_str(old).unwrap();
+    old_config.validate().unwrap();
+    assert_eq!(
+        old_config.projects[0].mcp_server(&old_config.agents),
+        "appflowy"
+    );
+    let shortcut = old.replace(
+        "appflowy_page='Board'",
+        "shortcut_url='https://app.shortcut.com/team/settings/workflows/42'",
+    );
+    let config: Config = toml::from_str(&shortcut).unwrap();
+    config.validate().unwrap();
+    assert_eq!(config.projects[0].mcp_server(&config.agents), "shortcut");
+    assert_eq!(config.projects[0].source_name(), "Shortcut");
+    let prompt = maistro::codex::worker_prompt(&config.projects[0], &assignment("p")).unwrap();
+    assert!(prompt.contains("Shortcut story: story-1"));
+    assert!(prompt.contains("access AppFlowy or Shortcut"));
+    for invalid in [
+        shortcut.replace("shortcut_url=", "appflowy_page='Board'\nshortcut_url="),
+        old.replace("appflowy_page='Board'", ""),
+        shortcut.replace("https://app.shortcut.com/team/settings/workflows/42", ""),
+        shortcut.replace("https://", "http://"),
+        shortcut.replace("app.shortcut.com", "app.shortcut.com.evil.test"),
+        shortcut.replace("app.shortcut.com", "user:secret@app.shortcut.com"),
+        shortcut.replace("/team/settings/workflows/42", "/team"),
+        shortcut.replace("mode='master'", "mode='master'\nmcp_server='bad.name'"),
+    ] {
+        assert!(
+            toml::from_str::<Config>(&invalid)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
+    }
+    let conflicting = format!(
+        "{shortcut}\n{}",
+        old.replace("id='p'", "id='p2'")
+            .replace("repo='/tmp'", "repo='/var'")
+            .replace(
+                "appflowy_page='Board'",
+                "appflowy_page='Board'\nmcp_server='shortcut'"
+            )
+    );
+    assert!(
+        toml::from_str::<Config>(&conflicting)
+            .unwrap()
+            .validate()
+            .is_err()
+    );
+}
+
+#[test]
+fn source_mcp_policies_reuse_connections_and_expose_only_coordination_tools() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("config.toml"),
+        r#"
+[mcp_servers.team_shortcut]
+url = "https://mcp.shortcut.com/mcp"
+enabled = false
+disabled_tools = ["update_story"]
+[mcp_servers.team_shortcut.http_headers]
+x-fixture = "preserved"
+[mcp_servers.team_shortcut.tools.update_story]
+approval_mode = "prompt"
+[mcp_servers.appflowy]
+command = "fixture-appflowy"
+args = ["--fixture"]
+"#,
+    )
+    .unwrap();
+    let mut config: Config = toml::from_str("[[projects]]\nid='p'\nrepo='/tmp'\nshortcut_url='https://app.shortcut.com/team/settings/workflows/42'\nmcp_server='team_shortcut'\nmode='master'\nbase_branch='master'\n").unwrap();
+    config.agents.codex_home = dir.path().into();
+    let codex = maistro::codex::Codex::new(config.clone());
+    let shortcut = codex.mcp_config(&config.projects[0]).unwrap();
+    assert_eq!(
+        shortcut["url"].as_str(),
+        Some("https://mcp.shortcut.com/mcp")
+    );
+    assert_eq!(
+        shortcut["http_headers"]["x-fixture"].as_str(),
+        Some("preserved")
+    );
+    assert_eq!(shortcut["enabled"].as_bool(), Some(true));
+    assert!(shortcut.get("disabled_tools").is_none());
+    assert_eq!(
+        shortcut["tools"]["update_story"]["approval_mode"].as_str(),
+        Some("approve")
+    );
+    let enabled = shortcut["enabled_tools"].as_array().unwrap();
+    for tool in [
+        "list_workflows",
+        "get_workflow",
+        "list_workflow_states",
+        "search_stories",
+        "get_story",
+        "list_story_comments",
+        "create_story_comment",
+        "update_story",
+        "get_doc",
+        "read_file",
+    ] {
+        assert!(enabled.contains(&toml::Value::from(tool)), "missing {tool}");
+    }
+    for tool in [
+        "create_story",
+        "delete_story",
+        "create_doc",
+        "update_row_cells",
+        "list_workspace_tokens",
+    ] {
+        assert!(
+            !enabled.contains(&toml::Value::from(tool)),
+            "unexpected {tool}"
+        );
+    }
+    config.projects[0].shortcut_url = None;
+    config.projects[0].appflowy_page = Some("Board".into());
+    config.projects[0].mcp_server = None;
+    let appflowy = codex.mcp_config(&config.projects[0]).unwrap();
+    assert_eq!(appflowy["command"].as_str(), Some("fixture-appflowy"));
+    assert!(
+        appflowy["enabled_tools"]
+            .as_array()
+            .unwrap()
+            .contains(&toml::Value::from("update_row_cells"))
+    );
+    config.projects[0].mcp_server = Some("missing".into());
+    assert!(
+        codex
+            .mcp_config(&config.projects[0])
+            .unwrap_err()
+            .to_string()
+            .contains("missing")
+    );
+}

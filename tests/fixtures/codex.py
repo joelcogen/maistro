@@ -53,6 +53,18 @@ if model == 'gpt-6-luna':
     fcntl.flock(singleton, fcntl.LOCK_EX | fcntl.LOCK_NB)
     snapshot = json.loads(prompt.split('\nSNAPSHOT=', 1)[1])
     projects = json.loads(prompt.split('\nPROJECTS=', 1)[1].split('\nSNAPSHOT=', 1)[0])
+    configured = {arg.split('=', 1)[0].split('.', 1)[1] for arg in args
+                  if arg.startswith('mcp_servers.') and '={' in arg}
+    assert configured == {p['mcp_server'] for p in projects}
+    for project in projects:
+        source = project['source']
+        setting = next(arg for arg in args if arg.startswith(f"mcp_servers.{project['mcp_server']}={{"))
+        if source == 'Shortcut':
+            assert 'get_story' in setting and 'update_story' in setting
+            assert 'update_row_cells' not in setting and 'create_story_comment' in setting
+        else:
+            assert source == 'AppFlowy' and 'update_row_cells' in setting
+            assert 'update_story' not in setting
     event('coordinator', snapshot=snapshot, projects=[p['id'] for p in projects])
     if (ROOT / 'luna-fail').exists():
         sys.exit(4)
@@ -109,7 +121,9 @@ else:
     assert model == 'gpt-6-astra'
     assert '--ignore-user-config' not in args
     assert args[args.index('--sandbox') + 1] == 'danger-full-access'
-    assert 'mcp_servers.appflowy.enabled=false' in args
+    user_config = (ROOT / 'codex-home/config.toml').read_text()
+    for server in ('appflowy', 'shortcut', 'shortcut_team'):
+        assert (f'mcp_servers.{server}.enabled=false' in args) == (f'[mcp_servers.{server}]' in user_config)
     assert os.environ['GIT_TERMINAL_PROMPT'] == '0'
     assert os.environ['GH_TOKEN'] == token and os.environ['GITHUB_TOKEN'] == token
     assert 'shell_environment_policy.ignore_default_excludes=true' in args

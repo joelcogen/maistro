@@ -142,6 +142,7 @@ pub struct ProjectStatus {
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Polling {
+    pub method: &'static str,
     pub last_poll_at: Option<u64>,
     pub last_change_at: Option<u64>,
     pub dirty: bool,
@@ -177,11 +178,16 @@ impl Status {
                 id: p.id.clone(),
                 enabled: p.enabled,
                 mode: p.mode,
-                board_url: p.appflowy_url.as_deref().and_then(safe_url),
+                board_url: p.board_url().and_then(safe_url),
                 story: None,
                 worker: Activity::new(if p.enabled { "idle" } else { "disabled" }),
                 last_outcome: None,
                 polling: Polling {
+                    method: if p.is_shortcut() {
+                        "coordinator"
+                    } else {
+                        "rust"
+                    },
                     last_poll_at: None,
                     last_change_at: None,
                     dirty: p.enabled,
@@ -331,13 +337,21 @@ impl Status {
         if outcome.is_some() {
             self.project(id).last_outcome = outcome;
         }
-        self.project(id).worker.finish(if outcome.is_some() { "pending_update" } else { "idle" },
+        self.project(id).worker.finish(
+            if outcome.is_some() {
+                "pending_update"
+            } else {
+                "idle"
+            },
             match (outcome, failed) {
                 (None, _) => "Worker stopped after board cancellation",
-                (_, true) => "Worker process failed; blocked result awaiting AppFlowy. See private daemon logs",
-                (Some(Outcome::Completed), _) => "Completed; awaiting AppFlowy recording",
-                (Some(Outcome::Blocked), _) => "Worker reported blocked; awaiting AppFlowy recording",
-            });
+                (_, true) => {
+                    "Worker process failed; blocked result awaiting board. See private daemon logs"
+                }
+                (Some(Outcome::Completed), _) => "Completed; awaiting board recording",
+                (Some(Outcome::Blocked), _) => "Worker reported blocked; awaiting board recording",
+            },
+        );
         self.project(id).worker.last_error = if failed && outcome.is_some() {
             Some("Worker process failed; see private daemon logs")
         } else {
@@ -357,9 +371,9 @@ impl Status {
         p.worker.state = "idle";
         p.worker.latest_event = if recorded {
             match p.last_outcome {
-                Some(Outcome::Completed) => "Completed result reconciled with AppFlowy",
-                Some(Outcome::Blocked) => "Blocked result reconciled with AppFlowy",
-                None => "Result reconciled with AppFlowy",
+                Some(Outcome::Completed) => "Completed result reconciled with board",
+                Some(Outcome::Blocked) => "Blocked result reconciled with board",
+                None => "Result reconciled with board",
             }
         } else {
             "Pending result discarded after board cancellation"

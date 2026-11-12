@@ -1,13 +1,14 @@
 # Maistro
 
-Maistro runs one Luna coordinator for AppFlowy and one Astra coding worker per
-project. Projects run in parallel; each project handles one story at a time.
-AppFlowy is the source of truth. There is no SQLite database, local board mirror,
+Maistro runs one Luna coordinator for AppFlowy and Shortcut and one Astra coding
+worker per project. Projects run in parallel; each project handles one story at a
+time. Each project's configured board/workflow is the source of truth. There is no
+SQLite database, local board mirror,
 independent reviewer, CI watcher, or merge pipeline.
 
 Luna selects a story, gathers its complete requirements and linked context, and
 confirms it is In Progress. Astra implements it, runs tests, fixes failures,
-commits and pushes. Luna then records the result in AppFlowy.
+commits and pushes. Luna then records the result on the story's source.
 
 ## Project modes
 
@@ -24,7 +25,8 @@ or “Deliver this story as a PR on branch `feature/new-export`.” Asking to im
 the story on a named feature/story branch also implies PR delivery. A PR project
 can likewise specify a custom branch. Without a requested name, Astra uses stable
 `maistro/<project>/<story-id>` branch names in PR mode. In both modes it uses
-`AppFlowy story: <story-id>` commit/PR markers to find interrupted work.
+`AppFlowy story: <story-id>` or `Shortcut story: <numeric-id>` commit/PR markers
+to find interrupted work.
 Custom names must be valid Git branch names distinct from `base_branch`. The
 repository, remote and PR target remain configured by the project. A story PR
 override finishes in Review with its PR link, even in a master project; it needs
@@ -37,8 +39,9 @@ through result delivery; edits do not change an already running worker's endpoin
 ## Install and configure
 
 Requires Linux, Git, Rust 1.89+, a logged-in Codex CLI supporting `exec --json`,
-`--output-schema`, `--ephemeral` and `--ignore-user-config`, and an AppFlowy MCP
-entry in your existing Codex configuration. PR projects also need `gh` (GitHub CLI).
+`--output-schema`, `--ephemeral` and `--ignore-user-config`, and the selected
+source's MCP entry in your existing Codex configuration. PR projects also need
+`gh` (GitHub CLI).
 The installer sets up a GitHub token for worker Git and PR operations.
 
 To get started with a new AppFlowy board, copy the
@@ -84,8 +87,8 @@ Git configuration. `gh` uses `GH_TOKEN`; no `gh auth login` is needed. This toke
 setup targets github.com; other Git hosts retain their existing authentication.
 
 Each project needs a stable ID, a dedicated local Git checkout, exactly one
-`appflowy_page` or `appflowy_url`, a `mode`, and a `base_branch`. Different projects
-cannot share a repository, including linked worktrees. Maistro locks each Git
+`appflowy_page`, `appflowy_url`, or `shortcut_url`, a `mode`, and a `base_branch`.
+Different projects cannot share a repository, including linked worktrees. Maistro locks each Git
 repository for the daemon's lifetime to prevent another Maistro instance writing
 it concurrently. Use a checkout reserved for this worker; preserve any existing
 interrupted work when restarting.
@@ -98,12 +101,14 @@ assignment; restart the service to apply TOML changes. Relative paths resolve
 from the TOML file's directory; `~/` expands from HOME. Models are fixed to
 `gpt-6-luna` and `gpt-6-astra`; additional agents are disabled.
 
-The coordinator uses only the configured AppFlowy MCP, with story read tools,
-`update_row_cells` and `append_comment`. The worker uses the normal Codex
+The coordinator uses only the MCP servers named by the projects in that pass,
+with source-specific read tools and status/comment write tools. AppFlowy uses
+`update_row_cells` and `append_comment`; Shortcut uses `update_story` and
+`create_story_comment`. The worker uses the normal Codex
 configuration, tools, environment, network, and the configured GitHub token with full
-filesystem access and no interactive approval prompts. The configured AppFlowy
-MCP is disabled for the worker; Luna owns story updates. Maistro disables agent
-spawning and hooks in both roles. Scope and Git behavior are directed by the
+filesystem access and no interactive approval prompts. All configured story-source
+MCP servers are disabled for the worker; Luna owns story updates. Maistro disables
+agent spawning and hooks in both roles. Scope and Git behavior are directed by the
 prompts; there is no custom filesystem sandbox or Rust verification pipeline.
 
 ## Start, stop and logs
@@ -121,8 +126,8 @@ journalctl --user -u maistro -f
 Use `systemctl --user enable maistro` to start with the user service manager.
 For operation without an interactive login, configure user lingering as usual.
 `validate` checks local configuration, repository identities/remotes, Codex login,
-the private token file, and the AppFlowy MCP configuration. It makes no model
-calls and does not test token validity, remote board access or Git push permission.
+the private token file, and each enabled project's MCP configuration. It makes no
+model calls and does not test token validity, remote board access or Git push permission.
 
 The service runs as your user. It includes `~/.local/bin` and `~/.cargo/bin` in
 PATH and optionally reads `~/.config/maistro/environment` (systemd environment-file
@@ -169,18 +174,20 @@ The static page refreshes `GET /api/status` every three seconds and marks retain
 data disconnected/stale on failure. GET/HEAD are the only supported methods;
 there are no workflow controls, file/log endpoints, or credentials in the status
 snapshot. Titles are rendered as text and links allow only HTTP(S). Detailed
-failure output stays in private daemon logs/AppFlowy, not the web response.
+failure output stays in private daemon logs/the story source, not the web response.
 There is no application login; local users and permitted tailnet users can read
-project IDs, story titles/IDs, safe AppFlowy links, and concise diagnostics.
+project IDs, story titles/IDs, safe board/workflow and story links, and concise
+diagnostics.
 
 Current-process activity shows parallel workers, start times, elapsed durations,
-cancellation, and completed/blocked results still awaiting AppFlowy recording.
+cancellation, and completed/blocked results still awaiting source recording.
 Idle and disabled projects remain visible. Coordinator activity and daemon uptime
-are separate from AppFlowy observations. Observations are in memory only and reset
-on restart. The page exposes each project's last Rust poll, last observed change,
-dirty status, and a concise poll error. Luna returns counts from its existing
-coordination reads; they can lag Rust polling until the next pass. Viewing the page makes
-no agent or AppFlowy calls. Counts never select or authorize work.
+are separate from board observations. Observations are in memory only and reset
+on restart. For AppFlowy the page exposes the last Rust poll, last observed change,
+dirty status, and a concise poll error. Shortcut shows periodic coordinator reads and
+their observation windows, without claiming a Rust poll or change fingerprint.
+Luna returns counts from its existing coordination reads; they can lag Rust polling until the next pass. Viewing the page makes
+no agent or source calls. Counts never select or authorize work.
 
 Ready means queued work; In Progress includes both active and interrupted work.
 Backlog, Cancelled, Review, Blocked and Done are not automatically processed.
@@ -233,7 +240,73 @@ change Tailscale configuration. See the official
 [Serve CLI reference](https://tailscale.com/docs/reference/tailscale-cli/serve)
 and [Serve setup](https://tailscale.com/docs/features/tailscale-serve).
 
-## AppFlowy behavior and recovery
+## Shortcut projects
+
+Set `shortcut_url` instead of either AppFlowy target. Copy a link identifying one
+workflow from your Shortcut workspace; a workspace home, individual story, epic,
+or ambiguous saved search is not a workflow target. Luna resolves the link with
+MCP and verifies workflow membership before claims and updates. An unresolved
+link or missing/ambiguous status mapping produces a diagnostic and a retry, with
+no dispatch. The scope includes all non-archived stories in that workflow, so use
+a dedicated workflow when only a subset should be available to Maistro.
+
+```toml
+[[projects]]
+id = "shortcut-service"
+repo = "/absolute/path/to/service"
+shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123"
+# Replace the illustrative URL above with your workflow's actual link.
+mcp_server = "shortcut" # Optional; name of this workspace's entry in Codex config.toml.
+mode = "pr"
+base_branch = "main"
+
+[projects.statuses]
+backlog = "Backlog"
+ready = "Ready"
+in_progress = "In Progress"
+review = "Review"
+done = "Done"
+blocked = "Blocked"
+cancelled = "Cancelled"
+```
+
+Create/map seven distinct workflow states with these exact names. Shortcut state
+categories such as started/completed and its dependency `blocked` flag are not
+substitutes for these states. Maistro reads existing workflows; it does not create
+or change their definitions. The normal claim, cancellation, recovery, dependency,
+PR override and result-delivery rules below apply to Shortcut as well. Numeric
+public story IDs remain stable across restarts. Completion comments include the
+same idempotency marker and read-back checks as AppFlowy.
+
+Configure and authorize the hosted Shortcut MCP in the same Codex home used by
+Maistro, following [Shortcut's MCP setup](https://www.shortcut.com/help/integrations/mcp-server/).
+The hosted endpoint is `https://mcp.shortcut.com/mcp` and uses OAuth. Maistro keeps
+the existing Codex home and server name so Codex can use that login; it does not
+copy OAuth tokens into project configuration or use a separate Shortcut API key.
+Complete authorization before starting the unattended service. `validate` only
+checks local configuration, not remote authentication, workflow access or states.
+
+`projects.mcp_server` overrides the server name for either source, allowing
+separate workspace connections per project. Its defaults are `shortcut` for
+Shortcut and `agents.mcp_server` (normally `appflowy`) for AppFlowy. Configure each
+named entry in `agents.codex_home/config.toml`; Maistro does not load MCP entries
+from individual repository config files. Projects can mix both sources in one
+process, and a Shortcut-only installation needs no AppFlowy server. One server
+name cannot be assigned to both source types. Do not configure overlapping
+workflows/boards against separate checkouts.
+
+**Shortcut uses periodic Luna reads**, including when idle: the Rust MCP transport
+cannot reuse Codex-managed OAuth credentials. `poll_interval_seconds` is the delay
+from a completed pass to the next Shortcut pass (or a failed pass to its retry).
+Worker completion can trigger earlier coordination. One global pass still runs
+at a time; failures retain pending results, and other projects' workers continue.
+This incurs model calls while idle; increase the interval to reduce frequency at
+the cost of dispatch/cancellation latency. AppFlowy's Rust change detection is
+unchanged. Shortcut has no Rust fingerprint or atomic snapshot: fresh, paginated
+reads and verified claims/status writes are coordinator responsibilities. Read
+failures never authorize work, and a Shortcut outage prevents cancellation checks.
+
+## Story behavior and recovery
 
 Use Backlog, Ready, In Progress, Review, Done, Blocked, and Cancelled, or map their
 exact labels in `[projects.statuses]`. Existing boards with `In progress` should
@@ -251,12 +324,13 @@ set `in_progress = "In progress"`.
   status. Requirement edits alone do not restart active work.
 - A worker failure or unresolved obstacle becomes Blocked with an explanation.
   To retry, resolve the obstacle and move the story back to Ready.
-- Completed results stay in process memory until Luna confirms the AppFlowy
+- Completed results stay in process memory until Luna confirms the source
   update or observes a user status change. The project remains occupied until
   then. Other projects continue. A coordinator failure retries after the polling
   interval, without releasing those pending results.
 
-Rust polls enabled boards directly over the configured AppFlowy MCP connection.
+For AppFlowy, Rust polls enabled boards directly over each project's configured
+MCP connection.
 `orchestrator.poll_interval_seconds` (30 seconds by default) is the delay between
 completed poll attempts per project, **not** a schedule for model calls. After a
 valid initial observation and coordination, an unchanged idle/empty board makes
@@ -281,7 +355,8 @@ AppFlowy outage. A push already underway may finish before cancellation is obser
 
 ### Polling contract and consistency
 
-The poller reuses `agents.mcp_server` from the Codex configuration: stdio
+The AppFlowy poller reuses `projects.mcp_server` (default `agents.mcp_server`)
+from the Codex configuration: stdio
 `command`, `args`, `cwd`, `env` and inherited environment, or streamable HTTP
 `url`, `http_headers`, `env_http_headers`, and `bearer_token_env_var`. It uses the
 MCP Rust SDK directly, without a model. The server must expose the legacy read
@@ -335,11 +410,12 @@ interval; each poll is bounded by `coordinator_timeout_seconds` (individual MCP
 reads also have a 60-second limit). Failed projects do not make other pollers wait.
 
 After restart all in-memory assignments and pending results are gone. Luna reads
-AppFlowy afresh; Astra reconstructs interrupted work from the board and repository.
-A crash between a remote operation and its AppFlowy update is reconciled by the
+the configured source afresh; Astra reconstructs interrupted work from the board
+and repository.
+A crash between a remote operation and its source update is reconciled by the
 models, not an exactly-once transaction. Reads and status writes are not atomic
 with human edits. Do not run two independently configured daemons against the
-same board with different clones. AppFlowy claims and outcome read-backs are
+same board with different clones. Source claims and outcome read-backs are
 agent responsibilities; Rust checks response shape and concurrency, not every
 remote side effect.
 

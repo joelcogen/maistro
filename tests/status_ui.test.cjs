@@ -19,7 +19,7 @@ function snapshot() {
     overall: { counts: values, observed_projects: 1, total_projects: 2, stale: true },
     projects: [{ id: '<img onerror=evil()>', enabled: true, mode: 'master',
       story: { id: 'story', title: '<script>evil()</script>', url: 'javascript:evil()' },
-      worker: { state: 'pending_update', latest_event: 'Completed; awaiting AppFlowy recording', started_at: 101, finished_at: 110, elapsed_seconds: 9 },
+      worker: { state: 'pending_update', latest_event: 'Completed; awaiting board recording', started_at: 101, finished_at: 110, elapsed_seconds: 9 },
       polling: { last_poll_at: 120, last_change_at: 115, dirty: true, last_error: 'Board poll failed; last fingerprint retained' },
       observation: { counts: values, stale: true, read_started_at: 101, received_at: 110, reason: 'update_failed' }
     }, { id: 'disabled', enabled: false, mode: 'pr', story: null,
@@ -42,11 +42,11 @@ test('renders unknown/stale counts, pending results and malicious titles as text
   await flush();
   assert.match(nodes.connection.text, /Connected/);
   assert.match(nodes.overall.text, /Partial subtotal/);
-  assert.match(nodes.projects.text, /Result waiting for AppFlowy/);
+  assert.match(nodes.projects.text, /Result waiting for board/);
   assert.match(nodes.projects.text, /Stale.*last successful/);
   assert.match(nodes.projects.text, /Unknown.*no successful/);
   assert.match(nodes.projects.text, /<script>evil\(\)<\/script>/);
-  assert.match(nodes.projects.text, /AppFlowy result update failed/);
+  assert.match(nodes.projects.text, /Board result update failed/);
   assert.match(nodes.projects.text, /Rust poll:/);
   assert.match(nodes.projects.text, /Coordination pending/);
   assert.match(nodes.projects.text, /Board poll failed; last fingerprint retained/);
@@ -79,4 +79,18 @@ test('initial HTTP error stays unknown and links reject unsafe protocols/credent
   }
   context.value = 'https://appflowy.example/story';
   assert.equal(vm.runInContext("link('story', value).href", context), context.value);
+});
+
+test('Shortcut links and periodic coordinator reads are displayed without a Rust poll', async () => {
+  const data = snapshot();
+  data.projects = [data.projects[0]];
+  data.projects[0].board_url = 'https://app.shortcut.com/team/settings/workflows/42';
+  data.projects[0].story.url = 'https://app.shortcut.com/team/story/123';
+  data.projects[0].polling = { method: 'coordinator', last_poll_at: null, dirty: false };
+  const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
+  await flush();
+  assert.match(nodes.projects.text, /Periodic coordinator reads/);
+  assert.doesNotMatch(nodes.projects.text, /Rust poll:|AppFlowy/);
+  assert.deepEqual(nodes.projects.all().filter(n => n.href).map(n => n.href),
+    [data.projects[0].board_url, data.projects[0].story.url]);
 });

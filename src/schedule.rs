@@ -9,6 +9,7 @@ pub struct Project {
     acknowledged: u64,
     internal: bool,
     retry_at: Instant,
+    periodic: Option<(Duration, Instant)>,
 }
 impl Project {
     pub fn dirty(&self) -> bool {
@@ -31,11 +32,16 @@ impl Schedule {
                             acknowledged: 0,
                             internal: false,
                             retry_at: Instant::now(),
+                            periodic: None,
                         },
                     )
                 })
                 .collect(),
         }
+    }
+    /// OAuth-backed sources are read by Codex at intervals, without a Rust poller.
+    pub fn periodically(&mut self, id: &str, interval: Duration) {
+        self.projects.get_mut(id).unwrap().periodic = Some((interval, Instant::now()));
     }
     pub fn observe(&mut self, id: &str, fingerprint: Fingerprint) -> bool {
         let p = self.projects.get_mut(id).unwrap();
@@ -55,7 +61,9 @@ impl Schedule {
         self.projects
             .iter()
             .filter(|(_, p)| {
-                p.dirty() && (p.baseline.is_some() || p.internal) && p.retry_at <= Instant::now()
+                ((p.dirty() && (p.baseline.is_some() || p.internal))
+                    || p.periodic.is_some_and(|(_, due)| due <= Instant::now()))
+                    && p.retry_at <= Instant::now()
             })
             .map(|(id, p)| (id.clone(), p.generation))
             .collect()
@@ -63,8 +71,13 @@ impl Schedule {
     pub fn deadline(&self) -> Option<Instant> {
         self.projects
             .values()
-            .filter(|p| p.dirty() && (p.baseline.is_some() || p.internal))
-            .map(|p| p.retry_at)
+            .filter_map(|p| {
+                if p.dirty() && (p.baseline.is_some() || p.internal) {
+                    Some(p.retry_at)
+                } else {
+                    p.periodic.map(|(_, due)| due.max(p.retry_at))
+                }
+            })
             .min()
     }
     pub fn acknowledge(&mut self, id: &str, generation: u64) {
@@ -74,6 +87,9 @@ impl Schedule {
             p.internal = false;
         }
         p.retry_at = Instant::now();
+        if let Some((interval, due)) = &mut p.periodic {
+            *due = Instant::now() + *interval;
+        }
     }
     pub fn retry(&mut self, id: &str, interval: Duration) {
         self.projects.get_mut(id).unwrap().retry_at = Instant::now() + interval;
@@ -119,6 +135,38 @@ mod tests {
         assert!(s.ready().is_empty());
         s.wake("a"); // acknowledged result needs a follow-up dispatch
         assert_eq!(s.ready().len(), 1);
+    }
+    #[test]
+    fn periodic_sources_need_no_fingerprint_and_respect_interval_and_failure_backoff() {
+        let mut s = schedule();
+        let interval = Duration::from_secs(30);
+        s.periodically("a", interval);
+        let pass = s.ready();
+        assert_eq!(pass.len(), 1);
+        s.acknowledge("a", pass["a"]);
+        assert!(!s.projects["a"].dirty());
+        assert!(s.ready().is_empty());
+        assert!(s.deadline().unwrap() > Instant::now());
+        // Worker completion bypasses the next periodic read, but not failure backoff.
+        s.wake("a");
+        let pass = s.ready();
+        assert_eq!(pass.len(), 1);
+        s.acknowledge("a", pass["a"]);
+        s.projects
+            .get_mut("a")
+            .unwrap()
+            .periodic
+            .as_mut()
+            .unwrap()
+            .1 = Instant::now();
+        assert_eq!(s.ready().len(), 1);
+        s.retry("a", interval);
+        s.wake("a");
+        assert!(s.ready().is_empty());
+        s.projects.get_mut("a").unwrap().retry_at = Instant::now();
+        assert_eq!(s.ready().len(), 1);
+        assert!(s.projects["a"].baseline.is_none());
+        assert!(!s.ready().contains_key("b"));
     }
     #[test]
     fn failure_backoff_cannot_be_bypassed_by_board_or_worker_wakes() {

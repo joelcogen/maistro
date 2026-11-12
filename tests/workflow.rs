@@ -78,6 +78,8 @@ impl Fixture {
                 repo,
                 appflowy_page: Some(format!("board-{i}")),
                 appflowy_url: None,
+                shortcut_url: None,
+                mcp_server: None,
                 mode: *mode,
                 base_branch: "main".into(),
                 remote: "origin".into(),
@@ -107,6 +109,27 @@ impl Fixture {
             projects,
         };
         Self { temp, config }
+    }
+    fn shortcut(&mut self, index: usize, server: &str) {
+        let project = &mut self.config.projects[index];
+        project.appflowy_page = None;
+        project.shortcut_url =
+            Some("https://app.shortcut.com/fixture/settings/workflows/42".into());
+        project.mcp_server = Some(server.into());
+        let path = self.config.agents.codex_home.join("config.toml");
+        let mut config = fs::read_to_string(&path).unwrap();
+        // Must never be contacted by Rust: only the simulated Codex uses OAuth here.
+        config.push_str(&format!(
+            "\n[mcp_servers.{server}]\nurl='https://mcp.shortcut.invalid/mcp'\n"
+        ));
+        fs::write(path, config).unwrap();
+        let mut board = self.board();
+        board[&format!("p{index}")]["id"] = json!((123 + index).to_string());
+        fs::write(
+            self.temp.path().join("board.json"),
+            serde_json::to_vec(&board).unwrap(),
+        )
+        .unwrap();
     }
     fn enable_status(&mut self) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -890,4 +913,114 @@ async fn empty_board_has_one_initial_coordination_and_no_repeated_idle_calls() {
     );
     let polls = fs::read_to_string(f.temp.path().join("poll-events")).unwrap();
     assert!(polls.lines().filter(|l| l.contains("get_page")).count() >= 6);
+}
+
+#[tokio::test]
+async fn mixed_sources_complete_with_per_project_servers_and_stable_markers() {
+    let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
+    f.shortcut(1, "shortcut_team");
+    f.enable_status();
+    f.touch("parallel");
+    let (token, job) = f.start();
+    let complete = f
+        .wait(|| f.board()["p0"]["status"] == "Done" && f.board()["p1"]["status"] == "Review")
+        .await;
+    let view = f.status_snapshot().await;
+    f.stop(token, job).await;
+    assert!(complete, "events: {:?}", f.events());
+    assert_eq!(
+        view["projects"][1]["board_url"],
+        "https://app.shortcut.com/fixture/settings/workflows/42"
+    );
+    assert_eq!(view["projects"][1]["polling"]["method"], "coordinator");
+    assert!(view["projects"][1]["polling"]["last_poll_at"].is_null());
+    let events = f.events();
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|e| e["kind"] == "worker_start")
+        .collect();
+    assert_eq!(starts.len(), 2);
+    let shortcut = starts.iter().find(|e| e["project"] == "p1").unwrap();
+    assert_eq!(shortcut["git"]["story_marker"], "Shortcut story: 124");
+    assert_eq!(shortcut["git"]["story_branch"], "maistro/p1/124");
+    let remote = f.temp.path().join("remote1.git");
+    assert_eq!(
+        git(&remote, &["rev-parse", "maistro/p1/124"]),
+        f.board()["p1"]["result"]["commit"]
+    );
+}
+
+#[tokio::test]
+async fn shortcut_only_periodic_reads_find_new_work_and_cancel_without_rust_mcp() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.shortcut(0, "shortcut");
+    // Shortcut-only installations do not need an AppFlowy MCP entry.
+    fs::write(
+        f.config.agents.codex_home.join("config.toml"),
+        "[mcp_servers.shortcut]\nurl='https://mcp.shortcut.invalid/mcp'\n",
+    )
+    .unwrap();
+    f.status("p0", "Backlog");
+    f.touch("hang");
+    let (token, job) = f.start();
+    let idle = f
+        .wait(|| {
+            f.events()
+                .iter()
+                .filter(|e| e["kind"] == "coordinator")
+                .count()
+                >= 2
+        })
+        .await;
+    assert!(f.events().iter().all(|e| e["kind"] != "worker_start"));
+    f.status("p0", "Ready");
+    let started = f
+        .wait(|| f.events().iter().any(|e| e["kind"] == "worker_start"))
+        .await;
+    f.status("p0", "Cancelled");
+    let stopped = f
+        .wait(|| {
+            f.events()
+                .iter()
+                .any(|e| e["kind"] == "stopped" && e["model"] == "gpt-6-astra")
+        })
+        .await;
+    f.stop(token, job).await;
+    assert!(idle && started && stopped, "events: {:?}", f.events());
+    assert_eq!(f.board()["p0"]["status"], "Cancelled");
+    assert!(f.board()["p0"].get("result").is_none());
+}
+
+#[tokio::test]
+async fn shortcut_recovers_pushed_commit_after_result_delivery_failure() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.shortcut(0, "shortcut");
+    f.touch("outage");
+    let (token, job) = f.start();
+    let pending = f
+        .wait(|| f.events().iter().filter(|e| e["kind"] == "outage").count() >= 2)
+        .await;
+    f.stop(token, job).await;
+    assert!(pending, "events: {:?}", f.events());
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .count(),
+        1
+    );
+    let remote = f.temp.path().join("remote0.git");
+    let sha = git(&remote, &["rev-parse", "main"]);
+    fs::remove_file(f.temp.path().join("outage")).unwrap();
+    let (token, job) = f.start();
+    let complete = f.wait(|| f.board()["p0"]["status"] == "Done").await;
+    f.stop(token, job).await;
+    assert!(complete, "events: {:?}", f.events());
+    assert_eq!(git(&remote, &["rev-parse", "main"]), sha);
+    assert_eq!(f.board()["p0"]["result"]["commit"], sha);
+    assert!(
+        f.events()
+            .iter()
+            .any(|e| e["kind"] == "worker_start" && e["recovery"] == true)
+    );
 }

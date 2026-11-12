@@ -95,7 +95,7 @@ impl State {
                 "Worker failed: {e:#}. Inspect existing work before retrying."
             ))
         });
-        tracing::info!(project=%assignment.project_id, story=%assignment.story_id, outcome=?report.outcome, "worker finished; awaiting AppFlowy update");
+        tracing::info!(project=%assignment.project_id, story=%assignment.story_id, outcome=?report.outcome, "worker finished; awaiting board update");
         self.pending.insert(
             assignment.project_id,
             Completion {
@@ -183,10 +183,13 @@ impl Engine {
         let mut polls = JoinSet::new();
         let (poll_sender, mut poll_results) =
             tokio::sync::mpsc::channel(self.config.projects.len());
-        let connection = self.codex.mcp_config()?;
         for project in self.config.projects.iter().filter(|p| p.enabled) {
+            if project.is_shortcut() {
+                schedule.periodically(&project.id, interval);
+                continue;
+            }
             polls.spawn(poll::run(
-                connection.clone(),
+                self.codex.mcp_config(project)?,
                 project.clone(),
                 interval,
                 Duration::from_secs(self.config.orchestrator.coordinator_timeout_seconds),
@@ -304,7 +307,7 @@ impl Engine {
         }
         // Idle/slow HTTP clients must not delay daemon shutdown.
         server.shutdown().await;
-        tracing::info!("maistro stopped; AppFlowy will drive recovery on next start");
+        tracing::info!("maistro stopped; story sources will drive recovery on next start");
         result
     }
     fn apply(

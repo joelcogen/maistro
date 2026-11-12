@@ -3,9 +3,9 @@ const labels = { ready: 'Ready · queued', in_progress: 'In Progress · active/i
 const reasons = {
   no_eligible_work: 'No eligible work found', dependencies: 'Waiting for dependencies', occupied: 'Project already occupied',
   read_failed: 'Board read failed', ambiguous_board: 'Board could not be resolved uniquely', incomplete_read: 'Board read incomplete',
-  claim_failed: 'Could not confirm a story claim', requirements_blocked: 'Story requirements blocked', update_failed: 'AppFlowy result update failed', work_selected: 'Work selected'
+  claim_failed: 'Could not confirm a story claim', requirements_blocked: 'Story requirements blocked', update_failed: 'Board result update failed', work_selected: 'Work selected'
 };
-const states = { active: 'Worker active', pending_update: 'Result waiting for AppFlowy', idle: 'Idle', disabled: 'Disabled', stopping: 'Worker stopping', reading_boards: 'Coordinating' };
+const states = { active: 'Worker active', pending_update: 'Result waiting for board', idle: 'Idle', disabled: 'Disabled', stopping: 'Worker stopping', reading_boards: 'Coordinating' };
 function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = String(text);
@@ -49,16 +49,20 @@ function render(snapshot) {
   for (const project of snapshot.projects) {
     const card = element('article'); const observation = project.observation;
     card.append(element('h2', project.id), element('p', `${project.enabled ? 'Enabled' : 'Disabled'} · Git mode: ${project.mode}`, 'muted'));
-    if (project.board_url) card.append(link('Open AppFlowy board', project.board_url));
+    if (project.board_url) card.append(link('Open board', project.board_url));
     card.append(element('h3', 'Current process'), activity(project.worker));
     if (project.last_outcome) card.append(element('p', `Latest worker result: ${project.last_outcome}`, 'muted'));
     if (project.story) {
       card.append(element('p', project.story.title), element('p', `Story ${project.story.id}`, 'muted'));
-      if (project.story.url) card.append(link('Open AppFlowy story', project.story.url));
+      if (project.story.url) card.append(link('Open story', project.story.url));
     } else card.append(element('p', 'No current story', 'muted'));
     if (project.polling) {
       const poll = project.polling;
-      card.append(element('p', `Rust poll: ${date(poll.last_poll_at)} · Last change: ${date(poll.last_change_at)} · ${poll.dirty ? 'Coordination pending' : 'No pending changes'}`, 'muted'));
+      if (poll.method === 'coordinator') {
+        card.append(element('p', 'Periodic coordinator reads · see board observation below', 'muted'));
+      } else {
+        card.append(element('p', `Rust poll: ${date(poll.last_poll_at)} · Last change: ${date(poll.last_change_at)} · ${poll.dirty ? 'Coordination pending' : 'No pending changes'}`, 'muted'));
+      }
       if (poll.last_error) card.append(element('p', poll.last_error));
     }
     card.append(element('h3', 'Board observation'));
