@@ -343,6 +343,80 @@ async fn projects_run_in_parallel_and_workers_commit_and_push_both_modes() {
 }
 
 #[tokio::test]
+async fn completion_prompts_route_frozen_modes_to_exact_statuses_for_both_providers() {
+    use maistro::model::{Completion, Outcome, Report, Snapshot, StoryRef};
+
+    for claude in [false, true] {
+        // Project defaults deliberately disagree with the dispatched modes.
+        let mut f = Fixture::new(&[Mode::Pr, Mode::Master, Mode::Pr, Mode::Master]);
+        f.shortcut(1, "shortcut");
+        f.shortcut(3, "shortcut-other");
+        if claude {
+            f.claude();
+        }
+        let mut board = f.board();
+        let mut snapshot = Snapshot::default();
+        let cases = [
+            (Mode::Master, Outcome::Completed, "Shipped"),
+            (Mode::Pr, Outcome::Completed, "Awaiting approval"),
+            (Mode::Master, Outcome::Blocked, "Needs help"),
+            (Mode::Pr, Outcome::Blocked, "Needs help"),
+        ];
+        for (project, (mode, outcome, _)) in f.config.projects.iter_mut().zip(cases) {
+            project.statuses.done = "Shipped".into();
+            project.statuses.review = "Awaiting approval".into();
+            project.statuses.blocked = "Needs help".into();
+            board[&project.id]["status"] = json!("In Progress");
+            snapshot.pending.push(Completion {
+                id: format!("result-{}", project.id),
+                story: StoryRef {
+                    project_id: project.id.clone(),
+                    story_id: board[&project.id]["id"].as_str().unwrap().into(),
+                },
+                mode,
+                report: Report {
+                    outcome,
+                    // Incidental PR/review references must not control routing.
+                    summary: "Implemented review prompts; historical PR linked".into(),
+                    tests: vec!["fixture checks passed".into()],
+                    commit: Some("abc123".into()),
+                    pr_url: Some("https://example.test/pull/1".into()),
+                },
+            });
+        }
+        fs::write(
+            f.temp.path().join("board.json"),
+            serde_json::to_vec(&board).unwrap(),
+        )
+        .unwrap();
+        let runner = maistro::agent::AgentRunner::new(f.config.clone());
+        let result = runner
+            .coordinate(
+                &snapshot,
+                &f.config
+                    .projects
+                    .iter()
+                    .map(|p| p.id.clone())
+                    .collect::<Vec<_>>(),
+                &CancellationToken::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.acknowledged.len(), cases.len());
+        assert!(result.assignments.is_empty());
+        let events = f.events();
+        let delivered = events.iter().find(|e| e["kind"] == "coordinator").unwrap();
+        for (i, (_, _, expected)) in cases.iter().enumerate() {
+            assert_eq!(
+                delivered["snapshot"]["pending"][i]["target_status"],
+                *expected
+            );
+            assert_eq!(f.board()[format!("p{i}")]["status"], *expected);
+        }
+    }
+}
+
+#[tokio::test]
 async fn master_story_pr_overrides_push_generated_or_requested_branch_and_finish_in_review() {
     for requested in [None, Some("feature/custom-delivery")] {
         let f = Fixture::new(&[Mode::Master]);

@@ -1,7 +1,7 @@
 use crate::{
     config::{Config, Mode, Project, Provider},
     github,
-    model::{self, Assignment, Coordination, Report, Snapshot},
+    model::{self, Assignment, Coordination, Outcome, Report, Snapshot},
     process,
 };
 use anyhow::{Context, Result, ensure};
@@ -284,11 +284,31 @@ impl AgentRunner {
                 value
             })
             .collect();
+        // Resolve delivery before invoking the coordinator: a PR reference or a
+        // changed project default must not reroute a completed master assignment.
+        let pending: Vec<Value> = snapshot
+            .pending
+            .iter()
+            .map(|completion| {
+                let project = projects
+                    .iter()
+                    .find(|p| p.id == completion.story.project_id)
+                    .context("pending completion has no selected project")?;
+                let target = match (completion.report.outcome, completion.mode) {
+                    (Outcome::Blocked, _) => &project.statuses.blocked,
+                    (Outcome::Completed, Mode::Master) => &project.statuses.done,
+                    (Outcome::Completed, Mode::Pr) => &project.statuses.review,
+                };
+                let mut value = serde_json::to_value(completion)?;
+                value["target_status"] = json!(target);
+                Ok(value)
+            })
+            .collect::<Result<_>>()?;
         let mut prompt = format!(
             "{}\n\nPROJECTS={}\nSNAPSHOT={}\n",
             include_str!("../prompts/coordinator.md"),
             serde_json::to_string(&project_context)?,
-            serde_json::to_string(snapshot)?
+            json!({"active": snapshot.active, "pending": pending})
         );
         for project in &projects {
             let custom = repository_prompt(project, "maistro-coordinator.md")?;

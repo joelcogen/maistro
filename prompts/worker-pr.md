@@ -8,3 +8,4 @@ PR MODE:
 - Include the stable story marker, summary, and actual test results in the PR.
   Confirm the push and PR creation succeeded, then return completed with commit
   and pr_url. Do not wait for CI, enable auto-merge, or merge anything.
+- Successful delivery goes to Review; the user handles review and merging.

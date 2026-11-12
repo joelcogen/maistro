@@ -37,6 +37,12 @@ of PRs or branches in product requirements keep the project default. The
 coordinator selects the effective mode before dispatch, and that mode stays fixed
 through result delivery.
 
+Each pending result supplies the coordinator with the exact configured destination
+status: completed master work goes directly to Done, completed PR work to Review,
+and blocked work to Blocked. A PR mention or link does not change that destination.
+Human status changes are preserved; result comments and status updates are read
+back before delivery is acknowledged.
+
 ## Install and configure
 
 Requires Linux, Git, Rust 1.89+, and an authenticated Codex or Claude Code CLI with

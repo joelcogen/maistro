@@ -5,3 +5,4 @@ MASTER MODE:
   commit with the stable story marker, and push that branch to the configured
   remote. Resolve ordinary conflicts and rerun affected checks as needed.
 - Confirm the commit is present remotely before returning completed. pr_url is null.
+- Successful delivery goes directly to Done; no PR or review step is required.

@@ -129,8 +129,7 @@ if coordinator:
         for completion in snapshot['pending']:
             story = board[completion['story']['project_id']]
             if story['status'] == 'In Progress':
-                story['status'] = ('Blocked' if completion['report']['outcome'] == 'blocked'
-                                   else 'Review' if completion['mode'] == 'pr' else 'Done')
+                story['status'] = completion['target_status']
                 story['result'] = completion['report']
             result['acknowledged'].append(completion['id'])
             if (ROOT / 'queued-ready').exists():
