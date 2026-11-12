@@ -1,6 +1,6 @@
 use maistro::{
     config::{Config, Mode},
-    model::{Assignment, Completion, Coordination, Report, Snapshot, StoryRef},
+    model::{Assignment, Completion, Coordination, PrRequest, Report, Snapshot, StoryRef},
 };
 use std::fs;
 
@@ -12,11 +12,13 @@ fn assignment(project: &str) -> Assignment {
         story_url: None,
         context: "Full requirements".into(),
         recovery: false,
+        pr: None,
     }
 }
 fn completion() -> Completion {
     Completion {
         id: "result-1".into(),
+        mode: Mode::Master,
         story: StoryRef::from(&assignment("p0")),
         report: Report::blocked("blocked".into()),
     }
@@ -146,11 +148,72 @@ fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
     let mut project = Config::load(&path).unwrap().projects.remove(0);
     let first = maistro::codex::worker_prompt(&project, &assignment("p0")).unwrap();
     assert!(first.contains("First test command") && first.contains("maistro/p0/story-1"));
+    assert!(first.contains("PR MODE:") && !first.contains("MASTER MODE:"));
     fs::write(dir.path().join("project.md"), "Revised test command").unwrap();
     project.mode = Mode::Master;
     let second = maistro::codex::worker_prompt(&project, &assignment("p0")).unwrap();
     assert!(second.contains("Revised test command") && second.contains("\"story_branch\":null"));
     assert!(second.contains("\"base_branch\":\"trunk\""));
+    assert!(second.contains("MASTER MODE:") && !second.contains("PR MODE:"));
+
+    let mut story = assignment("p0");
+    // Product requirements about PR support must not trigger a text-based override.
+    story.context = "Add support for PRs and custom branch names in master mode".into();
+    assert_eq!(story.effective_mode(project.mode), Mode::Master);
+    story.pr = Some(PrRequest { branch: None });
+    let overridden = maistro::codex::worker_prompt(&project, &story).unwrap();
+    assert!(overridden.contains("\"mode\":\"pr\""));
+    assert!(overridden.contains("\"story_branch\":\"maistro/p0/story-1\""));
+    assert!(overridden.contains("PR MODE:") && !overridden.contains("MASTER MODE:"));
+
+    for mode in [Mode::Master, Mode::Pr] {
+        project.mode = mode;
+        story.pr.as_mut().unwrap().branch = Some("feature/requested-branch".into());
+        let custom = maistro::codex::worker_prompt(&project, &story).unwrap();
+        assert!(custom.contains("\"story_branch\":\"feature/requested-branch\""));
+        assert!(custom.contains("\"base_branch\":\"trunk\""));
+        assert!(custom.contains("\"remote\":\"origin\""));
+        assert!(custom.contains("\"story_marker\":\"AppFlowy story: story-1\""));
+        for invalid in [
+            "", "trunk", "HEAD", "-option", "bad name", "a..b", "@{-1}", "a.lock",
+        ] {
+            story.pr.as_mut().unwrap().branch = Some(invalid.into());
+            assert!(
+                maistro::codex::worker_prompt(&project, &story).is_err(),
+                "{invalid}"
+            );
+        }
+    }
+}
+
+#[test]
+fn coordinator_schema_carries_an_explicit_nullable_pr_request() {
+    let schema = maistro::model::coordination_schema();
+    let assignment_schema = &schema["properties"]["assignments"]["items"];
+    assert!(
+        assignment_schema["required"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("pr"))
+    );
+    assert_eq!(
+        assignment_schema["properties"]["pr"]["anyOf"][0]["required"],
+        serde_json::json!(["branch"])
+    );
+    for pr in [
+        serde_json::Value::Null,
+        serde_json::json!({"branch":null}),
+        serde_json::json!({"branch":"feature/custom"}),
+    ] {
+        let mut value = serde_json::to_value(assignment("p0")).unwrap();
+        value["pr"] = pr.clone();
+        let parsed: Assignment = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            parsed.effective_mode(Mode::Master),
+            if pr.is_null() { Mode::Master } else { Mode::Pr }
+        );
+        assert_eq!(serde_json::to_value(parsed).unwrap()["pr"], pr);
+    }
 }
 
 #[test]

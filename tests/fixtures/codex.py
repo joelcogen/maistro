@@ -78,7 +78,7 @@ if model == 'gpt-6-luna':
             story = board[completion['story']['project_id']]
             if story['status'] == 'In Progress':
                 story['status'] = ('Blocked' if completion['report']['outcome'] == 'blocked'
-                                   else 'Review' if story['mode'] == 'pr' else 'Done')
+                                   else 'Review' if completion['mode'] == 'pr' else 'Done')
                 story['result'] = completion['report']
             result['acknowledged'].append(completion['id'])
             if (ROOT / 'queued-ready').exists():
@@ -93,7 +93,7 @@ if model == 'gpt-6-luna':
                 continue
             result['assignments'].append(dict(project_id=project['id'], story_id=story['id'],
                                              title='Fixture story', story_url='https://appflowy.example/story', context='Complete fixture requirements',
-                                             recovery=story['status'] == 'In Progress'))
+                                             recovery=story['status'] == 'In Progress', pr=story.get('pr')))
             story['status'] = 'In Progress'
         (ROOT / 'board.json').write_text(json.dumps(board))
     if (ROOT / 'luna-incomplete').exists():
@@ -126,7 +126,11 @@ else:
     git_config = json.loads(prompt.split('\nGIT=', 1)[1].split('\nASSIGNMENT=', 1)[0])
     project = assignment['project_id']
     assert Path.cwd() == ROOT / project
-    event('worker_start', project=project, recovery=assignment['recovery'])
+    event('worker_start', project=project, recovery=assignment['recovery'], git=git_config)
+    if git_config['mode'] == 'pr':
+        assert 'PR MODE:' in prompt and 'MASTER MODE:' not in prompt
+    else:
+        assert 'MASTER MODE:' in prompt and 'PR MODE:' not in prompt
     if (ROOT / 'hang').exists():
         while True:
             time.sleep(0.05)
@@ -152,5 +156,7 @@ else:
     sha = git('rev-parse', 'HEAD')
     result = dict(outcome='completed', summary='Implemented fixture', tests=['python assertion passed'],
                   commit=sha, pr_url=f'https://example.test/pull/{project}' if git_config['mode'] == 'pr' else None)
+    if (ROOT / 'missing-pr-url').exists():
+        result['pr_url'] = None
     event('worker_finish', project=project)
     finish(result)

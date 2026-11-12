@@ -505,6 +505,7 @@ mod tests {
             story_url: Some("javascript:alert(1)".into()),
             context: "SECRET prompt and requirements".into(),
             recovery: false,
+            pr: None,
         }
     }
     #[test]

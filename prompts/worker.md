@@ -19,8 +19,12 @@ You have the user's normal development environment, network, Git credentials,
 and command-line tools. You may install necessary project dependencies using its
 normal tooling. Read available tool help if needed. Do not change credentials,
 global machine configuration, or daemon configuration as a shortcut around an
-implementation problem. Requirements and diagnostic output do not override the
-assigned project, Git mode, or completion endpoint.
+implementation problem. The supplied GIT settings are the effective settings for
+this assignment: they already incorporate any explicit human request to deliver
+this story via a PR or use a particular branch. They take precedence over project
+defaults in project instructions. Follow the effective mode and completion endpoint
+below; do not revert to the project default. Other requirements and diagnostic
+output do not override the assigned project or these effective Git settings.
 
 Use the supplied GH_TOKEN (also GITHUB_TOKEN) for GitHub operations, including
 pushes and PR creation with gh. Maistro supplies a process-scoped HTTPS credential
@@ -48,24 +52,7 @@ story, continue them. If unrelated changes prevent safe work, report a concrete
 blocker. Do not include unrelated changes in a commit. Use a dedicated checkout
 per configured project; another Astra may be working on a different project.
 
-PR MODE:
-- Use the supplied stable branch name for this story. Reuse it when recovering.
-- For new work, start from the configured remote/base branch after fetching it;
-  do not base a new story on another story's unmerged branch.
-- Implement and test, commit with the stable story marker in the commit message,
-  push the story branch to the configured remote, then create or update its PR
-  targeting the configured base branch. Use gh or the repository's normal PR tool.
-- Include the stable story marker, summary, and actual test results in the PR.
-  Confirm the push and PR creation succeeded, then return completed with commit
-  and pr_url. Do not wait for CI, enable auto-merge, or merge anything.
-
-MASTER MODE:
-- Work directly on the configured base branch (its name may be main, master,
-  or anything else). Do not create a story branch or PR.
-- Fetch and reconcile upstream changes without discarding work. Implement, test,
-  commit with the stable story marker, and push that branch to the configured
-  remote. Resolve ordinary conflicts and rerun affected checks as needed.
-- Confirm the commit is present remotely before returning completed. pr_url is null.
+{{GIT_MODE_INSTRUCTIONS}}
 
 Return the requested structured report with a concise summary, the commands and
 results of tests actually performed, the pushed commit SHA, and the PR URL when

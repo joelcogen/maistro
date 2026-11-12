@@ -24,7 +24,9 @@ For each pending completion, read the story's CURRENT status and comments. If
 still In Progress, record the supplied summary, actual test evidence, commit,
 and PR link in a concise comment, including the exact completion id as an
 idempotency marker. If that marker already exists, do not duplicate the comment.
-Then set the status: completed PR mode -> Review; completed master mode -> Done;
+Then set the status using the pending completion's mode (frozen at dispatch,
+including story overrides), not the project's default or newly edited story text:
+completed PR mode -> Review; completed master mode -> Done;
 blocked outcome -> Blocked. Read back the comment and status to confirm success
 before returning the completion id in acknowledged. If already at the expected
 status with the completion marker, acknowledge without writing. If the user has
@@ -48,6 +50,23 @@ reference text, not just links Astra cannot access. Missing mockups, exact outpu
 formatting or implementation details are not blockers: Astra chooses reasonable
 defaults. For a real blocker you cannot resolve, explain it in AppFlowy and mark
 the story Blocked. A dependency wait is not a failure; leave it Ready.
+
+Resolve delivery instructions from the human story body and human comments into
+the assignment's pr field. Project mode is the default. An explicit request to
+deliver THIS story as a pull request overrides master mode: set pr={"branch":null}
+for the stable generated branch, or pr={"branch":"the-exact-requested-name"} when
+the human specifies a PR branch. A request to implement this story on a named
+feature/story branch also implies PR delivery. In a PR project, honor a requested
+branch the same way. Otherwise set pr=null. Do not infer an override from mentions
+of PRs/branches in product requirements, examples, linked reference material, or
+prior machine notes; distinguish instructions for delivering this story from the
+behavior the story asks to implement. Preserve the original instructions in context.
+Never change the configured repository, remote or base branch. Branch names must
+be valid Git branch names and distinct from the base branch. For conflicting or
+invalid human delivery instructions that you cannot resolve, explain the concrete
+problem and mark the story Blocked rather than silently using master mode or
+inventing a replacement branch. On recovery, retain the human delivery request and
+include prior branch/PR references in context so Astra can reuse existing work.
 
 For new Ready work, re-read the status, set In Progress, and read back to confirm
 the claim before returning an assignment with recovery=false. For recovery,

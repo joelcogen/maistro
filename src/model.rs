@@ -14,6 +14,22 @@ pub struct Assignment {
     /// Complete requirements, human comments and relevant linked documents.
     pub context: String,
     pub recovery: bool,
+    /// Explicit request to deliver this story via a PR, overriding the project default.
+    #[serde(default)]
+    pub pr: Option<PrRequest>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PrRequest {
+    /// None uses the stable generated story branch.
+    pub branch: Option<String>,
+}
+
+impl Assignment {
+    pub fn effective_mode(&self, default: Mode) -> Mode {
+        if self.pr.is_some() { Mode::Pr } else { default }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -88,6 +104,8 @@ impl Report {
 pub struct Completion {
     pub id: String,
     pub story: StoryRef,
+    /// Frozen at dispatch; controls Review versus Done even if requirements change.
+    pub mode: Mode,
     pub report: Report,
 }
 
@@ -172,7 +190,8 @@ pub fn coordination_schema() -> Value {
     object(json!({
         "assignments":{"type":"array","items":object(json!({
             "project_id":{"type":"string"}, "story_id":{"type":"string"},
-            "title":{"type":"string"}, "story_url":{"type":["string","null"]}, "context":{"type":"string"}, "recovery":{"type":"boolean"}
+            "title":{"type":"string"}, "story_url":{"type":["string","null"]}, "context":{"type":"string"}, "recovery":{"type":"boolean"},
+            "pr":{"anyOf":[object(json!({"branch":{"type":["string","null"]}})), {"type":"null"}]}
         }))},
         "cancel":{"type":"array","items":object(json!({"project_id":{"type":"string"},"story_id":{"type":"string"}}))},
         "acknowledged":strings(), "notes":strings(), "retry_projects":strings(),

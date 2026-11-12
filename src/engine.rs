@@ -1,6 +1,6 @@
 use crate::{
     codex::Codex,
-    config::Config,
+    config::{Config, Mode},
     model::{Assignment, Completion, Coordination, Report, Snapshot, StoryRef},
     poll, process,
     schedule::Schedule,
@@ -41,6 +41,7 @@ impl Drop for Lock {
 
 struct Active {
     story: StoryRef,
+    mode: Mode,
     cancel: CancellationToken,
 }
 #[derive(Default)]
@@ -100,6 +101,7 @@ impl State {
             Completion {
                 id: uuid::Uuid::new_v4().to_string(),
                 story: active.story,
+                mode: active.mode,
                 report,
             },
         );
@@ -351,6 +353,7 @@ impl Engine {
                 project.id.clone(),
                 Active {
                     story: (&assignment).into(),
+                    mode: assignment.effective_mode(project.mode),
                     cancel: cancel.clone(),
                 },
             );
@@ -403,12 +406,14 @@ mod tests {
             story_url: None,
             context: "Requirements".into(),
             recovery: false,
+            pr: None,
         };
         let mut state = State::default();
         state.active.insert(
             a.project_id.clone(),
             Active {
                 story: (&a).into(),
+                mode: Mode::Master,
                 cancel: CancellationToken::new(),
             },
         );

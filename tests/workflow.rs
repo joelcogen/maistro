@@ -211,6 +211,7 @@ async fn workers_reload_rotated_tokens_without_putting_them_in_logs() {
                 story_url: None,
                 context: "Verify authentication".into(),
                 recovery: false,
+                pr: None,
             };
             codex
                 .work(project, &assignment, &CancellationToken::new())
@@ -282,6 +283,98 @@ async fn projects_run_in_parallel_and_workers_commit_and_push_both_modes() {
                 .file_name()
                 .to_string_lossy()
                 .starts_with("invocation-"))
+    );
+}
+
+#[tokio::test]
+async fn master_story_pr_overrides_push_generated_or_requested_branch_and_finish_in_review() {
+    for requested in [None, Some("feature/custom-delivery")] {
+        let f = Fixture::new(&[Mode::Master]);
+        let mut board = f.board();
+        board["p0"]["pr"] = json!({"branch": requested});
+        fs::write(
+            f.temp.path().join("board.json"),
+            serde_json::to_vec(&board).unwrap(),
+        )
+        .unwrap();
+        let remote = f.temp.path().join("remote0.git");
+        let base = git(&remote, &["rev-parse", "main"]);
+        let (token, job) = f.start();
+        let completed = f.wait(|| f.board()["p0"]["status"] == "Review").await;
+        f.stop(token, job).await;
+        assert!(completed, "events: {:?}", f.events());
+        let branch = requested.unwrap_or("maistro/p0/story-0");
+        let sha = git(&remote, &["rev-parse", branch]);
+        assert_ne!(sha, base);
+        assert_eq!(git(&remote, &["rev-parse", "main"]), base);
+        assert_eq!(f.board()["p0"]["result"]["commit"], sha);
+        assert!(f.board()["p0"]["result"]["pr_url"].is_string());
+        let events = f.events();
+        let pending = events
+            .iter()
+            .find_map(|e| e["snapshot"]["pending"].as_array().and_then(|p| p.first()))
+            .unwrap();
+        assert_eq!(pending["mode"], "pr");
+    }
+}
+
+#[tokio::test]
+async fn master_story_pr_override_recovers_pushed_work_without_duplicate_commit() {
+    let f = Fixture::new(&[Mode::Master]);
+    let mut board = f.board();
+    board["p0"]["pr"] = json!({"branch":"feature/recover"});
+    fs::write(
+        f.temp.path().join("board.json"),
+        serde_json::to_vec(&board).unwrap(),
+    )
+    .unwrap();
+    f.touch("outage");
+    let (token, job) = f.start();
+    let pending = f
+        .wait(|| f.events().iter().any(|e| e["kind"] == "outage"))
+        .await;
+    f.stop(token, job).await;
+    assert!(pending, "events: {:?}", f.events());
+    let remote = f.temp.path().join("remote0.git");
+    let sha = git(&remote, &["rev-parse", "feature/recover"]);
+    assert_eq!(f.board()["p0"]["status"], "In Progress");
+    fs::remove_file(f.temp.path().join("outage")).unwrap();
+    let (token, job) = f.start();
+    let completed = f.wait(|| f.board()["p0"]["status"] == "Review").await;
+    f.stop(token, job).await;
+    assert!(completed, "events: {:?}", f.events());
+    assert_eq!(git(&remote, &["rev-parse", "feature/recover"]), sha);
+    assert_eq!(f.board()["p0"]["result"]["commit"], sha);
+    let events = f.events();
+    let starts: Vec<_> = events
+        .iter()
+        .filter(|e| e["kind"] == "worker_start")
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(starts[1]["recovery"], true);
+    assert_eq!(starts[1]["git"]["story_branch"], "feature/recover");
+}
+
+#[tokio::test]
+async fn master_story_pr_override_cannot_complete_without_pr_url() {
+    let f = Fixture::new(&[Mode::Master]);
+    let mut board = f.board();
+    board["p0"]["pr"] = json!({"branch":null});
+    fs::write(
+        f.temp.path().join("board.json"),
+        serde_json::to_vec(&board).unwrap(),
+    )
+    .unwrap();
+    f.touch("missing-pr-url");
+    let (token, job) = f.start();
+    let blocked = f.wait(|| f.board()["p0"]["status"] == "Blocked").await;
+    f.stop(token, job).await;
+    assert!(blocked, "events: {:?}", f.events());
+    assert!(
+        f.board()["p0"]["result"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("completed PR report has no PR URL")
     );
 }
 

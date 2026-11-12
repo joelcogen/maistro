@@ -18,8 +18,21 @@ commits and pushes. Luna then records the result in AppFlowy.
 
 `base_branch` can be `main`, `master`, or another branch. CI and PR merging belong
 to the user. Maistro does not watch PRs after submission or move Review to Done.
-Astra uses stable `maistro/<project>/<story-id>` branch names in PR mode and
+A story can override a `master` project's default by explicitly requesting PR
+delivery in its body or human comments, for example: “Open a PR for this story”
+or “Deliver this story as a PR on branch `feature/new-export`.” Asking to implement
+the story on a named feature/story branch also implies PR delivery. A PR project
+can likewise specify a custom branch. Without a requested name, Astra uses stable
+`maistro/<project>/<story-id>` branch names in PR mode. In both modes it uses
 `AppFlowy story: <story-id>` commit/PR markers to find interrupted work.
+Custom names must be valid Git branch names distinct from `base_branch`. The
+repository, remote and PR target remain configured by the project. A story PR
+override finishes in Review with its PR link, even in a master project; it needs
+`gh` and token permission to create PRs. Stories without an override retain the
+project default. Merely mentioning PRs or branches in product requirements does
+not change delivery mode. The coordinator extracts the delivery request, and the
+worker receives only the instructions for the effective mode. That mode is kept
+through result delivery; edits do not change an already running worker's endpoint.
 
 ## Install and configure
 

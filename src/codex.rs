@@ -268,12 +268,33 @@ impl Codex {
             self.invoke(Some(project), &prompt, model::report_schema(), cancel)
                 .await?,
         )?;
-        report.validate(project.mode)?;
+        report.validate(assignment.effective_mode(project.mode))?;
         Ok(report)
     }
 }
 
 pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<String> {
+    let mode = assignment.effective_mode(project.mode);
+    let branch = if mode == Mode::Pr {
+        let branch = assignment
+            .pr
+            .as_ref()
+            .and_then(|pr| pr.branch.clone())
+            .unwrap_or_else(|| format!("maistro/{}/{}", project.id, assignment.story_id));
+        ensure!(
+            branch != project.base_branch && branch != "HEAD" && !branch.starts_with('-'),
+            "PR story branch must be a branch name distinct from the base branch"
+        );
+        // Validate the literal ref, without --branch's @{-n} checkout expansion.
+        let valid = std::process::Command::new("git")
+            .args(["check-ref-format", &format!("refs/heads/{branch}")])
+            .output()
+            .context("validate PR story branch")?;
+        ensure!(valid.status.success(), "invalid PR story branch name");
+        Some(branch)
+    } else {
+        None
+    };
     let custom = project
         .prompt_file
         .as_ref()
@@ -282,13 +303,19 @@ pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<Strin
         .context("read project prompt file")?
         .unwrap_or_default();
     let git = json!({
-        "mode":project.mode, "base_branch":project.base_branch, "remote":project.remote,
-        "story_branch": if project.mode == Mode::Pr { Some(format!("maistro/{}/{}", project.id, assignment.story_id)) } else { None },
+        "mode":mode, "base_branch":project.base_branch, "remote":project.remote,
+        "story_branch": branch,
         "story_marker":format!("AppFlowy story: {}", assignment.story_id)
     });
     Ok(format!(
         "{}\n\nPROJECT INSTRUCTIONS:\n{}\n\nREPOSITORY={}\nGIT={}\nASSIGNMENT={}\n",
-        include_str!("../prompts/worker.md"),
+        include_str!("../prompts/worker.md").replace(
+            "{{GIT_MODE_INSTRUCTIONS}}",
+            match mode {
+                Mode::Pr => include_str!("../prompts/worker-pr.md"),
+                Mode::Master => include_str!("../prompts/worker-master.md"),
+            }
+        ),
         custom,
         project.repo.display(),
         git,
