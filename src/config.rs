@@ -131,7 +131,6 @@ pub struct Project {
     pub remote: String,
     #[serde(default = "yes")]
     pub enabled: bool,
-    pub prompt_file: Option<PathBuf>,
     #[serde(default)]
     pub statuses: Statuses,
 }
@@ -213,11 +212,6 @@ impl Config {
             p.repo = resolve(&p.repo, root)?
                 .canonicalize()
                 .with_context(|| format!("{}: repository does not exist", p.id))?;
-            if let Some(path) = &mut p.prompt_file {
-                *path = resolve(path, root)?;
-                std::fs::read_to_string(&*path)
-                    .with_context(|| format!("{}: read prompt_file", p.id))?;
-            }
         }
         config.validate()?;
         Ok(config)

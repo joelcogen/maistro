@@ -58,7 +58,7 @@ so set `in_progress = "In progress"` in that project's `[projects.statuses]` tab
 ```
 
 The installer builds the binary, installs the user service, and copies example
-configuration/prompt files. It preserves an existing `config.toml` and does not
+configuration. It preserves an existing `config.toml` and does not
 start the service. Edit `~/.config/maistro/config.toml`; see
 [config.example.toml](config.example.toml).
 
@@ -95,12 +95,33 @@ repository for the daemon's lifetime to prevent another Maistro instance writing
 it concurrently. Use a checkout reserved for this worker; preserve any existing
 interrupted work when restarting.
 
-Project `prompt_file` is optional. It adds project-specific instructions to the
-complete [worker prompt](prompts/worker.md): testing commands, coding conventions,
-and completion expectations. See [the example](examples/project-prompt.md).
-The worker also reads the repository's AGENTS.md. Prompt files are read for each
-assignment; restart the service to apply TOML changes. Relative paths resolve
-from the TOML file's directory; `~/` expands from HOME. Additional agents are disabled.
+### Custom agent prompts
+
+Add either or both of these optional UTF-8 files at the root of a project's
+configured repository (`repo`):
+
+- `maistro-coordinator.md`: instructions appended to the coordinator prompt,
+  such as project-specific story selection or requirements gathering guidance.
+- `maistro-worker.md`: instructions appended to that project's worker prompt,
+  such as testing commands and coding conventions. See
+  [the worker example](examples/project-prompt.md); copy it to this filename.
+
+No `config.toml` setting is needed. Each file applies only to its agent, with
+both Codex and Claude Code. Coordinator additions are labeled by project and
+included only for enabled projects selected in that pass. The worker still reads
+`AGENTS.md`. Additional agents remain disabled.
+
+Files are read afresh for each coordinator pass or worker assignment, so edits,
+additions and removals take effect on the next invocation without restarting.
+Missing or empty files add no instructions; other read errors fail the invocation
+with the project and path. Keep secrets out of these files.
+
+To migrate, remove `prompt_file` from each project's TOML and move its contents
+to `maistro-worker.md` in that project's repository root. The old configuration
+key is no longer accepted. The installer preserves existing configuration and
+no longer installs prompt examples under `~/.config/maistro/prompts`.
+Other relative configuration paths resolve from the TOML file's directory;
+`~/` expands from HOME. Restart the service to apply TOML changes.
 
 ### Global provider and models
 
@@ -497,7 +518,8 @@ Stop the old service before installing. Replace the old TOML using the new examp
 unknown legacy settings are rejected with a migration error. Remove `state_db`,
 worktree settings, reviewer settings, worker limits, retry budgets, Rust
 `test_commands`, GitHub/CI settings and path/sandbox policies. Put testing
-requirements in each project's prompt file. Set `mode` and `base_branch` explicitly.
+requirements in each repository's `maistro-worker.md`. Set `mode` and
+`base_branch` explicitly.
 
 The old SQLite file is not read, migrated, or deleted. Reconcile old AppFlowy
 statuses and preserve any unfinished worktrees/branches before starting the new

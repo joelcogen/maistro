@@ -48,14 +48,13 @@ impl Fixture {
             ),
         )
         .unwrap();
-        let prompt = root.join("prompt.md");
-        fs::write(&prompt, "Run fixture tests.").unwrap();
         let mut board = serde_json::Map::new();
         let mut projects = vec![];
         for (i, mode) in modes.iter().enumerate() {
             let id = format!("p{i}");
             let repo = root.join(&id);
             fs::create_dir(&repo).unwrap();
+            fs::write(repo.join("maistro-worker.md"), "Run fixture tests.").unwrap();
             git(&repo, &["init", "-b", "main"]);
             git(&repo, &["config", "user.email", "fixture@example.test"]);
             git(&repo, &["config", "user.name", "Fixture"]);
@@ -84,7 +83,6 @@ impl Fixture {
                 base_branch: "main".into(),
                 remote: "origin".into(),
                 enabled: true,
-                prompt_file: Some(prompt.clone()),
                 statuses: Statuses::default(),
             });
         }
@@ -1180,4 +1178,141 @@ async fn claude_validation_rejects_logged_out_cli_and_failed_results() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn repository_prompts_are_optional_role_specific_scoped_and_reloaded_for_both_providers() {
+    for claude in [false, true] {
+        let mut f = Fixture::new(&[Mode::Master; 4]);
+        if claude {
+            f.claude();
+        }
+        f.config.projects[2].enabled = false;
+        for project in &f.config.projects {
+            fs::remove_file(project.repo.join("maistro-worker.md")).unwrap();
+        }
+        fs::write(
+            f.config.projects[1].repo.join("maistro-coordinator.md"),
+            "Only coordinate p1.",
+        )
+        .unwrap();
+        fs::write(
+            f.config.projects[1].repo.join("maistro-worker.md"),
+            "Only implement p1.",
+        )
+        .unwrap();
+        // Disabled and unselected projects must not even have their files read.
+        for index in [2, 3] {
+            fs::create_dir(f.config.projects[index].repo.join("maistro-coordinator.md")).unwrap();
+        }
+        let runner = maistro::agent::AgentRunner::new(f.config.clone());
+        let cancel = CancellationToken::new();
+        let project = &f.config.projects[0];
+        for (coordinator, worker) in [
+            (None, None),
+            (Some("Coordinate p0 only.\nGather context."), None),
+            (
+                Some("Revised p0 coordination."),
+                Some("Implement p0 only.\nRun tests."),
+            ),
+            (None, Some("Revised p0 implementation.")),
+            (Some(""), Some("")),
+        ] {
+            for (filename, contents) in [
+                ("maistro-coordinator.md", coordinator),
+                ("maistro-worker.md", worker),
+            ] {
+                let path = project.repo.join(filename);
+                if let Some(contents) = contents {
+                    fs::write(path, contents).unwrap();
+                } else if path.exists() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            let result = runner
+                .coordinate(
+                    &Default::default(),
+                    &["p0".into(), "p1".into(), "p2".into()],
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let assignment = result
+                .assignments
+                .iter()
+                .find(|a| a.project_id == "p0")
+                .unwrap();
+            runner.work(project, assignment, &cancel).await.unwrap();
+            let coordination =
+                fs::read_to_string(f.temp.path().join("coordinator-prompt.txt")).unwrap();
+            let implementation =
+                fs::read_to_string(f.temp.path().join("p0-worker-prompt.txt")).unwrap();
+            assert!(coordination.starts_with(include_str!("../prompts/coordinator.md")));
+            assert!(coordination.ends_with("Only coordinate p1.\n"));
+            assert!(coordination.contains("apply only to project \"p1\""));
+            assert!(!coordination.contains("Only implement p1."));
+            assert!(!implementation.contains("Only coordinate p1."));
+            assert!(!implementation.contains("Only implement p1."));
+            assert!(!implementation.contains("PROJECT COORDINATOR INSTRUCTIONS"));
+            let custom = coordinator.unwrap_or_default();
+            assert_eq!(
+                coordination.contains("apply only to project \"p0\""),
+                !custom.is_empty()
+            );
+            if !custom.is_empty() {
+                assert!(coordination.contains(custom));
+                assert!(!implementation.contains(custom));
+            }
+            let custom = worker.unwrap_or_default();
+            assert_eq!(
+                implementation.contains("PROJECT INSTRUCTIONS:"),
+                !custom.is_empty()
+            );
+            if !custom.is_empty() {
+                assert!(implementation.ends_with(&format!("{custom}\n")));
+                assert!(!coordination.contains(custom));
+            }
+        }
+        // Unreadable or invalid files fail before starting either agent.
+        for filename in ["maistro-coordinator.md", "maistro-worker.md"] {
+            let path = project.repo.join(filename);
+            fs::remove_file(&path).unwrap();
+            for directory in [false, true] {
+                if directory {
+                    fs::create_dir(&path).unwrap();
+                } else {
+                    fs::write(&path, [0xff]).unwrap();
+                }
+                let before = f.events();
+                let error = if filename == "maistro-coordinator.md" {
+                    runner
+                        .coordinate(&Default::default(), &["p0".into()], &cancel)
+                        .await
+                        .unwrap_err()
+                } else {
+                    let assignment = maistro::model::Assignment {
+                        project_id: "p0".into(),
+                        story_id: "story-0".into(),
+                        title: "Fixture".into(),
+                        story_url: None,
+                        context: "Requirements".into(),
+                        recovery: false,
+                        pr: None,
+                    };
+                    runner
+                        .work(project, &assignment, &cancel)
+                        .await
+                        .unwrap_err()
+                };
+                assert!(error.to_string().contains("p0: read prompt file"));
+                assert!(error.to_string().contains(path.to_str().unwrap()));
+                assert_eq!(f.events(), before);
+                if directory {
+                    fs::remove_dir(&path).unwrap();
+                } else {
+                    fs::remove_file(&path).unwrap();
+                }
+            }
+        }
+    }
 }

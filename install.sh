@@ -10,7 +10,7 @@ token_file="$config_dir/github-token"
 cd -- "$source_dir"
 cargo build --release --locked
 install -Dm755 target/release/maistro "$HOME/.local/bin/maistro"
-mkdir -p -- "$config_dir/prompts" "$HOME/.config/systemd/user"
+mkdir -p -- "$config_dir" "$HOME/.config/systemd/user"
 chmod 700 -- "$config_dir"
 printf '%s\n' \
     'Create a fine-grained GitHub personal access token for Maistro:' \
@@ -62,7 +62,6 @@ if [[ ! -e "$config_file" ]]; then
 fi
 chmod 600 -- "$config_file"
 cp -- config.example.toml "$config_dir/config.example.toml"
-cp -- examples/project-prompt.md "$config_dir/prompts/example.md"
 install -m644 systemd/maistro.service "$HOME/.config/systemd/user/maistro.service"
 printf 'Installed. Edit %s using config.example.toml as the reference.\n' "$config_file"
 printf '%s\n' \

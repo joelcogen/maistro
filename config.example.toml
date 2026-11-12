@@ -42,9 +42,8 @@ mode = "pr" # "pr": push a story branch and open a PR; "master": commit/push bas
 base_branch = "main" # May be main, master, or another branch.
 remote = "origin"
 enabled = true
-# Relative paths resolve from this configuration file's directory.
-# Additional instructions appended to the complete built-in worker prompt.
-# prompt_file = "prompts/example.md"
+# Optional repository-root maistro-coordinator.md and maistro-worker.md add
+# instructions for each agent; no prompt configuration is needed (see README.md).
 
 [projects.statuses]
 backlog = "Backlog"

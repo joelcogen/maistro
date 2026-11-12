@@ -102,19 +102,14 @@ fn incomplete_assignment_and_incomplete_success_are_rejected() {
 }
 
 #[test]
-fn config_resolves_project_prompt_and_runtime_paths_relative_to_config() {
+fn config_resolves_paths_relative_to_config_and_rejects_legacy_prompt_file() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("repo")).unwrap();
-    fs::write(dir.path().join("project.md"), "Run tests").unwrap();
     let path = dir.path().join("config.toml");
-    let config = "[agents]\ngithub_token_file='credentials/github-token'\n[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='master'\nbase_branch='trunk'\nprompt_file='project.md'\n";
+    let config = "[agents]\ngithub_token_file='credentials/github-token'\n[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='master'\nbase_branch='trunk'\n";
     fs::write(&path, config).unwrap();
     let loaded = Config::load(&path).unwrap();
     assert_eq!(loaded.projects[0].repo, dir.path().join("repo"));
-    assert_eq!(
-        loaded.projects[0].prompt_file.as_ref().unwrap(),
-        &dir.path().join("project.md")
-    );
     assert_eq!(loaded.orchestrator.runtime_dir, dir.path().join("runtime"));
     assert_eq!(loaded.projects[0].base_branch, "trunk");
     assert_eq!(
@@ -132,7 +127,7 @@ fn config_resolves_project_prompt_and_runtime_paths_relative_to_config() {
             .to_string()
             .contains("migrated")
     );
-    fs::write(&path, config.replace("project.md", "missing.md")).unwrap();
+    fs::write(&path, format!("{config}prompt_file='project.md'\n")).unwrap();
     assert!(Config::load(&path).is_err());
     fs::write(&path, config.replace("mode='master'", "mode='merge'")).unwrap();
     assert!(Config::load(&path).is_err());
@@ -143,13 +138,21 @@ fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     fs::create_dir(dir.path().join("repo")).unwrap();
-    fs::write(dir.path().join("project.md"), "First test command").unwrap();
-    fs::write(&path, "[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='pr'\nbase_branch='trunk'\nprompt_file='project.md'\n").unwrap();
+    fs::write(
+        dir.path().join("repo/maistro-worker.md"),
+        "First test command",
+    )
+    .unwrap();
+    fs::write(&path, "[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='pr'\nbase_branch='trunk'\n").unwrap();
     let mut project = Config::load(&path).unwrap().projects.remove(0);
     let first = maistro::agent::worker_prompt(&project, &assignment("p0")).unwrap();
     assert!(first.contains("First test command") && first.contains("maistro/p0/story-1"));
     assert!(first.contains("PR MODE:") && !first.contains("MASTER MODE:"));
-    fs::write(dir.path().join("project.md"), "Revised test command").unwrap();
+    fs::write(
+        dir.path().join("repo/maistro-worker.md"),
+        "Revised test command",
+    )
+    .unwrap();
     project.mode = Mode::Master;
     let second = maistro::agent::worker_prompt(&project, &assignment("p0")).unwrap();
     assert!(second.contains("Revised test command") && second.contains("\"story_branch\":null"));

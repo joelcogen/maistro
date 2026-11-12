@@ -74,6 +74,7 @@ def stopped(signum, frame):
 
 signal.signal(signal.SIGTERM, stopped)
 print(json.dumps({'type': 'thread.started', 'thread_id': str(os.getpid())}), flush=True)
+(ROOT / ('coordinator-prompt.txt' if coordinator else Path.cwd().name + '-worker-prompt.txt')).write_text(prompt)
 if coordinator:
     assert 'GH_TOKEN' not in os.environ and 'GITHUB_TOKEN' not in os.environ
     if claude:
@@ -87,7 +88,7 @@ if coordinator:
     # Detect simultaneous coordinator processes independently of the test board lock.
     singleton = (ROOT / 'coordinator.lock').open('w')
     fcntl.flock(singleton, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    snapshot = json.loads(prompt.split('\nSNAPSHOT=', 1)[1])
+    snapshot = json.loads(prompt.split('\nSNAPSHOT=', 1)[1].splitlines()[0])
     projects = json.loads(prompt.split('\nPROJECTS=', 1)[1].split('\nSNAPSHOT=', 1)[0])
     configured = {arg.split('=', 1)[0].split('.', 1)[1] for arg in args
                   if arg.startswith('mcp_servers.') and '={' in arg}
@@ -178,8 +179,7 @@ else:
         input='protocol=https\nhost=github.com\n\n', text=True, capture_output=True)
     assert credentials.returncode == 0
     assert f'password={token}' in credentials.stdout
-    assert 'PROJECT INSTRUCTIONS:\nRun fixture tests.' in prompt
-    assignment = json.loads(prompt.split('\nASSIGNMENT=', 1)[1])
+    assignment = json.loads(prompt.split('\nASSIGNMENT=', 1)[1].splitlines()[0])
     git_config = json.loads(prompt.split('\nGIT=', 1)[1].split('\nASSIGNMENT=', 1)[0])
     project = assignment['project_id']
     assert Path.cwd() == ROOT / project

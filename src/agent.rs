@@ -284,12 +284,22 @@ impl AgentRunner {
                 value
             })
             .collect();
-        let prompt = format!(
+        let mut prompt = format!(
             "{}\n\nPROJECTS={}\nSNAPSHOT={}\n",
             include_str!("../prompts/coordinator.md"),
             serde_json::to_string(&project_context)?,
             serde_json::to_string(snapshot)?
         );
+        for project in &projects {
+            let custom = repository_prompt(project, "maistro-coordinator.md")?;
+            if !custom.is_empty() {
+                prompt.push_str(&format!(
+                    "\nPROJECT COORDINATOR INSTRUCTIONS (apply only to project {}):\n{}\n",
+                    serde_json::to_string(&project.id)?,
+                    custom
+                ));
+            }
+        }
         let result: Coordination = serde_json::from_value(
             self.invoke(
                 None,
@@ -323,6 +333,16 @@ impl AgentRunner {
     }
 }
 
+fn repository_prompt(project: &Project, filename: &str) -> Result<String> {
+    let path = project.repo.join(filename);
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => Ok(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error)
+            .with_context(|| format!("{}: read prompt file {}", project.id, path.display())),
+    }
+}
+
 pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<String> {
     let mode = assignment.effective_mode(project.mode);
     let branch = if mode == Mode::Pr {
@@ -345,20 +365,14 @@ pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<Strin
     } else {
         None
     };
-    let custom = project
-        .prompt_file
-        .as_ref()
-        .map(std::fs::read_to_string)
-        .transpose()
-        .context("read project prompt file")?
-        .unwrap_or_default();
+    let custom = repository_prompt(project, "maistro-worker.md")?;
     let git = json!({
         "mode":mode, "base_branch":project.base_branch, "remote":project.remote,
         "story_branch": branch,
         "story_marker":format!("{} story: {}", project.source_name(), assignment.story_id)
     });
-    Ok(format!(
-        "{}\n\nPROJECT INSTRUCTIONS:\n{}\n\nREPOSITORY={}\nGIT={}\nASSIGNMENT={}\n",
+    let mut prompt = format!(
+        "{}\n\nREPOSITORY={}\nGIT={}\nASSIGNMENT={}\n",
         include_str!("../prompts/worker.md").replace(
             "{{GIT_MODE_INSTRUCTIONS}}",
             match mode {
@@ -366,11 +380,14 @@ pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<Strin
                 Mode::Master => include_str!("../prompts/worker-master.md"),
             }
         ),
-        custom,
         project.repo.display(),
         git,
         serde_json::to_string(assignment)?
-    ))
+    );
+    if !custom.is_empty() {
+        prompt.push_str(&format!("\nPROJECT INSTRUCTIONS:\n{custom}\n"));
+    }
+    Ok(prompt)
 }
 
 fn inline_toml(value: &toml::Value) -> Result<String> {
