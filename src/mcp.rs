@@ -116,7 +116,38 @@ impl Client {
             .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
             .collect();
         ensure!(
-            texts.len() == result.content.len() && texts.len() == 1,
+            texts.len() == result.content.len(),
+            "AppFlowy MCP {name} returned unexpected content"
+        );
+        if matches!(
+            name,
+            "get_workspaces"
+                | "list_databases"
+                | "get_database_fields"
+                | "get_database_row_ids"
+                | "get_database_row_details"
+        ) {
+            // FastMCP can emit one JSON text block per list item, including zero
+            // blocks for an empty list. Keep an already encoded array intact.
+            let values: Vec<Value> = texts
+                .iter()
+                .map(|text| serde_json::from_str(text))
+                .collect::<std::result::Result<_, _>>()
+                .with_context(|| format!("AppFlowy MCP {name} returned invalid JSON"))?;
+            if values.len() == 1 && values[0].is_array() {
+                return Ok(values.into_iter().next().unwrap());
+            }
+            ensure!(
+                values.iter().all(|v| v.is_object()
+                    && (v.get("id").is_some()
+                        || v.get("row_id").is_some()
+                        || v.get("workspace_id").is_some())),
+                "AppFlowy MCP {name} returned an incomplete or unexpected list"
+            );
+            return Ok(Value::Array(values));
+        }
+        ensure!(
+            texts.len() == 1,
             "AppFlowy MCP {name} returned unexpected content"
         );
         if name == "get_page_markdown" {
@@ -160,6 +191,16 @@ mod tests {
                     "get_workspaces" => {
                         json!({"content":[{"type":"text","text":"[]"}], "_meta":{"volatile":123}})
                     }
+                    "list_databases" => {
+                        json!({"content":[{"type":"text","text":"{\"id\":\"one\"}"},{"type":"text","text":"{\"id\":\"two\"}"}]})
+                    }
+                    "get_database_fields" => {
+                        json!({"content":[{"type":"text","text":"{\"id\":\"field\"}"}]})
+                    }
+                    "get_database_row_ids" => json!({"content":[]}),
+                    "get_database_row_details" => {
+                        json!({"content":[{"type":"text","text":"{\"partial\":true,\"rows\":[]}"}]})
+                    }
                     "get_page_markdown" => json!({"content":[{"type":"text","text":"[1,2]"}]}),
                     _ => {
                         json!({"isError":true,"content":[{"type":"text","text":"private remote error"}]})
@@ -188,6 +229,27 @@ mod tests {
         assert_eq!(
             client.call("get_page_markdown", json!({})).await.unwrap(),
             json!("[1,2]")
+        );
+        assert_eq!(
+            client.call("list_databases", json!({})).await.unwrap(),
+            json!([{"id":"one"},{"id":"two"}])
+        );
+        assert_eq!(
+            client.call("get_database_fields", json!({})).await.unwrap(),
+            json!([{"id":"field"}])
+        );
+        assert_eq!(
+            client
+                .call("get_database_row_ids", json!({}))
+                .await
+                .unwrap(),
+            json!([])
+        );
+        assert!(
+            client
+                .call("get_database_row_details", json!({}))
+                .await
+                .is_err()
         );
         let error = client.call("get_page", json!({})).await.unwrap_err();
         assert!(!format!("{error:#}").contains("private remote error"));

@@ -38,7 +38,7 @@ def call(name, args):
                 for p in board]
     story = board.get(project, {})
     if name == 'get_page':
-        return dict(view_id='view-' + project, name='board', layout=2, extra=story.get('metadata'), request_id=sequence)
+        return dict(view=dict(view_id='view-' + project, name='board', layout=2, extra=story.get('metadata')), request_id=sequence)
     if name == 'get_database_fields':
         fields = story.get('fields', [{'id': 'title', 'name': 'Title'}, {'id': 'status', 'name': 'Status'}])
         return fields if sequence % 2 else list(reversed(fields))

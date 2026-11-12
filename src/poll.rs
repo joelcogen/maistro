@@ -168,6 +168,8 @@ impl Client {
             )
             .await?;
         complete(&metadata)?;
+        let metadata = metadata.get("view").unwrap_or(&metadata);
+        complete(metadata)?;
         ensure!(
             metadata["view_id"] == board.view || metadata["id"] == board.view,
             "board metadata identity mismatch"
