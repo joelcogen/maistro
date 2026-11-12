@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
 license = "MIT"
-description = "Small AppFlowy/Shortcut/Codex coding orchestrator"
+description = "Small AppFlowy/Shortcut coding orchestrator for Codex and Claude Code"
 
 [[bin]]
 name = "maistro"

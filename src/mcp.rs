@@ -1,4 +1,4 @@
-//! Read-only MCP transport. Reuses Codex's configured connection, never Codex itself.
+//! Read-only MCP transport. Reuses the selected CLI's configured connection without invoking a model.
 use anyhow::{Context, Result, bail, ensure};
 use process_wrap::tokio::{CommandWrap, ProcessGroup};
 use rmcp::{
@@ -74,7 +74,7 @@ impl Client {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
             ().serve(StreamableHttpClientTransport::with_client(client, transport_config)).await
-                .map_err(|_| anyhow::anyhow!("AppFlowy HTTP MCP initialization failed; check URL/auth (Codex OAuth credentials are not shared; use stdio or configured headers/token)"))?
+                .map_err(|_| anyhow::anyhow!("AppFlowy HTTP MCP initialization failed; check URL/auth (CLI OAuth credentials are not shared; use stdio or configured headers/token)"))?
         } else {
             bail!("AppFlowy MCP requires command or streamable HTTP url");
         };

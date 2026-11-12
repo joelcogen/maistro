@@ -11,19 +11,43 @@ import time
 
 ROOT = Path(__ROOT__)
 args = sys.argv[1:]
+claude = Path(sys.argv[0]).name == 'fake-claude'
 if args == ['exec', '--help']:
+    assert not claude
     print('--json --output-schema --ephemeral --ignore-user-config')
     sys.exit(0)
 if args == ['login', 'status']:
+    assert not claude
     sys.exit(0)
-model = args[args.index('-m') + 1]
+if args == ['--help']:
+    assert claude
+    print('--print --output-format --json-schema --model --no-session-persistence --strict-mcp-config --mcp-config --tools --allowedTools --disallowedTools --setting-sources --settings --permission-mode --dangerously-skip-permissions')
+    sys.exit(0)
+if args == ['auth', 'status']:
+    assert claude
+    print(json.dumps({'loggedIn': not (ROOT / 'logged-out').exists()}))
+    sys.exit(0)
+model = args[args.index('--model' if claude else '-m') + 1]
 prompt = sys.stdin.read()
+coordinator = '\nPROJECTS=' in prompt
+defaults = ['haiku', 'opus'] if claude else ['gpt-6-luna', 'gpt-6-astra']
+models = json.loads((ROOT / 'models.json').read_text()) if (ROOT / 'models.json').exists() else defaults
+assert model == models[0 if coordinator else 1]
 token = (ROOT / 'github-token').read_text().strip()
 assert token not in prompt and not any(token in arg for arg in args)
-output = Path(args[args.index('-o') + 1])
-assert 'features.multi_agent=false' in args
-assert '--no-daemon' in args and '--ephemeral' in args
-json.loads(Path(args[args.index('--output-schema') + 1]).read_text())
+if claude:
+    assert '--print' in args and '--no-session-persistence' in args
+    assert args[args.index('--output-format') + 1] == 'stream-json'
+    assert '--verbose' in args and '--strict-mcp-config' in args
+    assert json.loads(args[args.index('--settings') + 1])['disableAllHooks'] is True
+    assert args[args.index('--disallowedTools') + 1] == 'Agent,Task'
+    connections = json.loads(Path(args[args.index('--mcp-config') + 1]).read_text())['mcpServers']
+    json.loads(args[args.index('--json-schema') + 1])
+else:
+    output = Path(args[args.index('-o') + 1])
+    assert 'features.multi_agent=false' in args
+    assert '--no-daemon' in args and '--ephemeral' in args
+    json.loads(Path(args[args.index('--output-schema') + 1]).read_text())
 
 
 def event(kind, **fields):
@@ -33,8 +57,14 @@ def event(kind, **fields):
 
 
 def finish(result):
-    output.write_text(json.dumps(result))
-    print(json.dumps({'type': 'turn.completed'}), flush=True)
+    if claude:
+        if (ROOT / 'bad-result').exists():
+            print(json.dumps({'type': 'result', 'subtype': 'error_max_turns', 'is_error': True}), flush=True)
+        else:
+            print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'structured_output': result}), flush=True)
+    else:
+        output.write_text(json.dumps(result))
+        print(json.dumps({'type': 'turn.completed'}), flush=True)
 
 
 def stopped(signum, frame):
@@ -44,10 +74,16 @@ def stopped(signum, frame):
 
 signal.signal(signal.SIGTERM, stopped)
 print(json.dumps({'type': 'thread.started', 'thread_id': str(os.getpid())}), flush=True)
-if model == 'gpt-6-luna':
+if coordinator:
     assert 'GH_TOKEN' not in os.environ and 'GITHUB_TOKEN' not in os.environ
-    assert '--ignore-user-config' in args
-    assert args[args.index('--sandbox') + 1] == 'read-only'
+    if claude:
+        assert args[args.index('--setting-sources') + 1] == ''
+        assert args[args.index('--tools') + 1] == ''
+        assert args[args.index('--permission-mode') + 1] == 'dontAsk'
+        assert '--dangerously-skip-permissions' not in args
+    else:
+        assert '--ignore-user-config' in args
+        assert args[args.index('--sandbox') + 1] == 'read-only'
     # Detect simultaneous coordinator processes independently of the test board lock.
     singleton = (ROOT / 'coordinator.lock').open('w')
     fcntl.flock(singleton, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -55,17 +91,20 @@ if model == 'gpt-6-luna':
     projects = json.loads(prompt.split('\nPROJECTS=', 1)[1].split('\nSNAPSHOT=', 1)[0])
     configured = {arg.split('=', 1)[0].split('.', 1)[1] for arg in args
                   if arg.startswith('mcp_servers.') and '={' in arg}
-    assert configured == {p['mcp_server'] for p in projects}
+    assert (set(connections) if claude else configured) == {p['mcp_server'] for p in projects}
     for project in projects:
         source = project['source']
-        setting = next(arg for arg in args if arg.startswith(f"mcp_servers.{project['mcp_server']}={{"))
+        setting = (args[args.index('--allowedTools') + 1] if claude else
+                   next(arg for arg in args if arg.startswith(f"mcp_servers.{project['mcp_server']}={{")))
+        if claude:
+            setting = ','.join(t for t in setting.split(',') if t.startswith(f"mcp__{project['mcp_server']}__"))
         if source == 'Shortcut':
             assert 'get_story' in setting and 'update_story' in setting
             assert 'update_row_cells' not in setting and 'create_story_comment' in setting
         else:
             assert source == 'AppFlowy' and 'update_row_cells' in setting
             assert 'update_story' not in setting
-    event('coordinator', snapshot=snapshot, projects=[p['id'] for p in projects])
+    event('coordinator', model=model, provider='claude' if claude else 'codex', snapshot=snapshot, projects=[p['id'] for p in projects])
     if (ROOT / 'luna-fail').exists():
         sys.exit(4)
     with (ROOT / 'board.lock').open('w') as lock:
@@ -118,17 +157,21 @@ if model == 'gpt-6-luna':
     time.sleep(0.1)
     finish(result)
 else:
-    assert model == 'gpt-6-astra'
-    assert '--ignore-user-config' not in args
-    assert args[args.index('--sandbox') + 1] == 'danger-full-access'
-    user_config = (ROOT / 'codex-home/config.toml').read_text()
-    for server in ('appflowy', 'shortcut', 'shortcut_team'):
-        assert (f'mcp_servers.{server}.enabled=false' in args) == (f'[mcp_servers.{server}]' in user_config)
+    if claude:
+        assert '--dangerously-skip-permissions' in args
+        assert '--setting-sources' not in args
+        assert set(connections) == {'utility'}
+    else:
+        assert '--ignore-user-config' not in args
+        assert args[args.index('--sandbox') + 1] == 'danger-full-access'
+        user_config = (ROOT / 'codex-home/config.toml').read_text()
+        for server in ('appflowy', 'shortcut', 'shortcut_team'):
+            assert (f'mcp_servers.{server}.enabled=false' in args) == (f'[mcp_servers.{server}]' in user_config)
+        assert 'shell_environment_policy.ignore_default_excludes=true' in args
+        assert 'shell_environment_policy.exclude=[]' in args
+        assert 'shell_environment_policy.include_only=[]' in args
     assert os.environ['GIT_TERMINAL_PROMPT'] == '0'
     assert os.environ['GH_TOKEN'] == token and os.environ['GITHUB_TOKEN'] == token
-    assert 'shell_environment_policy.ignore_default_excludes=true' in args
-    assert 'shell_environment_policy.exclude=[]' in args
-    assert 'shell_environment_policy.include_only=[]' in args
     assert 'Use the supplied GH_TOKEN' in prompt
     # Exercise Git's actual credential lookup without a network request.
     credentials = subprocess.run(['git', 'credential', 'fill'],
@@ -140,7 +183,7 @@ else:
     git_config = json.loads(prompt.split('\nGIT=', 1)[1].split('\nASSIGNMENT=', 1)[0])
     project = assignment['project_id']
     assert Path.cwd() == ROOT / project
-    event('worker_start', project=project, recovery=assignment['recovery'], git=git_config)
+    event('worker_start', model=model, provider='claude' if claude else 'codex', project=project, recovery=assignment['recovery'], git=git_config)
     if git_config['mode'] == 'pr':
         assert 'PR MODE:' in prompt and 'MASTER MODE:' not in prompt
     else:

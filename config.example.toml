@@ -4,8 +4,8 @@ enabled = false
 port = 8044
 
 [orchestrator]
-# AppFlowy: cheap Rust polls; unchanged boards do not call Luna.
-# Shortcut: periodic Luna reads through Codex OAuth, including while idle.
+# AppFlowy: cheap Rust polls; unchanged boards do not call the coordinator.
+# Shortcut: periodic coordinator reads through the selected CLI, including while idle.
 # Also controls bounded failure retries.
 poll_interval_seconds = 30
 coordinator_timeout_seconds = 300
@@ -14,10 +14,16 @@ worker_timeout_seconds = 3600
 # runtime_dir = "~/.local/state/maistro"
 
 [agents]
-# One global gpt-6-luna coordinator and one gpt-6-astra worker per project.
-# Uses the existing Codex login and configured source MCP connections.
+# Global for ALL projects; per-project provider/model overrides are not supported.
+provider = "codex" # "codex" or "claude" (Claude Code CLI)
+# Omit models for provider defaults: Codex gpt-6-luna/gpt-6-astra; Claude haiku/opus.
+# small_model = "gpt-6-luna" # Coordinator
+# big_model = "gpt-6-astra" # Implementation workers
+# Uses the selected CLI's existing login and source MCP connections.
 # codex = "/home/you/.local/bin/codex"
 # codex_home = "~/.codex"
+# claude = "/home/you/.local/bin/claude"
+# claude_mcp_config = "~/.claude.json" # JSON with top-level mcpServers; user scope
 mcp_server = "appflowy"
 # Private file created by install.sh; loaded for each worker, never added to prompts.
 # github_token_file = "~/.config/maistro/github-token"
@@ -29,9 +35,9 @@ appflowy_page = "Example Backlog"
 # Use appflowy_url instead of appflowy_page if the name is ambiguous.
 # For Shortcut, replace the AppFlowy target with your actual workflow link:
 # shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123"
-# Optional per-project Codex server name (also supported for AppFlowy):
+# Optional per-project MCP server name (also supported for AppFlowy):
 # mcp_server = "shortcut" # Default: shortcut for Shortcut, agents.mcp_server otherwise.
-# Authorize Shortcut MCP in agents.codex_home before starting; see README.md.
+# Authorize Shortcut MCP in the selected CLI before starting; see README.md.
 mode = "pr" # "pr": push a story branch and open a PR; "master": commit/push base_branch
 base_branch = "main" # May be main, master, or another branch.
 remote = "origin"

@@ -1,5 +1,5 @@
 use crate::{
-    codex::Codex,
+    agent::AgentRunner,
     config::{Config, Mode},
     model::{Assignment, Completion, Coordination, Report, Snapshot, StoryRef},
     poll, process,
@@ -111,18 +111,18 @@ impl State {
 
 pub struct Engine {
     pub config: Config,
-    pub codex: Codex,
+    pub agents: AgentRunner,
 }
 impl Engine {
     pub fn new(config: Config) -> Self {
         Self {
-            codex: Codex::new(config.clone()),
+            agents: AgentRunner::new(config.clone()),
             config,
         }
     }
     pub async fn validate(&self) -> Result<()> {
         self.config.validate()?;
-        self.codex.validate_cli().await?;
+        self.agents.validate_cli().await?;
         let mut seen = HashSet::new();
         for p in self.config.projects.iter().filter(|p| p.enabled) {
             let root = git_output(&p.repo, &["rev-parse", "--show-toplevel"]).await?;
@@ -189,7 +189,7 @@ impl Engine {
                 continue;
             }
             polls.spawn(poll::run(
-                self.codex.mcp_config(project)?,
+                self.agents.mcp_config(project)?,
                 project.clone(),
                 interval,
                 Duration::from_secs(self.config.orchestrator.coordinator_timeout_seconds),
@@ -213,9 +213,9 @@ impl Engine {
                         snapshot.active.retain(|s| pass.contains_key(&s.project_id));
                         snapshot.pending.retain(|c| pass.contains_key(&c.story.project_id));
                         let selected: Vec<_> = pass.keys().cloned().collect();
-                        let codex = self.codex.clone();
+                        let agents = self.agents.clone();
                         let cancel = stop.child_token();
-                        coordinator.spawn(async move { codex.coordinate(&snapshot, &selected, &cancel).await });
+                        coordinator.spawn(async move { agents.coordinate(&snapshot, &selected, &cancel).await });
                     }
                 }
                 for (id, project) in &schedule.projects { diagnostics.poll_dirty(id, project.dirty()); }
@@ -362,9 +362,9 @@ impl Engine {
             );
             diagnostics.worker_started(&assignment);
             tracing::info!(project=%project.id, story=%assignment.story_id, recovery=assignment.recovery, "dispatching story");
-            let codex = self.codex.clone();
+            let agents = self.agents.clone();
             workers.spawn(async move {
-                let result = codex.work(&project, &assignment, &cancel).await;
+                let result = agents.work(&project, &assignment, &cancel).await;
                 (assignment, result)
             });
         }

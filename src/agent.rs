@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, Mode, Project},
+    config::{Config, Mode, Project, Provider},
     github,
     model::{self, Assignment, Coordination, Report, Snapshot},
     process,
@@ -10,20 +10,21 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 
-pub const COORDINATOR_MODEL: &str = "gpt-6-luna";
-pub const WORKER_MODEL: &str = "gpt-6-astra";
 #[derive(Clone)]
-pub struct Codex {
+pub struct AgentRunner {
     pub config: Config,
 }
 
-impl Codex {
+impl AgentRunner {
     pub fn new(config: Config) -> Self {
         Self { config }
     }
 
     /// Reuse the selected server transport/auth; expose only coordination tools.
     pub fn mcp_config(&self, project: &Project) -> Result<toml::Value> {
+        if self.config.agents.provider == Provider::Claude {
+            return crate::claude::poll_config(&self.config, project);
+        }
         let config: toml::Value = toml::from_str(&std::fs::read_to_string(
             self.config.agents.codex_home.join("config.toml"),
         )?)?;
@@ -39,38 +40,7 @@ impl Codex {
             })?
             .clone();
         let table = server.as_table_mut().context("invalid MCP configuration")?;
-        let reads: &[&str] = if project.is_shortcut() {
-            &[
-                "list_workflows",
-                "get_workflow",
-                "list_workflow_states",
-                "search_stories",
-                "get_story",
-                "list_story_comments",
-                "get_doc",
-                "search_docs",
-                "get_epic",
-                "get_iteration",
-                "read_file",
-            ]
-        } else {
-            &[
-                "get_workspaces",
-                "get_workspace_folder",
-                "list_databases",
-                "get_database_fields",
-                "get_database_row_ids",
-                "get_database_row_details",
-                "get_page",
-                "get_page_markdown",
-                "list_comments",
-            ]
-        };
-        let writes: &[&str] = if project.is_shortcut() {
-            &["update_story", "create_story_comment"]
-        } else {
-            &["update_row_cells", "append_comment"]
-        };
+        let (reads, writes) = source_tools(project);
         table.insert(
             "enabled_tools".into(),
             toml::Value::Array(reads.iter().chain(writes).map(|s| (*s).into()).collect()),
@@ -96,6 +66,9 @@ impl Codex {
 
     pub async fn validate_cli(&self) -> Result<()> {
         github::read_token(&self.config.agents.github_token_file)?;
+        if self.config.agents.provider == Provider::Claude {
+            return crate::claude::validate(&self.config).await;
+        }
         let mut cmd = Command::new(&self.config.agents.codex);
         cmd.args(["exec", "--help"]);
         let help = process::checked(cmd, Duration::from_secs(15)).await?;
@@ -125,6 +98,17 @@ impl Codex {
         schema: Value,
         cancel: &CancellationToken,
     ) -> Result<Value> {
+        if self.config.agents.provider == Provider::Claude {
+            return crate::claude::invoke(
+                &self.config,
+                project,
+                coordinator_projects,
+                prompt,
+                schema,
+                cancel,
+            )
+            .await;
+        }
         let runtime = &self.config.orchestrator.runtime_dir;
         let log_dir = runtime.join("logs");
         std::fs::create_dir_all(&log_dir)?;
@@ -138,13 +122,13 @@ impl Codex {
         let (role, model, cwd, timeout) = match project {
             Some(p) => (
                 p.id.as_str(),
-                WORKER_MODEL,
+                self.config.agents.big_model(),
                 p.repo.as_path(),
                 self.config.orchestrator.worker_timeout_seconds,
             ),
             None => (
                 "coordinator",
-                COORDINATOR_MODEL,
+                self.config.agents.small_model(),
                 temporary.path(),
                 self.config.orchestrator.coordinator_timeout_seconds,
             ),
@@ -194,7 +178,7 @@ impl Codex {
                 "-c",
                 "shell_environment_policy.include_only=[]",
             ]);
-            // Luna owns all configured story sources, including other projects' servers.
+            // The coordinator owns all configured story sources, including other projects' servers.
             let mut servers = std::collections::BTreeSet::from([
                 self.config.agents.mcp_server.as_str(),
                 "shortcut",
@@ -410,4 +394,42 @@ fn inline_toml(value: &toml::Value) -> Result<String> {
         toml::Value::String(s) => serde_json::to_string(s)?,
         other => other.to_string(),
     })
+}
+
+pub(crate) fn source_tools(
+    project: &Project,
+) -> (&'static [&'static str], &'static [&'static str]) {
+    let reads: &[&str] = if project.is_shortcut() {
+        &[
+            "list_workflows",
+            "get_workflow",
+            "list_workflow_states",
+            "search_stories",
+            "get_story",
+            "list_story_comments",
+            "get_doc",
+            "search_docs",
+            "get_epic",
+            "get_iteration",
+            "read_file",
+        ]
+    } else {
+        &[
+            "get_workspaces",
+            "get_workspace_folder",
+            "list_databases",
+            "get_database_fields",
+            "get_database_row_ids",
+            "get_database_row_details",
+            "get_page",
+            "get_page_markdown",
+            "list_comments",
+        ]
+    };
+    let writes: &[&str] = if project.is_shortcut() {
+        &["update_story", "create_story_comment"]
+    } else {
+        &["update_row_cells", "append_comment"]
+    };
+    (reads, writes)
 }

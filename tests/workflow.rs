@@ -99,6 +99,7 @@ impl Fixture {
                 codex_home: home,
                 mcp_server: "appflowy".into(),
                 github_token_file,
+                ..Default::default()
             },
             orchestrator: Orchestrator {
                 runtime_dir: root.join("runtime"),
@@ -128,6 +129,40 @@ impl Fixture {
         fs::write(
             self.temp.path().join("board.json"),
             serde_json::to_vec(&board).unwrap(),
+        )
+        .unwrap();
+    }
+    fn claude(&mut self) {
+        self.config.agents.provider = maistro::config::Provider::Claude;
+        let executable = self.temp.path().join("fake-claude");
+        fs::copy(&self.config.agents.codex, &executable).unwrap();
+        self.config.agents.claude = executable;
+        self.config.agents.claude_mcp_config = self.temp.path().join("claude.json");
+        let mut connections = json!({"mcpServers": {
+            "appflowy": {"command": "python3", "args": [self.temp.path().join("mcp.py"), self.temp.path()]},
+            "utility": {"command":"fixture-utility"}
+        }});
+        for project in &self.config.projects {
+            if project.is_shortcut() {
+                connections["mcpServers"][project.mcp_server(&self.config.agents)] =
+                    json!({"type":"http", "url":"https://mcp.shortcut.invalid/mcp"});
+            }
+        }
+        fs::write(
+            &self.config.agents.claude_mcp_config,
+            serde_json::to_vec(&connections).unwrap(),
+        )
+        .unwrap();
+        // Claude mode must not require a Codex installation or login/config.
+        fs::remove_dir_all(&self.config.agents.codex_home).unwrap();
+        self.config.agents.codex = "/nonexistent-codex".into();
+    }
+    fn models(&mut self, small: &str, big: &str) {
+        self.config.agents.small_model = Some(small.into());
+        self.config.agents.big_model = Some(big.into());
+        fs::write(
+            self.temp.path().join("models.json"),
+            serde_json::to_vec(&json!([small, big])).unwrap(),
         )
         .unwrap();
     }
@@ -222,7 +257,7 @@ impl Fixture {
 #[tokio::test]
 async fn workers_reload_rotated_tokens_without_putting_them_in_logs() {
     let f = Fixture::new(&[Mode::Master, Mode::Pr]);
-    let codex = maistro::codex::Codex::new(f.config.clone());
+    let codex = maistro::agent::AgentRunner::new(f.config.clone());
     let tokens = ["github_pat_first", "github_pat_rotated"];
     for token in tokens {
         fs::write(&f.config.agents.github_token_file, token).unwrap();
@@ -1022,5 +1057,127 @@ async fn shortcut_recovers_pushed_commit_after_result_delivery_failure() {
         f.events()
             .iter()
             .any(|e| e["kind"] == "worker_start" && e["recovery"] == true)
+    );
+}
+
+#[tokio::test]
+async fn global_models_apply_to_coordinator_and_every_codex_worker() {
+    let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
+    f.models("custom-small", "custom-big");
+    f.touch("parallel");
+    let (token, job) = f.start();
+    let complete = f
+        .wait(|| f.board()["p0"]["status"] == "Done" && f.board()["p1"]["status"] == "Review")
+        .await;
+    f.stop(token, job).await;
+    assert!(complete, "events: {:?}", f.events());
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "worker_start" && e["model"] == "custom-big")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn claude_mixed_sources_models_git_modes_and_recovery() {
+    let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
+    f.shortcut(1, "shortcut_team");
+    f.claude();
+    f.models("custom-haiku", "custom-opus");
+    f.touch("parallel");
+    f.touch("outage");
+    let (token, job) = f.start();
+    let pending = f
+        .wait(|| f.events().iter().filter(|e| e["kind"] == "outage").count() >= 2)
+        .await;
+    f.stop(token, job).await;
+    assert!(pending, "events: {:?}", f.events());
+    let sha = git(&f.temp.path().join("remote0.git"), &["rev-parse", "main"]);
+    fs::remove_file(f.temp.path().join("outage")).unwrap();
+    let (token, job) = f.start();
+    let complete = f
+        .wait(|| f.board()["p0"]["status"] == "Done" && f.board()["p1"]["status"] == "Review")
+        .await;
+    f.stop(token, job).await;
+    assert!(complete, "events: {:?}", f.events());
+    assert_eq!(
+        git(&f.temp.path().join("remote0.git"), &["rev-parse", "main"]),
+        sha
+    );
+    assert_eq!(f.board()["p0"]["result"]["commit"], sha);
+    assert!(f.events().iter().any(|e| e["kind"] == "worker_start"
+        && e["recovery"] == true
+        && e["provider"] == "claude"));
+    assert_eq!(
+        f.board()["p1"]["result"]["pr_url"],
+        "https://example.test/pull/p1"
+    );
+}
+
+#[tokio::test]
+async fn claude_cancellation_and_timeout_stop_workers() {
+    for timeout in [false, true] {
+        let mut f = Fixture::new(&[Mode::Master]);
+        f.claude();
+        if timeout {
+            f.config.orchestrator.worker_timeout_seconds = 2;
+        }
+        f.touch("hang");
+        let (token, job) = f.start();
+        let started = f
+            .wait(|| f.events().iter().any(|e| e["kind"] == "worker_start"))
+            .await;
+        if !timeout {
+            f.status("p0", "Cancelled");
+        }
+        let stopped = f
+            .wait(|| {
+                f.events()
+                    .iter()
+                    .any(|e| e["kind"] == "stopped" && e["model"] == "opus")
+            })
+            .await;
+        let delivered = if timeout {
+            f.wait(|| f.board()["p0"]["status"] == "Blocked").await
+        } else {
+            true
+        };
+        f.stop(token, job).await;
+        assert!(started && stopped && delivered, "events: {:?}", f.events());
+        assert_eq!(
+            f.board()["p0"]["status"],
+            if timeout { "Blocked" } else { "Cancelled" }
+        );
+    }
+}
+
+#[tokio::test]
+async fn claude_validation_rejects_logged_out_cli_and_failed_results() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.claude();
+    f.touch("logged-out");
+    assert!(
+        Engine::new(f.config.clone())
+            .validate()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("not logged in")
+    );
+    fs::remove_file(f.temp.path().join("logged-out")).unwrap();
+    Engine::new(f.config.clone()).validate().await.unwrap();
+    f.touch("bad-result");
+    let runner = maistro::agent::AgentRunner::new(f.config.clone());
+    assert!(
+        runner
+            .coordinate(
+                &Default::default(),
+                &["p0".into()],
+                &CancellationToken::new()
+            )
+            .await
+            .is_err()
     );
 }

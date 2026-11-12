@@ -1,14 +1,16 @@
 # Maistro
 
-Maistro runs one Luna coordinator for AppFlowy and Shortcut and one Astra coding
-worker per project. Projects run in parallel; each project handles one story at a
+Maistro runs one coordinator for AppFlowy and Shortcut and one coding worker per
+project, using either Codex or Claude Code. The provider and the small coordinator
+and big worker models are configured globally. Codex with `gpt-6-luna`/`gpt-6-astra`
+remains the default. Projects run in parallel; each project handles one story at a
 time. Each project's configured board/workflow is the source of truth. There is no
 SQLite database, local board mirror,
 independent reviewer, CI watcher, or merge pipeline.
 
-Luna selects a story, gathers its complete requirements and linked context, and
-confirms it is In Progress. Astra implements it, runs tests, fixes failures,
-commits and pushes. Luna then records the result on the story's source.
+The coordinator selects a story, gathers its complete requirements and linked context, and
+confirms it is In Progress. The worker implements it, runs tests, fixes failures,
+commits and pushes. The coordinator then records the result on the story's source.
 
 ## Project modes
 
@@ -23,7 +25,7 @@ A story can override a `master` project's default by explicitly requesting PR
 delivery in its body or human comments, for example: “Open a PR for this story”
 or “Deliver this story as a PR on branch `feature/new-export`.” Asking to implement
 the story on a named feature/story branch also implies PR delivery. A PR project
-can likewise specify a custom branch. Without a requested name, Astra uses stable
+can likewise specify a custom branch. Without a requested name, the worker uses stable
 `maistro/<project>/<story-id>` branch names in PR mode. In both modes it uses
 `AppFlowy story: <story-id>` or `Shortcut story: <numeric-id>` commit/PR markers
 to find interrupted work.
@@ -38,10 +40,10 @@ through result delivery; edits do not change an already running worker's endpoin
 
 ## Install and configure
 
-Requires Linux, Git, Rust 1.89+, a logged-in Codex CLI supporting `exec --json`,
-`--output-schema`, `--ephemeral` and `--ignore-user-config`, and the selected
-source's MCP entry in your existing Codex configuration. PR projects also need
-`gh` (GitHub CLI).
+Requires Linux, Git, Rust 1.89+, and a logged-in Codex or Claude Code CLI with the
+selected source's MCP connection configured. Codex needs `exec --json`,
+`--output-schema`, `--ephemeral` and `--ignore-user-config`; Claude requirements
+and configuration are described below. PR projects also need `gh` (GitHub CLI).
 The installer sets up a GitHub token for worker Git and PR operations.
 
 To get started with a new AppFlowy board, copy the
@@ -96,18 +98,84 @@ interrupted work when restarting.
 Project `prompt_file` is optional. It adds project-specific instructions to the
 complete [worker prompt](prompts/worker.md): testing commands, coding conventions,
 and completion expectations. See [the example](examples/project-prompt.md).
-Astra also reads the repository's AGENTS.md. Prompt files are read for each
+The worker also reads the repository's AGENTS.md. Prompt files are read for each
 assignment; restart the service to apply TOML changes. Relative paths resolve
-from the TOML file's directory; `~/` expands from HOME. Models are fixed to
-`gpt-6-luna` and `gpt-6-astra`; additional agents are disabled.
+from the TOML file's directory; `~/` expands from HOME. Additional agents are disabled.
+
+### Global provider and models
+
+Set these keys once in `[agents]`; they apply to every project. Per-project model
+or provider settings are rejected.
+
+```toml
+[agents]
+provider = "codex" # Default; or "claude" for Claude Code
+small_model = "gpt-6-luna" # Coordinator
+big_model = "gpt-6-astra" # Implementation workers
+```
+
+Model IDs and aliases are passed unchanged to the selected CLI. Omitting either
+model uses that provider's default for the role: `gpt-6-luna` / `gpt-6-astra` for
+Codex, `haiku` / `opus` for Claude. When switching providers, remove the explicit
+models or replace them with models supported by the new provider. Empty names
+are rejected; model availability is checked by the CLI on invocation.
+
+For Claude Code, a minimal replacement `[agents]` section is:
+
+```toml
+[agents]
+provider = "claude"
+# small_model = "haiku"
+# big_model = "opus"
+# claude = "/absolute/path/to/claude" # Defaults to claude on PATH
+# claude_mcp_config = "~/.claude.json"
+```
+
+Use an installed, authenticated Claude Code CLI supporting print mode, streaming
+JSON, JSON Schema output, session-persistence control, strict MCP configuration,
+tool and setting-source controls, and noninteractive permissions. `validate`
+checks the required flags and `claude auth status` without invoking a model.
+Authenticate with `claude auth login` before starting the service; normal Claude
+credentials and authentication environment remain in use. Claude mode does not
+require Codex, its login, or its configuration.
+
+Configure story servers with **user scope** in Claude (for example,
+`claude mcp add --scope user --transport http shortcut https://mcp.shortcut.com/mcp`),
+and complete OAuth authorization in Claude before unattended use. Maistro reads
+the top-level `mcpServers` object in `~/.claude.json`. `agents.claude_mcp_config`
+can instead point at a JSON file in the same format, including when using a custom
+Claude configuration directory; it selects connections, not the CLI's login home.
+Source entries in repository `.mcp.json` or per-repository entries in
+`~/.claude.json` are not used. Project `mcp_server` selects the named entry exactly
+as with Codex. Do not put credentials in the Maistro TOML or prompts.
+
+AppFlowy Rust polling accepts Claude stdio (`command`, `args`, `env`) and HTTP
+(`"type": "http"`, `url`, `headers`) connections. Claude's `${VAR}` and
+`${VAR:-default}` substitutions are expanded for polling. HTTP AppFlowy needs
+explicit headers or a stdio connection; Rust cannot reuse CLI-managed OAuth.
+Shortcut continues to use periodic coordinator reads with Claude's own OAuth.
+
+Claude runs use `--print --output-format stream-json --json-schema` with session
+persistence disabled. The coordinator has no built-in tools, loads only the
+selected source connections, and automatically permits only the listed source
+read/status/comment tools. Workers inherit normal Claude settings and development
+tools with noninteractive full access; strict MCP configuration includes only
+non-source connections from `claude_mcp_config`. Repository/plugin MCP entries
+are excluded. Hooks and the Agent/Task spawning tools are disabled for both roles.
+The same GitHub token, timeout, process-group cancellation, structured-result
+validation, Git delivery and recovery rules apply to both providers.
+
+See the official [Claude CLI reference](https://code.claude.com/docs/en/cli-reference),
+[structured output guide](https://code.claude.com/docs/en/headless), and
+[MCP configuration guide](https://code.claude.com/docs/en/mcp).
 
 The coordinator uses only the MCP servers named by the projects in that pass,
 with source-specific read tools and status/comment write tools. AppFlowy uses
 `update_row_cells` and `append_comment`; Shortcut uses `update_story` and
-`create_story_comment`. The worker uses the normal Codex
+`create_story_comment`. With Codex selected, the worker uses the normal Codex
 configuration, tools, environment, network, and the configured GitHub token with full
 filesystem access and no interactive approval prompts. All configured story-source
-MCP servers are disabled for the worker; Luna owns story updates. Maistro disables
+MCP servers are disabled for the worker; the coordinator owns story updates. Maistro disables
 agent spawning and hooks in both roles. Scope and Git behavior are directed by the
 prompts; there is no custom filesystem sandbox or Rust verification pipeline.
 
@@ -125,7 +193,7 @@ journalctl --user -u maistro -f
 
 Use `systemctl --user enable maistro` to start with the user service manager.
 For operation without an interactive login, configure user lingering as usual.
-`validate` checks local configuration, repository identities/remotes, Codex login,
+`validate` checks local configuration, repository identities/remotes, the selected CLI login,
 the private token file, and each enabled project's MCP configuration. It makes no
 model calls and does not test token validity, remote board access or Git push permission.
 
@@ -147,7 +215,7 @@ for unattended operation: `KillMode=control-group` also cleans up descendants
 when the daemon crashes. Do not SIGKILL a foreground daemon and assume all of its
 grandchildren have stopped before restarting it.
 
-Private Codex event/stderr logs live in `~/.local/state/maistro/logs` by default.
+Private agent event/stderr logs live in `~/.local/state/maistro/logs` by default.
 They may contain story/code/tool content. They are diagnostic only and are never
 read to reconstruct workflow state. Clean old logs as needed. `runtime_dir` also
 contains OS lock files and transient invocation files; it must be outside managed
@@ -186,7 +254,7 @@ are separate from board observations. Observations are in memory only and reset
 on restart. For AppFlowy the page exposes the last Rust poll, last observed change,
 dirty status, and a concise poll error. Shortcut shows periodic coordinator reads and
 their observation windows, without claiming a Rust poll or change fingerprint.
-Luna returns counts from its existing coordination reads; they can lag Rust polling until the next pass. Viewing the page makes
+The coordinator returns counts from its existing coordination reads; they can lag Rust polling until the next pass. Viewing the page makes
 no agent or source calls. Counts never select or authorize work.
 
 Ready means queued work; In Progress includes both active and interrupted work.
@@ -244,7 +312,7 @@ and [Serve setup](https://tailscale.com/docs/features/tailscale-serve).
 
 Set `shortcut_url` instead of either AppFlowy target. Copy a link identifying one
 workflow from your Shortcut workspace; a workspace home, individual story, epic,
-or ambiguous saved search is not a workflow target. Luna resolves the link with
+or ambiguous saved search is not a workflow target. The coordinator resolves the link with
 MCP and verifies workflow membership before claims and updates. An unresolved
 link or missing/ambiguous status mapping produces a diagnostic and a retry, with
 no dispatch. The scope includes all non-archived stories in that workflow, so use
@@ -256,7 +324,7 @@ id = "shortcut-service"
 repo = "/absolute/path/to/service"
 shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123"
 # Replace the illustrative URL above with your workflow's actual link.
-mcp_server = "shortcut" # Optional; name of this workspace's entry in Codex config.toml.
+mcp_server = "shortcut" # Optional; name of this workspace's entry in the selected CLI.
 mode = "pr"
 base_branch = "main"
 
@@ -278,25 +346,28 @@ PR override and result-delivery rules below apply to Shortcut as well. Numeric
 public story IDs remain stable across restarts. Completion comments include the
 same idempotency marker and read-back checks as AppFlowy.
 
-Configure and authorize the hosted Shortcut MCP in the same Codex home used by
-Maistro, following [Shortcut's MCP setup](https://www.shortcut.com/help/integrations/mcp-server/).
-The hosted endpoint is `https://mcp.shortcut.com/mcp` and uses OAuth. Maistro keeps
-the existing Codex home and server name so Codex can use that login; it does not
-copy OAuth tokens into project configuration or use a separate Shortcut API key.
+Configure and authorize the hosted Shortcut MCP in the selected CLI, following
+[Shortcut's MCP setup](https://www.shortcut.com/help/integrations/mcp-server/).
+The hosted endpoint is `https://mcp.shortcut.com/mcp` and uses OAuth. For Codex,
+use the same `agents.codex_home` as Maistro; for Claude, use a user-scoped entry
+as described above. Maistro preserves the server name and uses the CLI's login;
+it does not copy OAuth tokens into project configuration or use a separate
+Shortcut API key.
 Complete authorization before starting the unattended service. `validate` only
 checks local configuration, not remote authentication, workflow access or states.
 
 `projects.mcp_server` overrides the server name for either source, allowing
 separate workspace connections per project. Its defaults are `shortcut` for
 Shortcut and `agents.mcp_server` (normally `appflowy`) for AppFlowy. Configure each
-named entry in `agents.codex_home/config.toml`; Maistro does not load MCP entries
+named entry in `agents.codex_home/config.toml` for Codex, or the top-level
+`mcpServers` in `agents.claude_mcp_config` for Claude. Maistro does not load MCP entries
 from individual repository config files. Projects can mix both sources in one
 process, and a Shortcut-only installation needs no AppFlowy server. One server
 name cannot be assigned to both source types. Do not configure overlapping
 workflows/boards against separate checkouts.
 
-**Shortcut uses periodic Luna reads**, including when idle: the Rust MCP transport
-cannot reuse Codex-managed OAuth credentials. `poll_interval_seconds` is the delay
+**Shortcut uses periodic coordinator reads**, including when idle: the Rust MCP transport
+cannot reuse CLI-managed OAuth credentials. `poll_interval_seconds` is the delay
 from a completed pass to the next Shortcut pass (or a failed pass to its retry).
 Worker completion can trigger earlier coordination. One global pass still runs
 at a time; failures retain pending results, and other projects' workers continue.
@@ -312,19 +383,19 @@ Use Backlog, Ready, In Progress, Review, Done, Blocked, and Cancelled, or map th
 exact labels in `[projects.statuses]`. Existing boards with `In progress` should
 set `in_progress = "In progress"`.
 
-- Ready authorizes new work. Luna honors dependencies and priority and gathers
+- Ready authorizes new work. The coordinator honors dependencies and priority and gathers
   the full story body, human comments, and linked reference documents.
 - In Progress stories without a live worker are recovered before new work.
-  Astra inspects existing changes, commits, remote branches and PRs before
+  The worker inspects existing changes, commits, remote branches and PRs before
   continuing, including work finished just before a crash. It must preserve
   unrelated local changes and avoid duplicate commits/PRs.
 - Backlog and Cancelled never authorize work. Moving an active story to either,
-  or otherwise out of In Progress, stops its worker when Luna observes the change.
+  or otherwise out of In Progress, stops its worker when the coordinator observes the change.
   Existing files, commits and PRs remain. Maistro preserves the user-selected
   status. Requirement edits alone do not restart active work.
 - A worker failure or unresolved obstacle becomes Blocked with an explanation.
   To retry, resolve the obstacle and move the story back to Ready.
-- Completed results stay in process memory until Luna confirms the source
+- Completed results stay in process memory until the coordinator confirms the source
   update or observes a user status change. The project remains occupied until
   then. Other projects continue. A coordinator failure retries after the polling
   interval, without releasing those pending results.
@@ -334,21 +405,21 @@ MCP connection.
 `orchestrator.poll_interval_seconds` (30 seconds by default) is the delay between
 completed poll attempts per project, **not** a schedule for model calls. After a
 valid initial observation and coordination, an unchanged idle/empty board makes
-no further Luna calls. Changes to any story, including Done or Backlog stories,
+no further coordinator calls. Changes to any story, including Done or Backlog stories,
 and changes written by Maistro itself all wake coordination.
 
-One global Luna pass runs at a time and coalesces dirty projects. Polling and
+One global coordinator pass runs at a time and coalesces dirty projects. Polling and
 project workers continue while it runs. A pass acknowledges only the observed
 generation at its start; changes observed during that pass remain dirty for a
 later pass. Worker completion, failure, cancellation completion and result
-acknowledgement also wake Luna, so pending delivery and queued work do not wait
+acknowledgement also wake the coordinator, so pending delivery and queued work do not wait
 for a board edit. Failed/incomplete coordination and unacknowledged results retry
 after the polling interval, independently for each project.
 
-Luna still reads fresh data, checks active-story statuses first, selects and
+The coordinator still reads fresh data, checks active-story statuses first, selects and
 authorizes stories, writes results, and decides cancellation. Cancellation latency
-normally includes up to one polling interval, a complete board read, and Luna's
-read/decision time. An existing Luna pass, large boards, inconsistent reads,
+normally includes up to one polling interval, a complete board read, and the coordinator's
+read/decision time. An existing coordinator pass, large boards, inconsistent reads,
 failures and the coordinator timeout can extend that latency. A failing project's
 poll does not block other projects. There is no cancellation detection during an
 AppFlowy outage. A push already underway may finish before cancellation is observed.
@@ -356,14 +427,15 @@ AppFlowy outage. A push already underway may finish before cancellation is obser
 ### Polling contract and consistency
 
 The AppFlowy poller reuses `projects.mcp_server` (default `agents.mcp_server`)
-from the Codex configuration: stdio
-`command`, `args`, `cwd`, `env` and inherited environment, or streamable HTTP
-`url`, `http_headers`, `env_http_headers`, and `bearer_token_env_var`. It uses the
+from the selected provider configuration. Codex supports stdio `command`, `args`,
+`cwd`, `env` and inherited environment, or streamable HTTP `url`, `http_headers`,
+`env_http_headers`, and `bearer_token_env_var`. Claude transport keys are described
+in the global provider section above. It uses the
 MCP Rust SDK directly, without a model. The server must expose the legacy read
-tools already used by Luna: `get_workspaces`, `list_databases`, `get_page`,
+tools already used by the coordinator: `get_workspaces`, `list_databases`, `get_page`,
 `get_database_fields`, `get_database_row_ids`, `get_database_row_details`,
 `get_page_markdown`, and `list_comments`. Enable that tool profile in AppFlowy MCP
-if necessary. Codex-managed HTTP OAuth credentials and legacy SSE transport are
+if necessary. CLI-managed HTTP OAuth credentials and legacy SSE transport are
 not shared by this client; use the configured stdio server or streamable HTTP
 headers/token. Connection/authentication errors are reported and retried without
 falling back to idle model calls. `validate` remains a local check, not a live
@@ -374,7 +446,7 @@ AppFlowy URL; ambiguous names require a URL or ID. Each project keeps only a
 SHA-256 fingerprint, dirty generations and retry timing in memory. Poll responses
 are transient; no board content, observation baseline or queue is written to disk.
 Restart discards comparison state: every enabled project starts unknown/dirty,
-obtains a complete observation, then runs Luna to recover In Progress work or
+obtains a complete observation, then runs the coordinator to recover In Progress work or
 start Ready work.
 
 No board timestamp or updated-row feed is assumed to cover documents/comments.
@@ -384,7 +456,7 @@ with `has_doc=true`, row comments/replies (including resolved threads), and body
 inline comments. Rows/fields/comments are keyed by ID and JSON objects by key;
 semantic array ordering and Markdown are preserved. MCP request metadata and
 pagination offsets are excluded. **Edits to external linked reference documents
-alone are outside this detector's scope**; Luna still reads relevant references
+alone are outside this detector's scope**; the coordinator still reads relevant references
 when processing a story.
 
 The read contract was checked against AppFlowy MCP's legacy handlers
@@ -409,8 +481,8 @@ valid fingerprint and dirty state remain intact. Retries wait the configured
 interval; each poll is bounded by `coordinator_timeout_seconds` (individual MCP
 reads also have a 60-second limit). Failed projects do not make other pollers wait.
 
-After restart all in-memory assignments and pending results are gone. Luna reads
-the configured source afresh; Astra reconstructs interrupted work from the board
+After restart all in-memory assignments and pending results are gone. The coordinator reads
+the configured source afresh; the worker reconstructs interrupted work from the board
 and repository.
 A crash between a remote operation and its source update is reconciled by the
 models, not an exactly-once transaction. Reads and status writes are not atomic
@@ -450,5 +522,5 @@ cargo build --release --locked
 The UI tests use Node.js 20+ and its built-in test runner; there are no frontend
 dependencies or build steps.
 
-Tests use simulated Codex agents, stdio/HTTP MCP fixtures, and local Git remotes. They
+Tests use simulated Codex and Claude Code agents, stdio/HTTP MCP fixtures, and local Git remotes. They
 never call live models, write a real board, or push to an external repository.

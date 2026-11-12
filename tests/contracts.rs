@@ -146,12 +146,12 @@ fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
     fs::write(dir.path().join("project.md"), "First test command").unwrap();
     fs::write(&path, "[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='pr'\nbase_branch='trunk'\nprompt_file='project.md'\n").unwrap();
     let mut project = Config::load(&path).unwrap().projects.remove(0);
-    let first = maistro::codex::worker_prompt(&project, &assignment("p0")).unwrap();
+    let first = maistro::agent::worker_prompt(&project, &assignment("p0")).unwrap();
     assert!(first.contains("First test command") && first.contains("maistro/p0/story-1"));
     assert!(first.contains("PR MODE:") && !first.contains("MASTER MODE:"));
     fs::write(dir.path().join("project.md"), "Revised test command").unwrap();
     project.mode = Mode::Master;
-    let second = maistro::codex::worker_prompt(&project, &assignment("p0")).unwrap();
+    let second = maistro::agent::worker_prompt(&project, &assignment("p0")).unwrap();
     assert!(second.contains("Revised test command") && second.contains("\"story_branch\":null"));
     assert!(second.contains("\"base_branch\":\"trunk\""));
     assert!(second.contains("MASTER MODE:") && !second.contains("PR MODE:"));
@@ -161,7 +161,7 @@ fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
     story.context = "Add support for PRs and custom branch names in master mode".into();
     assert_eq!(story.effective_mode(project.mode), Mode::Master);
     story.pr = Some(PrRequest { branch: None });
-    let overridden = maistro::codex::worker_prompt(&project, &story).unwrap();
+    let overridden = maistro::agent::worker_prompt(&project, &story).unwrap();
     assert!(overridden.contains("\"mode\":\"pr\""));
     assert!(overridden.contains("\"story_branch\":\"maistro/p0/story-1\""));
     assert!(overridden.contains("PR MODE:") && !overridden.contains("MASTER MODE:"));
@@ -169,7 +169,7 @@ fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
     for mode in [Mode::Master, Mode::Pr] {
         project.mode = mode;
         story.pr.as_mut().unwrap().branch = Some("feature/requested-branch".into());
-        let custom = maistro::codex::worker_prompt(&project, &story).unwrap();
+        let custom = maistro::agent::worker_prompt(&project, &story).unwrap();
         assert!(custom.contains("\"story_branch\":\"feature/requested-branch\""));
         assert!(custom.contains("\"base_branch\":\"trunk\""));
         assert!(custom.contains("\"remote\":\"origin\""));
@@ -179,7 +179,7 @@ fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
         ] {
             story.pr.as_mut().unwrap().branch = Some(invalid.into());
             assert!(
-                maistro::codex::worker_prompt(&project, &story).is_err(),
+                maistro::agent::worker_prompt(&project, &story).is_err(),
                 "{invalid}"
             );
         }
@@ -273,7 +273,7 @@ fn shortcut_configuration_is_exclusive_scoped_and_backward_compatible() {
     config.validate().unwrap();
     assert_eq!(config.projects[0].mcp_server(&config.agents), "shortcut");
     assert_eq!(config.projects[0].source_name(), "Shortcut");
-    let prompt = maistro::codex::worker_prompt(&config.projects[0], &assignment("p")).unwrap();
+    let prompt = maistro::agent::worker_prompt(&config.projects[0], &assignment("p")).unwrap();
     assert!(prompt.contains("Shortcut story: story-1"));
     assert!(prompt.contains("access AppFlowy or Shortcut"));
     for invalid in [
@@ -332,7 +332,7 @@ args = ["--fixture"]
     .unwrap();
     let mut config: Config = toml::from_str("[[projects]]\nid='p'\nrepo='/tmp'\nshortcut_url='https://app.shortcut.com/team/settings/workflows/42'\nmcp_server='team_shortcut'\nmode='master'\nbase_branch='master'\n").unwrap();
     config.agents.codex_home = dir.path().into();
-    let codex = maistro::codex::Codex::new(config.clone());
+    let codex = maistro::agent::AgentRunner::new(config.clone());
     let shortcut = codex.mcp_config(&config.projects[0]).unwrap();
     assert_eq!(
         shortcut["url"].as_str(),
@@ -393,5 +393,78 @@ args = ["--fixture"]
             .unwrap_err()
             .to_string()
             .contains("missing")
+    );
+}
+
+#[test]
+fn provider_and_models_are_global_with_compatible_defaults() {
+    use maistro::config::Provider;
+    let project = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Stories'\nmode='master'\nbase_branch='main'\n";
+    let config: Config = toml::from_str(project).unwrap();
+    assert_eq!(config.agents.provider, Provider::Codex);
+    assert_eq!(config.agents.small_model(), "gpt-6-luna");
+    assert_eq!(config.agents.big_model(), "gpt-6-astra");
+    let config: Config =
+        toml::from_str(&format!("[agents]\nprovider='claude'\n{project}")).unwrap();
+    assert_eq!(config.agents.small_model(), "haiku");
+    assert_eq!(config.agents.big_model(), "opus");
+    for provider in ["codex", "claude"] {
+        let config: Config = toml::from_str(&format!("[agents]\nprovider='{provider}'\nsmall_model='custom-small'\nbig_model='custom-big'\n{project}")).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.agents.small_model(), "custom-small");
+        assert_eq!(config.agents.big_model(), "custom-big");
+        for field in ["small_model", "big_model"] {
+            for value in ["", "   ", "--bad-option", "bad\\nmodel"] {
+                let config: Config = toml::from_str(&format!(
+                    "[agents]\nprovider='{provider}'\n{field}=\"{value}\"\n{project}"
+                ))
+                .unwrap();
+                assert!(config.validate().is_err());
+            }
+        }
+    }
+    assert!(toml::from_str::<Config>(&format!("[agents]\nprovider='other'\n{project}")).is_err());
+    for field in [
+        "provider='claude'",
+        "small_model='other'",
+        "big_model='other'",
+    ] {
+        assert!(toml::from_str::<Config>(&format!("{project}{field}\n")).is_err());
+    }
+}
+
+#[test]
+fn claude_paths_resolve_and_mcp_transport_preserves_headers_and_source_selection() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("repo")).unwrap();
+    let path = dir.path().join("config.toml");
+    fs::write(&path, "[agents]\nprovider='claude'\nclaude='./bin/claude'\nclaude_mcp_config='connections.json'\n[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p'\nrepo='repo'\nappflowy_page='Stories'\nmcp_server='team'\nmode='master'\nbase_branch='main'\n").unwrap();
+    fs::write(dir.path().join("connections.json"), r#"{"mcpServers":{"team":{"type":"http","url":"https://example.test/mcp","headers":{"Authorization":"Bearer ${MAISTRO_TEST_UNSET_819:-fixture-only}"}}}}"#).unwrap();
+    let config = Config::load(&path).unwrap();
+    assert_eq!(config.agents.claude, dir.path().join("bin/claude"));
+    assert_eq!(
+        config.agents.claude_mcp_config,
+        dir.path().join("connections.json")
+    );
+    let runner = maistro::agent::AgentRunner::new(config.clone());
+    let transport = runner.mcp_config(&config.projects[0]).unwrap();
+    assert_eq!(transport["url"].as_str(), Some("https://example.test/mcp"));
+    assert_eq!(
+        transport["http_headers"]["Authorization"].as_str(),
+        Some("Bearer fixture-only")
+    );
+    fs::write(
+        dir.path().join("connections.json"),
+        r#"{"mcpServers":{"team":{"type":"sse","url":"https://example.test/sse"}}}"#,
+    )
+    .unwrap();
+    assert!(runner.mcp_config(&config.projects[0]).is_err());
+    fs::write(dir.path().join("connections.json"), r#"{"mcpServers":{}}"#).unwrap();
+    assert!(
+        runner
+            .mcp_config(&config.projects[0])
+            .unwrap_err()
+            .to_string()
+            .contains("team missing")
     );
 }

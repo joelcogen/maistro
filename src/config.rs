@@ -55,6 +55,13 @@ impl Default for Orchestrator {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Agents {
+    pub provider: Provider,
+    /// Model IDs/aliases understood by the selected CLI; omitted values use provider defaults.
+    pub small_model: Option<String>,
+    pub big_model: Option<String>,
+    pub claude: PathBuf,
+    /// JSON file containing user-scoped mcpServers (normally ~/.claude.json).
+    pub claude_mcp_config: PathBuf,
     pub codex: PathBuf,
     pub codex_home: PathBuf,
     pub mcp_server: String,
@@ -63,6 +70,11 @@ pub struct Agents {
 impl Default for Agents {
     fn default() -> Self {
         Self {
+            provider: Provider::Codex,
+            small_model: None,
+            big_model: None,
+            claude: "claude".into(),
+            claude_mcp_config: "~/.claude.json".into(),
             codex: "codex".into(),
             codex_home: std::env::var_os("CODEX_HOME")
                 .map(PathBuf::from)
@@ -70,6 +82,28 @@ impl Default for Agents {
             mcp_server: "appflowy".into(),
             github_token_file: "~/.config/maistro/github-token".into(),
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Provider {
+    #[default]
+    Codex,
+    Claude,
+}
+impl Agents {
+    pub fn small_model(&self) -> &str {
+        self.small_model.as_deref().unwrap_or(match self.provider {
+            Provider::Codex => "gpt-6-luna",
+            Provider::Claude => "haiku",
+        })
+    }
+    pub fn big_model(&self) -> &str {
+        self.big_model.as_deref().unwrap_or(match self.provider {
+            Provider::Codex => "gpt-6-astra",
+            Provider::Claude => "opus",
+        })
     }
 }
 
@@ -89,7 +123,7 @@ pub struct Project {
     pub appflowy_page: Option<String>,
     /// Link identifying one Shortcut workflow in the configured MCP workspace.
     pub shortcut_url: Option<String>,
-    /// Codex MCP server name; defaults to shortcut or agents.mcp_server.
+    /// Selected provider MCP server name; defaults to shortcut or agents.mcp_server.
     pub mcp_server: Option<String>,
     pub mode: Mode,
     pub base_branch: String,
@@ -166,10 +200,14 @@ impl Config {
             .context("invalid configuration; legacy pipeline settings must be migrated (see config.example.toml)")?;
         let root = path.parent().unwrap();
         config.orchestrator.runtime_dir = resolve(&config.orchestrator.runtime_dir, root)?;
+        config.agents.claude_mcp_config = resolve(&config.agents.claude_mcp_config, root)?;
         config.agents.codex_home = resolve(&config.agents.codex_home, root)?;
         config.agents.github_token_file = resolve(&config.agents.github_token_file, root)?;
         if config.agents.codex.components().count() > 1 {
             config.agents.codex = resolve(&config.agents.codex, root)?;
+        }
+        if config.agents.claude.components().count() > 1 {
+            config.agents.claude = resolve(&config.agents.claude, root)?;
         }
         for p in &mut config.projects {
             p.repo = resolve(&p.repo, root)?
@@ -199,6 +237,25 @@ impl Config {
         ensure!(
             identifier(&self.agents.mcp_server),
             "invalid MCP server name"
+        );
+        for (name, model) in [
+            ("small_model", self.agents.small_model()),
+            ("big_model", self.agents.big_model()),
+        ] {
+            ensure!(
+                !model.trim().is_empty()
+                    && !model.starts_with('-')
+                    && !model.chars().any(char::is_control),
+                "agents.{name} must be a nonempty model ID or alias, not a CLI option"
+            );
+        }
+        let executable = match self.agents.provider {
+            Provider::Codex => &self.agents.codex,
+            Provider::Claude => &self.agents.claude,
+        };
+        ensure!(
+            !executable.as_os_str().is_empty(),
+            "agent executable must not be empty"
         );
         let mut ids = HashSet::new();
         let mut repos = HashSet::new();
