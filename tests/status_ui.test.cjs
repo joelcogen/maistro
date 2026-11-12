@@ -14,7 +14,7 @@ class Node {
 const values = { ready: 2, in_progress: 3, blocked: 4, review: 5, backlog: 6, done: 7 };
 function snapshot() {
   return {
-    started_at: 100, uptime_seconds: 123,
+    started_at: 100, generated_at: 470, uptime_seconds: 123,
     coordinator: { state: 'reading_boards', latest_event: '<script>evil()</script>', started_at: 110, elapsed_seconds: 2 },
     overall: { counts: values, observed_projects: 1, total_projects: 2, stale: true },
     projects: [{ id: '<img onerror=evil()>', enabled: true, mode: 'master',
@@ -43,12 +43,10 @@ test('renders unknown/stale counts, pending results and malicious titles as text
   assert.match(nodes.connection.text, /Connected/);
   assert.match(nodes.overall.text, /Partial subtotal/);
   assert.match(nodes.projects.text, /Result waiting for board/);
-  assert.match(nodes.projects.text, /Stale.*last successful/);
-  assert.match(nodes.projects.text, /Unknown.*no successful/);
+  assert.match(nodes.projects.text, /Stale counts/);
+  assert.match(nodes.projects.text, /Unknown.*no complete/);
   assert.match(nodes.projects.text, /<script>evil\(\)<\/script>/);
   assert.match(nodes.projects.text, /Board result update failed/);
-  assert.match(nodes.projects.text, /Rust poll:/);
-  assert.match(nodes.projects.text, /Coordination pending/);
   assert.match(nodes.projects.text, /Board poll failed; last fingerprint retained/);
   assert.equal(nodes.projects.all().filter(n => ['script', 'img'].includes(n.tag)).length, 0);
   assert.equal(nodes.projects.all().filter(n => n.href).length, 0);
@@ -81,7 +79,7 @@ test('initial HTTP error stays unknown and links reject unsafe protocols/credent
   assert.equal(vm.runInContext("link('story', value).href", context), context.value);
 });
 
-test('Shortcut links and periodic coordinator reads are displayed without a Rust poll', async () => {
+test('board and story links remain available without polling details', async () => {
   const data = snapshot();
   data.projects = [data.projects[0]];
   data.projects[0].board_url = 'https://app.shortcut.com/team/settings/workflows/42';
@@ -89,8 +87,60 @@ test('Shortcut links and periodic coordinator reads are displayed without a Rust
   data.projects[0].polling = { method: 'coordinator', last_poll_at: null, dirty: false };
   const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
   await flush();
-  assert.match(nodes.projects.text, /Periodic coordinator reads/);
+  assert.doesNotMatch(nodes.projects.text, /Periodic coordinator reads/);
   assert.doesNotMatch(nodes.projects.text, /Rust poll:|AppFlowy/);
   assert.deepEqual(nodes.projects.all().filter(n => n.href).map(n => n.href),
     [data.projects[0].board_url, data.projects[0].story.url]);
+});
+
+test('daemon shows only uptime, coordination age and one worker status per project', async () => {
+  const data = snapshot();
+  data.coordinator.state = 'idle';
+  data.projects.push(...['active', 'stopping', 'idle'].map(state => ({
+    ...data.projects[0], id: state, worker: { state, latest_event: 'Verbose event' }
+  })));
+  const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
+  await flush();
+  assert.match(nodes.daemon.text, /Uptime 0h 2m 3s/);
+  assert.match(nodes.daemon.text, /Idle\nLast coordination pass: 6 minutes ago/);
+  const rows = nodes.daemon.all().filter(n => n.tag === 'li');
+  assert.deepEqual(rows.map(n => n.text), [
+    '<img onerror=evil()>\nIdle', 'disabled\nDisabled', 'active\nRunning', 'stopping\nRunning', 'idle\nIdle'
+  ]);
+  assert.doesNotMatch(nodes.daemon.text, /Started|Finished|Duration|Verbose event|<script>|Result waiting/);
+});
+
+test('coordination age handles first run, active passes and time boundaries', async () => {
+  const { nodes, context } = harness(async () => ({ ok: true, json: async () => ({
+    ...snapshot(), coordinator: { state: 'idle', started_at: null }
+  }) }));
+  await flush();
+  assert.match(nodes.daemon.text, /Last coordination pass: Not yet/);
+  for (const [seconds, expected] of [[-1, 'just now'], [0, 'just now'], [59, 'just now'], [60, '1 minute ago'], [3600, '1 hour ago'], [7200, '2 hours ago'], [86400, '1 day ago']]) {
+    context.seconds = seconds;
+    assert.equal(vm.runInContext('ago(100, 100 + seconds)', context), expected);
+  }
+  context.data = snapshot();
+  vm.runInContext('render(data)', context);
+  assert.match(nodes.daemon.text, /Coordinating\nLast coordination pass: 6 minutes ago/);
+});
+
+test('overview and project counts share compact labels and full observations need no note', async () => {
+  const data = snapshot();
+  data.overall = { counts: values, observed_projects: 2, total_projects: 2, stale: false };
+  const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
+  await flush();
+  assert.equal(nodes.overall.children.length, 1);
+  const grid = nodes.overall.children[0];
+  assert.equal(grid.className, 'counts');
+  assert.deepEqual(grid.children.map(n => n.children[1].text), ['Ready', 'In Progress', 'Blocked', 'Review', 'Backlog', 'Done']);
+  assert.deepEqual(grid.children.map(n => n.children[0].text), ['2', '3', '4', '5', '6', '7']);
+  const projectGrid = nodes.projects.children[0].all().find(n => n.className === 'counts');
+  assert.equal(grid.text, projectGrid.text);
+  const unknownGrid = nodes.projects.children[1].all().find(n => n.className === 'counts');
+  assert.equal(unknownGrid.children.filter(n => n.children[0].text === 'Unknown').length, 6);
+  assert.doesNotMatch(nodes.projects.text, /Git mode|Current process|Board observation|Story story|No current story|Started|Rust poll|Last change/);
+  assert.ok(nodes.projects.text.includes(`Finished ${new Date(110000).toLocaleString()}`));
+  assert.match(nodes.projects.text, /0h 0m 9s/);
+  assert.ok(nodes.projects.text.includes(new Date(101000).toLocaleString()));
 });

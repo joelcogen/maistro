@@ -1,5 +1,5 @@
 'use strict';
-const labels = { ready: 'Ready · queued', in_progress: 'In Progress · active/interrupted', blocked: 'Blocked', review: 'Review', backlog: 'Backlog', done: 'Done' };
+const labels = { ready: 'Ready', in_progress: 'In Progress', blocked: 'Blocked', review: 'Review', backlog: 'Backlog', done: 'Done' };
 const reasons = {
   no_eligible_work: 'No eligible work found', dependencies: 'Waiting for dependencies', occupied: 'Project already occupied',
   read_failed: 'Board read failed', ambiguous_board: 'Board could not be resolved uniquely', incomplete_read: 'Board read incomplete',
@@ -31,46 +31,64 @@ function counts(values) {
   }
   return grid;
 }
-function activity(value) {
-  const box = element('div');
-  box.append(element('p', states[value.state] || value.state), element('p', value.latest_event));
-  if (value.last_error) box.append(element('p', value.last_error));
-  if (value.started_at != null) box.append(element('p', `Started ${date(value.started_at)} · Duration ${duration(value.elapsed_seconds)}${value.finished_at == null ? ' · running' : ` · Finished ${date(value.finished_at)}`}`, 'muted'));
-  return box;
+function ago(value, now) {
+  if (value == null) return 'Not yet';
+  const seconds = Math.max(0, now - value);
+  if (seconds < 60) return 'just now';
+  for (const [size, unit] of [[86400, 'day'], [3600, 'hour'], [60, 'minute']]) {
+    if (seconds >= size) {
+      const amount = Math.floor(seconds / size);
+      return `${amount} ${unit}${amount === 1 ? '' : 's'} ago`;
+    }
+  }
 }
+function workerRunning(worker) { return ['active', 'stopping'].includes(worker.state); }
 function render(snapshot) {
   const daemon = document.getElementById('daemon');
-  daemon.replaceChildren(element('p', `Uptime ${duration(snapshot.uptime_seconds)} · Started ${date(snapshot.started_at)}`), activity(snapshot.coordinator));
+  const coordinator = element('p', undefined, 'row coordinator');
+  coordinator.append(element('span', states[snapshot.coordinator.state] || snapshot.coordinator.state),
+    element('span', `Last coordination pass: ${ago(snapshot.coordinator.started_at, snapshot.generated_at)}`, 'muted'));
+  const workers = element('ul', undefined, 'worker-list');
+  for (const project of snapshot.projects) {
+    const running = workerRunning(project.worker);
+    const row = element('li', undefined, 'row');
+    const name = element('span', project.id, 'worker-name');
+    name.title = project.id;
+    row.append(name, element('span', !project.enabled ? 'Disabled' : running ? 'Running' : 'Idle', running ? 'worker-state running' : 'worker-state'));
+    workers.append(row);
+  }
+  daemon.replaceChildren(element('p', `Uptime ${duration(snapshot.uptime_seconds)}`, 'muted'), coordinator, workers);
   const overall = snapshot.overall;
-  document.getElementById('overall').replaceChildren(
-    element('p', `${overall.observed_projects}/${overall.total_projects} configured projects observed${overall.observed_projects < overall.total_projects ? ' · Partial subtotal; unobserved projects are unknown' : ''}${overall.stale ? ' · Stale observations included' : ''}`),
-    counts(overall.counts), element('p', 'Observation times differ by project; see each read window below.', 'muted'));
+  const overview = document.getElementById('overall');
+  overview.replaceChildren(counts(overall.counts));
+  const coverage = [];
+  if (overall.observed_projects < overall.total_projects) coverage.push(`Partial subtotal · ${overall.observed_projects}/${overall.total_projects} projects observed`);
+  if (overall.stale) coverage.push('Stale counts');
+  if (coverage.length) overview.append(element('p', coverage.join(' · '), 'warning'));
   const projects = document.getElementById('projects'); projects.replaceChildren();
   for (const project of snapshot.projects) {
     const card = element('article'); const observation = project.observation;
-    card.append(element('h2', project.id), element('p', `${project.enabled ? 'Enabled' : 'Disabled'} · Git mode: ${project.mode}`, 'muted'));
-    if (project.board_url) card.append(link('Open board', project.board_url));
-    card.append(element('h3', 'Current process'), activity(project.worker));
-    if (project.last_outcome) card.append(element('p', `Latest worker result: ${project.last_outcome}`, 'muted'));
+    const heading = element('div', undefined, 'row card-heading');
+    heading.append(element('h2', project.id));
+    if (project.board_url) heading.append(link('Open board', project.board_url));
+    card.append(heading);
+    const worker = project.worker;
+    card.append(element('p', `${states[worker.state] || worker.state}${worker.started_at == null ? '' : ` · ${duration(worker.elapsed_seconds)}`}`));
+    if (worker.started_at != null) card.append(element('p', worker.finished_at == null ? `Started ${date(worker.started_at)}` : `Finished ${date(worker.finished_at)}`, 'muted'));
+    if (worker.last_error) card.append(element('p', worker.last_error, 'warning'));
     if (project.story) {
-      card.append(element('p', project.story.title), element('p', `Story ${project.story.id}`, 'muted'));
-      if (project.story.url) card.append(link('Open story', project.story.url));
-    } else card.append(element('p', 'No current story', 'muted'));
-    if (project.polling) {
-      const poll = project.polling;
-      if (poll.method === 'coordinator') {
-        card.append(element('p', 'Periodic coordinator reads · see board observation below', 'muted'));
-      } else {
-        card.append(element('p', `Rust poll: ${date(poll.last_poll_at)} · Last change: ${date(poll.last_change_at)} · ${poll.dirty ? 'Coordination pending' : 'No pending changes'}`, 'muted'));
-      }
-      if (poll.last_error) card.append(element('p', poll.last_error));
+      const story = element('p', undefined, 'story');
+      story.append(project.story.url ? link(project.story.title, project.story.url) : element('span', project.story.title));
+      card.append(story);
     }
-    card.append(element('h3', 'Board observation'));
-    card.append(element('p', observation.counts == null ? 'Unknown · no successful complete board read' : `${observation.stale ? 'Stale · last successful observation retained' : 'Latest complete observation'} · Read during ${date(observation.read_started_at)} – ${date(observation.received_at)}`));
-    if (observation.stale && observation.counts == null) card.append(element('p', 'Latest pass did not provide a complete board read'));
-    if (observation.reason) card.append(element('p', reasons[observation.reason] || observation.reason));
-    if (!project.enabled) card.append(element('p', 'Disabled projects are not read or dispatched'));
-    card.append(counts(observation.counts)); projects.append(card);
+    if (project.polling?.last_error) card.append(element('p', project.polling.last_error, 'warning'));
+    if (observation.reason && !['no_eligible_work', 'occupied', 'work_selected'].includes(observation.reason)) {
+      card.append(element('p', reasons[observation.reason] || observation.reason, 'warning'));
+    }
+    card.append(counts(observation.counts));
+    // Use the pass start: receipt may be later than the board read or status writes.
+    card.append(element('p', observation.counts == null ? 'Unknown · no complete board read' : `${observation.stale ? 'Stale counts' : 'Observed'} · ${date(observation.read_started_at)}`, observation.stale ? 'warning' : 'muted'));
+    projects.append(card);
   }
 }
 let lastReceived = null;

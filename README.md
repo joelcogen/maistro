@@ -258,12 +258,12 @@ to project IDs, story titles/IDs, safe board/workflow and story links, and conci
 diagnostics. Titles render as text; links allow only HTTP(S). Detailed failure
 output stays in private logs and the story source.
 
-Activity shows parallel workers, start times, elapsed durations, cancellation,
-and results awaiting source recording. Idle and disabled projects remain visible.
-Coordinator activity and daemon uptime appear separately from board observations.
-Observations live in memory and reset on restart. AppFlowy shows the last Rust
-poll, last observed change, dirty status and poll errors; Shortcut shows periodic
-coordinator reads and their observation windows.
+The compact daemon summary shows uptime, coordinator status, time since the latest
+coordination pass began, and one running/idle status per project. Disabled projects
+remain visible. Project cards show worker status, duration and latest start/finish
+time, the current story, board and story links, and concise errors. Pending results
+remain visible until source recording completes. Observations live in memory and
+reset on restart.
 
 Counts come from coordinator reads and may lag Rust polling. Viewing the page
 reads in-memory data. Ready counts queued work; In Progress includes active and
@@ -271,11 +271,12 @@ interrupted work. Counts use configured status labels and stay unknown until a
 complete read. Failed or partial observations retain the last complete counts and
 mark them stale. Successful reads still supply counts when writes fail.
 
-Each read is labeled with its coordinator pass start and receipt time, so counts
-may precede status writes in that pass. Overall counts sum known observations,
-including stale ones, with coverage shown. Missing projects, including disabled
-projects, make the total partial. Treat these counts as observations; the
-coordinator authorizes work from fresh source reads.
+Project counts are labeled with the coordinator pass start time, so they may
+precede status writes in that pass. Overview counts sum known observations,
+including stale ones. Missing projects, including disabled projects, make the
+total partial; compact warnings identify partial or stale totals. Both views use
+the same six count tiles, arranged in three columns on phones. Treat these counts
+as observations; the coordinator authorizes work from fresh source reads.
 
 ## Shortcut projects
 
