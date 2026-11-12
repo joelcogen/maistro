@@ -166,3 +166,29 @@ fn status_server_defaults_to_optional_local_port_8044_and_rejects_invalid_ports(
     }
     assert!(toml::from_str::<Config>(&format!("[status]\nlisten='0.0.0.0'\n{minimal}")).is_err());
 }
+
+#[test]
+fn coordinator_retry_signal_is_required_scoped_and_unique() {
+    let mut update = Coordination {
+        retry_projects: vec!["p0".into()],
+        ..Default::default()
+    };
+    assert!(
+        update
+            .validate(&["p0".into()], &Snapshot::default())
+            .is_ok()
+    );
+    update.retry_projects.push("p0".into());
+    assert!(
+        update
+            .validate(&["p0".into()], &Snapshot::default())
+            .is_err()
+    );
+    update.retry_projects = vec!["unknown".into()];
+    assert!(
+        update
+            .validate(&["p0".into()], &Snapshot::default())
+            .is_err()
+    );
+    assert!(serde_json::from_value::<Coordination>(serde_json::json!({"assignments":[],"cancel":[],"acknowledged":[],"notes":[],"observations":[]})).is_err());
+}

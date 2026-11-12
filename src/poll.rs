@@ -1,0 +1,461 @@
+//! Complete, canonical observations only. No workflow/status interpretation or board mirror.
+use crate::{config::Project, mcp::Client};
+use anyhow::{Context, Result, ensure};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
+
+pub type Fingerprint = [u8; 32];
+
+fn fingerprint(value: &Value) -> Fingerprint {
+    // serde_json's default map is a BTreeMap; objects are key ordered. Arrays
+    // retain semantic order (document blocks, select options, attachments, etc.).
+    Sha256::digest(serde_json::to_vec(value).expect("JSON serializes")).into()
+}
+fn array(value: &Value) -> Result<&Vec<Value>> {
+    value
+        .as_array()
+        .context("expected a complete AppFlowy list, not a pagination/preview envelope")
+}
+fn id(value: &Value) -> Result<&str> {
+    value
+        .get("id")
+        .or_else(|| value.get("row_id"))
+        .and_then(Value::as_str)
+        .filter(|s| crate::config::identifier(s))
+        .context("missing/invalid AppFlowy identity")
+}
+fn complete(value: &Value) -> Result<()> {
+    ensure!(
+        ["unavailable", "content_omitted", "truncated", "partial"]
+            .iter()
+            .all(|key| value.get(key) != Some(&Value::Bool(true))),
+        "incomplete AppFlowy response"
+    );
+    Ok(())
+}
+fn keyed(items: &Value) -> Result<BTreeMap<String, Value>> {
+    let mut result = BTreeMap::new();
+    for item in array(items)? {
+        complete(item)?;
+        ensure!(
+            result.insert(id(item)?.to_owned(), item.clone()).is_none(),
+            "duplicate AppFlowy identity"
+        );
+    }
+    Ok(result)
+}
+
+struct Board {
+    workspace: String,
+    database: String,
+    view: String,
+}
+impl Client {
+    async fn resolve(&self, project: &Project) -> Result<Board> {
+        let url = project
+            .appflowy_url
+            .as_ref()
+            .map(|u| reqwest::Url::parse(u))
+            .transpose()
+            .context("invalid AppFlowy board URL")?;
+        let tokens: Vec<String> = url
+            .as_ref()
+            .map(|u| {
+                u.path_segments()
+                    .into_iter()
+                    .flatten()
+                    .map(str::to_owned)
+                    .chain(u.query_pairs().map(|(_, v)| v.into_owned()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let workspaces = self.call("get_workspaces", json!({})).await?;
+        let workspaces = array(&workspaces)?;
+        let scoped_workspace = url.is_some()
+            && workspaces.iter().any(|w| {
+                tokens
+                    .iter()
+                    .any(|t| w["workspace_id"] == *t || w["id"] == *t)
+            });
+        let mut matches = vec![];
+        for workspace in workspaces {
+            let workspace = workspace
+                .get("workspace_id")
+                .or_else(|| workspace.get("id"))
+                .and_then(Value::as_str)
+                .context("missing workspace id")?;
+            // AppFlowy URLs encode the workspace in the path. If it is present,
+            // avoid unrelated workspaces (including inaccessible ones).
+            if scoped_workspace && !tokens.iter().any(|t| t == workspace) {
+                continue;
+            }
+            let databases = self
+                .call("list_databases", json!({"workspace_id":workspace}))
+                .await?;
+            for database in array(&databases)? {
+                let db_id = id(database)?;
+                for view in array(database.get("views").context("database views missing")?)? {
+                    let view_id = view
+                        .get("view_id")
+                        .or_else(|| view.get("id"))
+                        .and_then(Value::as_str)
+                        .context("view id missing")?;
+                    let selected = if let Some(name) = &project.appflowy_page {
+                        view["name"] == *name || view_id == name
+                    } else {
+                        tokens.iter().any(|t| t == view_id)
+                    };
+                    if selected {
+                        matches.push(Board {
+                            workspace: workspace.into(),
+                            database: db_id.into(),
+                            view: view_id.into(),
+                        });
+                    }
+                }
+            }
+        }
+        ensure!(
+            matches.len() == 1,
+            "configured board is missing or ambiguous; use its AppFlowy URL or view ID"
+        );
+        Ok(matches.remove(0))
+    }
+    async fn comments(&self, workspace: &str, target: &str, kind: &str) -> Result<Value> {
+        let mut comments = BTreeMap::new();
+        let mut offset = 0;
+        loop {
+            let page = self.call("list_comments", json!({"workspace_id":workspace,"target_id":target,"target_type":kind,"limit":100,"offset":offset})).await?;
+            complete(&page)?;
+            for comment in array(page.get("comments").context("comments missing")?)? {
+                complete(comment)?;
+                let id = comment["comment_id"]
+                    .as_str()
+                    .context("comment id missing")?;
+                ensure!(
+                    comments.insert(id.to_owned(), comment.clone()).is_none(),
+                    "duplicate comments during paging"
+                );
+            }
+            if !page["has_more"]
+                .as_bool()
+                .context("comment paging state missing")?
+            {
+                ensure!(
+                    page.get("next_offset").is_none_or(Value::is_null),
+                    "unexpected comment continuation"
+                );
+                break;
+            }
+            let next = page["next_offset"]
+                .as_u64()
+                .context("comment continuation missing")?;
+            ensure!(
+                next > offset && next <= 1_000_000,
+                "invalid comment continuation"
+            );
+            offset = next;
+        }
+        Ok(serde_json::to_value(comments)?)
+    }
+    async fn scan(&self, board: &Board) -> Result<Fingerprint> {
+        let args = json!({"workspace_id":board.workspace,"database_id":board.database});
+        let metadata = self
+            .call(
+                "get_page",
+                json!({"workspace_id":board.workspace,"view_id":board.view}),
+            )
+            .await?;
+        complete(&metadata)?;
+        ensure!(
+            metadata["view_id"] == board.view || metadata["id"] == board.view,
+            "board metadata identity mismatch"
+        );
+        let fields = keyed(&self.call("get_database_fields", args.clone()).await?)?;
+        let ids = keyed(&self.call("get_database_row_ids", args.clone()).await?)?;
+        let mut rows = BTreeMap::new();
+        let names: Vec<_> = ids.keys().cloned().collect();
+        for batch in names.chunks(50) {
+            let details = self.call("get_database_row_details", json!({"workspace_id":board.workspace,"database_id":board.database,"row_ids":batch.join(","),"with_doc":false})).await?;
+            let details = keyed(&details)?;
+            ensure!(
+                details.keys().eq(batch.iter()),
+                "incomplete row details (AppFlowy may omit unavailable rows)"
+            );
+            for (row_id, row) in details {
+                ensure!(row["cells"].is_object(), "row cells missing");
+                let has_doc = row["has_doc"]
+                    .as_bool()
+                    .context("row document presence missing")?;
+                let body = if has_doc {
+                    self.call(
+                        "get_page_markdown",
+                        json!({"workspace_id":board.workspace,"page_id":row_id}),
+                    )
+                    .await?
+                } else {
+                    Value::Null
+                };
+                ensure!(!has_doc || body.is_string(), "incomplete row document");
+                let comments = self.comments(&board.workspace, &row_id, "row").await?;
+                let inline_comments = if has_doc {
+                    let doc = uuid::Uuid::new_v5(
+                        &uuid::Uuid::parse_str(&row_id).context("invalid row UUID")?,
+                        b"document_id",
+                    );
+                    self.comments(&board.workspace, &doc.to_string(), "document")
+                        .await?
+                } else {
+                    Value::Null
+                };
+                rows.insert(row_id, json!({"cells":row["cells"],"body":body,"comments":comments,"inline_comments":inline_comments}));
+            }
+        }
+        // Membership/schema reads bookend each scan. Two equal complete scans
+        // below also protect offset paging and cross-resource races. This is
+        // still eventual consistency, not a transactional snapshot.
+        ensure!(
+            ids == keyed(&self.call("get_database_row_ids", args.clone()).await?)?,
+            "board membership changed during read"
+        );
+        ensure!(
+            fields == keyed(&self.call("get_database_fields", args).await?)?,
+            "board schema changed during read"
+        );
+        Ok(fingerprint(
+            &json!({"workspace":board.workspace,"database":board.database,"view":board.view,
+            "metadata":{"name":metadata["name"],"icon":metadata["icon"],"layout":metadata["layout"],"extra":metadata["extra"]},
+            "fields":fields,"rows":rows}),
+        ))
+    }
+    pub async fn observe(&self, project: &Project) -> Result<Fingerprint> {
+        let board = self.resolve(project).await?;
+        let first = self.scan(&board).await?;
+        let second = self.scan(&board).await?;
+        ensure!(
+            first == second,
+            "board changed during observation; retrying next interval"
+        );
+        Ok(second)
+    }
+}
+
+/// Each project polls independently, including while the single coordinator runs.
+/// A failed scan never emits a replacement fingerprint.
+pub async fn run(
+    config: toml::Value,
+    project: Project,
+    interval: std::time::Duration,
+    timeout: std::time::Duration,
+    sender: tokio::sync::mpsc::Sender<(String, Result<Fingerprint>)>,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    let mut client = None;
+    loop {
+        let observation = tokio::select! {
+            _ = stop.cancelled() => break,
+            result = tokio::time::timeout(timeout, async {
+                if client.is_none() { client = Some(Client::connect(&config).await?); }
+                client.as_ref().unwrap().observe(&project).await
+            }) => result.context("AppFlowy board poll timed out").and_then(|r| r),
+        };
+        let failed = observation.is_err();
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            result = sender.send((project.id.clone(), observation)) => if result.is_err() { break; },
+        }
+        if failed && let Some(c) = client.take() {
+            c.close().await;
+        }
+        tokio::select! {
+            _ = stop.cancelled() => break,
+            _ = tokio::time::sleep(interval) => {},
+        }
+    }
+    if let Some(c) = client {
+        c.close().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schedule::Schedule;
+    use std::fs;
+
+    struct Fixture {
+        root: tempfile::TempDir,
+        project: Project,
+        data: Value,
+    }
+    impl Fixture {
+        async fn new() -> (Self, Client) {
+            let root = tempfile::tempdir().unwrap();
+            let script = root.path().join("mcp.py");
+            fs::write(&script, include_str!("../tests/fixtures/mcp.py")).unwrap();
+            let config: toml::Value = toml::from_str(&format!(
+                "command='python3'\nargs=['{}','{}']",
+                script.display(),
+                root.path().display()
+            ))
+            .unwrap();
+            let project: Project = serde_json::from_value(json!({"id":"p0","repo":"/unused","appflowy_page":"board-0","mode":"master","base_branch":"master"})).unwrap();
+            let data = json!({"p0":{"rows":[
+                {"id":"11111111-1111-1111-1111-111111111111","title":"Done story","status":"Done","body":"# Requirements\n- [ ] task", "comments":[
+                    {"comment_id":"c1","content":"first","author_id":"user"},
+                    {"comment_id":"c2","content":"second","author_id":"luna"},
+                    {"comment_id":"c3","content":"third","author_id":"astra"}
+                ],"inline_comments":[]},
+                {"id":"22222222-2222-2222-2222-222222222222","status":"Backlog"}
+            ]}});
+            let fixture = Self {
+                root,
+                project,
+                data,
+            };
+            fixture.save();
+            let client = Client::connect(&config).await.unwrap();
+            (fixture, client)
+        }
+        fn save(&self) {
+            fs::write(
+                self.root.path().join("board.json"),
+                serde_json::to_vec(&self.data).unwrap(),
+            )
+            .unwrap();
+        }
+        async fn observe(&self, client: &Client) -> Fingerprint {
+            client.observe(&self.project).await.unwrap()
+        }
+    }
+    #[tokio::test]
+    async fn complete_fingerprint_covers_membership_cells_bodies_all_comments_and_schema() {
+        let (mut f, client) = Fixture::new().await;
+        let initial = f.observe(&client).await;
+        // Every scan reverses fields/details ordering and changes MCP/request metadata.
+        for _ in 0..3 {
+            assert_eq!(initial, f.observe(&client).await);
+        }
+        let original = f.data.clone();
+        let mutations = [
+            ("/p0/rows/0/title", json!("Edited Done title")),
+            ("/p0/rows/1/status", json!("Cancelled")),
+            ("/p0/rows/0/cell", json!({"arbitrary":123})),
+            ("/p0/rows/0/body", json!("# Requirements\n- [x] task")),
+            ("/p0/rows/0/comments/0/content", json!("user edit")),
+            ("/p0/rows/0/comments/1/content", json!("Luna edit")),
+            (
+                "/p0/rows/0/comments/2/content",
+                json!("Astra edit on second page"),
+            ),
+            (
+                "/p0/rows/0/inline_comments",
+                json!([{"comment_id":"inline","content":"reply"}]),
+            ),
+        ];
+        for (path, value) in mutations {
+            f.data = original.clone();
+            if path.ends_with("/cell") {
+                f.data["p0"]["rows"][0]["cell"] = value;
+            } else {
+                *f.data.pointer_mut(path).unwrap() = value;
+            }
+            f.save();
+            assert_ne!(initial, f.observe(&client).await, "missed {path}");
+        }
+        f.data = original.clone();
+        f.data["p0"]["rows"].as_array_mut().unwrap().pop();
+        f.save();
+        assert_ne!(initial, f.observe(&client).await);
+        f.data = original.clone();
+        f.data["p0"]["rows"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"33333333-3333-3333-3333-333333333333","status":"Backlog"}));
+        f.save();
+        assert_ne!(initial, f.observe(&client).await);
+        for fields in [
+            json!([]),
+            json!([{"id":"title","name":"Renamed","type_option":{"options":["new"]}}]),
+        ] {
+            f.data = original.clone();
+            f.data["p0"]["fields"] = fields;
+            f.save();
+            assert_ne!(initial, f.observe(&client).await);
+        }
+        f.data = original.clone();
+        f.data["p0"]["rows"][0]["comments"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        f.data["p0"]["rows"].as_array_mut().unwrap().reverse();
+        f.save();
+        assert_eq!(initial, f.observe(&client).await);
+        // External linked documents are not read or part of the observation.
+        f.data = original;
+        f.data["p0"]["external_document"] = json!("reference changed");
+        f.save();
+        assert_eq!(initial, f.observe(&client).await);
+        client.close().await;
+    }
+    #[tokio::test]
+    async fn failures_and_partial_reads_retain_baseline_and_recovery_detects_changes() {
+        let (mut f, client) = Fixture::new().await;
+        let mut schedule = Schedule::new(["p0".to_owned()].into_iter());
+        let baseline = f.observe(&client).await;
+        schedule.observe("p0", baseline);
+        let generation = schedule.ready()["p0"];
+        schedule.acknowledge("p0", generation);
+        for failure in [
+            "fail",
+            "incomplete",
+            "paged",
+            "churn",
+            "bad-comments",
+            "body-error",
+        ] {
+            let marker = f.root.path().join(format!("poll-{failure}-p0"));
+            fs::write(&marker, "").unwrap();
+            assert!(
+                client.observe(&f.project).await.is_err(),
+                "accepted {failure}"
+            );
+            assert!(schedule.ready().is_empty());
+            fs::remove_file(marker).unwrap();
+            assert!(!schedule.observe("p0", f.observe(&client).await));
+        }
+        f.data["p0"]["rows"][0]["title"] = json!("changed during outage");
+        f.save();
+        assert!(schedule.observe("p0", f.observe(&client).await));
+        assert_eq!(schedule.ready().len(), 1);
+        client.close().await;
+    }
+    #[tokio::test]
+    async fn empty_boards_and_url_resolution_are_valid_but_ambiguity_is_not() {
+        let (mut f, client) = Fixture::new().await;
+        f.data["p0"]["rows"] = json!([]);
+        f.save();
+        let empty = f.observe(&client).await;
+        f.project.appflowy_page = None;
+        f.project.appflowy_url =
+            Some("https://appflowy.example/workspace/workspace?v=view-p0".into());
+        assert_eq!(empty, f.observe(&client).await);
+        f.project.appflowy_url = None;
+        f.project.appflowy_page = Some("missing board".into());
+        assert!(client.observe(&f.project).await.is_err());
+        client.close().await;
+    }
+    #[test]
+    fn canonical_objects_preserve_semantic_array_order() {
+        assert_eq!(
+            fingerprint(&serde_json::from_str::<Value>(r#"{"b":2,"a":{"d":4,"c":3}}"#).unwrap()),
+            fingerprint(&json!({"a":{"c":3,"d":4},"b":2}))
+        );
+        assert_ne!(
+            fingerprint(&json!(["first", "second"])),
+            fingerprint(&json!(["second", "first"]))
+        );
+        assert!(keyed(&json!([{"id":"same"},{"id":"same"}])).is_err());
+    }
+}

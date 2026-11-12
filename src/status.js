@@ -56,6 +56,11 @@ function render(snapshot) {
       card.append(element('p', project.story.title), element('p', `Story ${project.story.id}`, 'muted'));
       if (project.story.url) card.append(link('Open AppFlowy story', project.story.url));
     } else card.append(element('p', 'No current story', 'muted'));
+    if (project.polling) {
+      const poll = project.polling;
+      card.append(element('p', `Rust poll: ${date(poll.last_poll_at)} · Last change: ${date(poll.last_change_at)} · ${poll.dirty ? 'Coordination pending' : 'No pending changes'}`, 'muted'));
+      if (poll.last_error) card.append(element('p', poll.last_error));
+    }
     card.append(element('h3', 'Board observation'));
     card.append(element('p', observation.counts == null ? 'Unknown · no successful complete board read' : `${observation.stale ? 'Stale · last successful observation retained' : 'Latest complete observation'} · Read during ${date(observation.read_started_at)} – ${date(observation.received_at)}`));
     if (observation.stale && observation.counts == null) card.append(element('p', 'Latest pass did not provide a complete board read'));

@@ -138,6 +138,14 @@ pub struct ProjectStatus {
     pub worker: Activity,
     pub last_outcome: Option<Outcome>,
     pub observation: Observation,
+    pub polling: Polling,
+}
+#[derive(Clone, Debug, Serialize)]
+pub struct Polling {
+    pub last_poll_at: Option<u64>,
+    pub last_change_at: Option<u64>,
+    pub dirty: bool,
+    pub last_error: Option<&'static str>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Overall {
@@ -173,6 +181,12 @@ impl Status {
                 story: None,
                 worker: Activity::new(if p.enabled { "idle" } else { "disabled" }),
                 last_outcome: None,
+                polling: Polling {
+                    last_poll_at: None,
+                    last_change_at: None,
+                    dirty: p.enabled,
+                    last_error: None,
+                },
                 observation: Observation {
                     counts: None,
                     read_started_at: None,
@@ -225,7 +239,18 @@ impl Status {
         self.view.coordinator.start("reading_boards");
         self.view.coordinator.latest_event = "Coordination pass running";
     }
+    #[cfg(test)]
     pub fn coordinator_finished(&mut self, reads: Option<&[BoardRead]>) {
+        let selected = self
+            .view
+            .projects
+            .iter()
+            .filter(|p| p.enabled)
+            .map(|p| p.id.clone())
+            .collect::<Vec<_>>();
+        self.coordinator_finished_for(reads, &selected);
+    }
+    pub fn coordinator_finished_for(&mut self, reads: Option<&[BoardRead]>, selected: &[String]) {
         self.view.coordinator.finish(
             "idle",
             if reads.is_some() {
@@ -239,7 +264,12 @@ impl Status {
         } else {
             None
         };
-        for p in self.view.projects.iter_mut().filter(|p| p.enabled) {
+        for p in self
+            .view
+            .projects
+            .iter_mut()
+            .filter(|p| p.enabled && selected.contains(&p.id))
+        {
             let matching: Vec<_> = reads
                 .unwrap_or_default()
                 .iter()
@@ -263,6 +293,18 @@ impl Status {
                 o.stale = true;
             }
         }
+    }
+    pub fn polled(&mut self, id: &str, changed: bool, failed: bool) {
+        let p = &mut self.project(id).polling;
+        p.last_poll_at = Some(now());
+        if changed {
+            p.last_change_at = Some(now());
+        }
+        p.last_error = failed
+            .then_some("Board poll failed; last fingerprint retained. See private daemon logs");
+    }
+    pub fn poll_dirty(&mut self, id: &str, dirty: bool) {
+        self.project(id).polling.dirty = dirty;
     }
     fn project(&mut self, id: &str) -> &mut ProjectStatus {
         self.view

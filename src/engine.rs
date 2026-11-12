@@ -2,7 +2,8 @@ use crate::{
     codex::Codex,
     config::Config,
     model::{Assignment, Completion, Coordination, Report, Snapshot, StoryRef},
-    process,
+    poll, process,
+    schedule::Schedule,
     status::{self, Status},
 };
 use anyhow::{Context, Result, ensure};
@@ -170,21 +171,50 @@ impl Engine {
         let mut coordinator = JoinSet::new();
         let mut state = State::default();
         let interval = Duration::from_secs(self.config.orchestrator.poll_interval_seconds);
-        let mut next_poll = Instant::now();
+        let mut schedule = Schedule::new(
+            self.config
+                .projects
+                .iter()
+                .filter(|p| p.enabled)
+                .map(|p| p.id.clone()),
+        );
+        let mut polls = JoinSet::new();
+        let (poll_sender, mut poll_results) =
+            tokio::sync::mpsc::channel(self.config.projects.len());
+        let connection = self.codex.mcp_config()?;
+        for project in self.config.projects.iter().filter(|p| p.enabled) {
+            polls.spawn(poll::run(
+                connection.clone(),
+                project.clone(),
+                interval,
+                Duration::from_secs(self.config.orchestrator.coordinator_timeout_seconds),
+                poll_sender.clone(),
+                stop.child_token(),
+            ));
+        }
+        drop(poll_sender);
+        let mut pass = BTreeMap::new();
+        // Briefly coalesce independent startup observations and simultaneous events.
+        let mut coalesce_until = Instant::now() + Duration::from_millis(100);
         tracing::info!(projects = repo_locks.len(), "maistro started");
         let mut result: Result<()> = async {
             loop {
                 if stop.is_cancelled() { break; }
-                if coordinator.is_empty() && Instant::now() >= next_poll {
-                    if !repo_locks.is_empty() {
+                if coordinator.is_empty() && Instant::now() >= coalesce_until {
+                    pass = schedule.ready();
+                    if !pass.is_empty() {
                         diagnostics.coordinator_started();
-                        let snapshot = state.snapshot();
+                        let mut snapshot = state.snapshot();
+                        snapshot.active.retain(|s| pass.contains_key(&s.project_id));
+                        snapshot.pending.retain(|c| pass.contains_key(&c.story.project_id));
+                        let selected: Vec<_> = pass.keys().cloned().collect();
                         let codex = self.codex.clone();
                         let cancel = stop.child_token();
-                        coordinator.spawn(async move { codex.coordinate(&snapshot, &cancel).await });
+                        coordinator.spawn(async move { codex.coordinate(&snapshot, &selected, &cancel).await });
                     }
-                    next_poll = Instant::now() + interval;
                 }
+                for (id, project) in &schedule.projects { diagnostics.poll_dirty(id, project.dirty()); }
+                let deadline = schedule.deadline().map(|d| d.max(coalesce_until));
                 published.send_replace(Arc::new(diagnostics.snapshot()));
                 tokio::select! {
                     biased;
@@ -197,16 +227,27 @@ impl Engine {
                     outcome = coordinator.join_next(), if !coordinator.is_empty() => {
                         match outcome.context("coordinator disappeared")?? {
                             Ok(update) => {
-                                diagnostics.coordinator_finished(Some(&update.observations));
-                                let ready_again = !update.acknowledged.is_empty();
+                                diagnostics.coordinator_finished_for(Some(&update.observations), &pass.keys().cloned().collect::<Vec<_>>());
+                                let released: Vec<_> = state.pending.values()
+                                    .filter(|c| update.acknowledged.contains(&c.id) || update.cancel.contains(&c.story))
+                                    .map(|c| c.story.project_id.clone()).collect();
+                                for (id, generation) in &pass {
+                                    if update.retry_projects.contains(id) { schedule.retry(id, interval); }
+                                    else { schedule.acknowledge(id, *generation); }
+                                }
                                 self.apply(update, &mut state, &mut workers, &stop, &mut diagnostics)?;
-                                if ready_again { next_poll = Instant::now(); }
+                                for id in released { schedule.wake(&id); }
+                                for id in state.pending.keys().filter(|id| pass.contains_key(*id)) {
+                                    schedule.wake(id);
+                                    schedule.retry(id, interval);
+                                }
+                                coalesce_until = Instant::now() + Duration::from_millis(100);
                             }
                             Err(e) => {
-                                diagnostics.coordinator_finished(None);
+                                diagnostics.coordinator_finished_for(None, &pass.keys().cloned().collect::<Vec<_>>());
                                 if e.downcast_ref::<process::UnconfirmedTermination>().is_some() { return Err(e); }
                                 tracing::warn!(error=%format!("{e:#}"), "coordinator failed; retrying without releasing pending work");
-                                next_poll = Instant::now() + interval;
+                                for id in pass.keys() { schedule.retry(id, interval); }
                             }
                         }
                     }
@@ -216,9 +257,30 @@ impl Engine {
                         let failed = result.is_err();
                         state.finish(assignment, result)?;
                         diagnostics.worker_finished(&id, state.pending.get(&id).map(|c| c.report.outcome), failed);
-                        next_poll = Instant::now();
+                        schedule.wake(&id);
+                        coalesce_until = Instant::now() + Duration::from_millis(100);
                     }
-                    _ = tokio::time::sleep_until(next_poll), if coordinator.is_empty() => {}
+                    observation = poll_results.recv(), if !polls.is_empty() => {
+                        if let Some((id, observation)) = observation {
+                            match observation {
+                                Ok(fingerprint) => {
+                                    let changed = schedule.observe(&id, fingerprint);
+                                    diagnostics.polled(&id, changed, false);
+                                }
+                                Err(e) => {
+                                    diagnostics.polled(&id, false, true);
+                                    tracing::warn!(project=%id, error=%format!("{e:#}"), "board poll failed; retaining last observation and retrying");
+                                }
+                            }
+                        } else {
+                            anyhow::bail!("board poll result channel closed unexpectedly");
+                        }
+                    }
+                    outcome = polls.join_next(), if !polls.is_empty() => {
+                        outcome.context("board poller disappeared")??;
+                        anyhow::bail!("board poller stopped unexpectedly");
+                    }
+                    _ = tokio::time::sleep_until(deadline.unwrap_or_else(Instant::now)), if coordinator.is_empty() && deadline.is_some() => {}
                 }
             }
             Ok(())
@@ -230,6 +292,13 @@ impl Engine {
         }
         while let Some(outcome) = coordinator.join_next().await {
             record_shutdown(outcome.map(|update| update.map(|_| ())), &mut result);
+        }
+        while let Some(outcome) = polls.join_next().await {
+            if let Err(e) = outcome
+                && result.is_ok()
+            {
+                result = Err(e.into());
+            }
         }
         // Idle/slow HTTP clients must not delay daemon shutdown.
         server.shutdown().await;

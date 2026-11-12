@@ -164,7 +164,9 @@ Current-process activity shows parallel workers, start times, elapsed durations,
 cancellation, and completed/blocked results still awaiting AppFlowy recording.
 Idle and disabled projects remain visible. Coordinator activity and daemon uptime
 are separate from AppFlowy observations. Observations are in memory only and reset
-on restart. Luna returns counts from its existing reads; viewing the page makes
+on restart. The page exposes each project's last Rust poll, last observed change,
+dirty status, and a concise poll error. Luna returns counts from its existing
+coordination reads; they can lag Rust polling until the next pass. Viewing the page makes
 no agent or AppFlowy calls. Counts never select or authorize work.
 
 Ready means queued work; In Progress includes both active and interrupted work.
@@ -241,11 +243,83 @@ set `in_progress = "In progress"`.
   then. Other projects continue. A coordinator failure retries after the polling
   interval, without releasing those pending results.
 
-One coordinator pass runs at a time, even while project workers run. Active-story
-status checks come first in each pass. Polling defaults to 30 seconds, but board
-size, model latency, tool failures and the coordinator timeout also affect
-cancellation latency. There is no cancellation detection during an AppFlowy
-outage. A push already underway may finish before cancellation is observed.
+Rust polls enabled boards directly over the configured AppFlowy MCP connection.
+`orchestrator.poll_interval_seconds` (30 seconds by default) is the delay between
+completed poll attempts per project, **not** a schedule for model calls. After a
+valid initial observation and coordination, an unchanged idle/empty board makes
+no further Luna calls. Changes to any story, including Done or Backlog stories,
+and changes written by Maistro itself all wake coordination.
+
+One global Luna pass runs at a time and coalesces dirty projects. Polling and
+project workers continue while it runs. A pass acknowledges only the observed
+generation at its start; changes observed during that pass remain dirty for a
+later pass. Worker completion, failure, cancellation completion and result
+acknowledgement also wake Luna, so pending delivery and queued work do not wait
+for a board edit. Failed/incomplete coordination and unacknowledged results retry
+after the polling interval, independently for each project.
+
+Luna still reads fresh data, checks active-story statuses first, selects and
+authorizes stories, writes results, and decides cancellation. Cancellation latency
+normally includes up to one polling interval, a complete board read, and Luna's
+read/decision time. An existing Luna pass, large boards, inconsistent reads,
+failures and the coordinator timeout can extend that latency. A failing project's
+poll does not block other projects. There is no cancellation detection during an
+AppFlowy outage. A push already underway may finish before cancellation is observed.
+
+### Polling contract and consistency
+
+The poller reuses `agents.mcp_server` from the Codex configuration: stdio
+`command`, `args`, `cwd`, `env` and inherited environment, or streamable HTTP
+`url`, `http_headers`, `env_http_headers`, and `bearer_token_env_var`. It uses the
+MCP Rust SDK directly, without a model. The server must expose the legacy read
+tools already used by Luna: `get_workspaces`, `list_databases`, `get_page`,
+`get_database_fields`, `get_database_row_ids`, `get_database_row_details`,
+`get_page_markdown`, and `list_comments`. Enable that tool profile in AppFlowy MCP
+if necessary. Codex-managed HTTP OAuth credentials and legacy SSE transport are
+not shared by this client; use the configured stdio server or streamable HTTP
+headers/token. Connection/authentication errors are reported and retried without
+falling back to idle model calls. `validate` remains a local check, not a live
+board probe.
+
+Boards resolve uniquely by view name/ID (`appflowy_page`) or view ID in an
+AppFlowy URL; ambiguous names require a URL or ID. Each project keeps only a
+SHA-256 fingerprint, dirty generations and retry timing in memory. Poll responses
+are transient; no board content, observation baseline or queue is written to disk.
+Restart discards comparison state: every enabled project starts unknown/dirty,
+obtains a complete observation, then runs Luna to recover In Progress work or
+start Ready work.
+
+No board timestamp or updated-row feed is assumed to cover documents/comments.
+The fingerprint includes board name/icon/layout/extra metadata, every field and
+its options, row membership, every row's cells, full Markdown bodies for rows
+with `has_doc=true`, row comments/replies (including resolved threads), and body
+inline comments. Rows/fields/comments are keyed by ID and JSON objects by key;
+semantic array ordering and Markdown are preserved. MCP request metadata and
+pagination offsets are excluded. **Edits to external linked reference documents
+alone are outside this detector's scope**; Luna still reads relevant references
+when processing a story.
+
+The read contract was checked against AppFlowy MCP's legacy handlers
+(`appflowy_mcp/server.py`, revision `008128fabb8459025c2c4fa124ea8713988af0e0`)
+and AppFlowy Cloud's `AFDatabaseRowDetail`/`list_database_row_details` implementations
+in `libs/shared-entity/src/dto/workspace_dto.rs` and `src/biz/collab/ops.rs`.
+Row-detail reads can silently omit unavailable rows; their optional `doc` is plain
+text and can remain null on document errors. Therefore the poller checks exact
+requested/returned row IDs and reads Markdown separately instead of accepting
+those omissions as empty stories. Body presence uses AppFlowy's explicit
+`has_doc` flag; a failed body read is never an empty body. Row comments live in
+row collabs; inline body comments use the derived document UUID, so both are read.
+
+Comments are fully paginated; malformed/nonadvancing pages, truncated or partial
+responses, missing rows, and failed reads reject the entire observation. Field
+and row membership reads bookend each scan, and two complete scans must agree
+before a fingerprint is accepted. These checks reduce cross-resource/pagination
+races, but AppFlowy does not provide an atomic board snapshot. Consistently stale
+server reads and edits made and reverted between observations cannot be detected;
+ongoing edits may defer acceptance until a stable read. On rejection the last
+valid fingerprint and dirty state remain intact. Retries wait the configured
+interval; each poll is bounded by `coordinator_timeout_seconds` (individual MCP
+reads also have a 60-second limit). Failed projects do not make other pollers wait.
 
 After restart all in-memory assignments and pending results are gone. Luna reads
 AppFlowy afresh; Astra reconstructs interrupted work from the board and repository.
@@ -287,5 +361,5 @@ cargo build --release --locked
 The UI tests use Node.js 20+ and its built-in test runner; there are no frontend
 dependencies or build steps.
 
-Tests use simulated Codex agents, AppFlowy fixtures, and local Git remotes. They
+Tests use simulated Codex agents, stdio/HTTP MCP fixtures, and local Git remotes. They
 never call live models, write a real board, or push to an external repository.

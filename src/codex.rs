@@ -231,9 +231,15 @@ impl Codex {
     pub async fn coordinate(
         &self,
         snapshot: &Snapshot,
+        selected: &[String],
         cancel: &CancellationToken,
     ) -> Result<Coordination> {
-        let projects: Vec<_> = self.config.projects.iter().filter(|p| p.enabled).collect();
+        let projects: Vec<_> = self
+            .config
+            .projects
+            .iter()
+            .filter(|p| p.enabled && selected.contains(&p.id))
+            .collect();
         let prompt = format!(
             "{}\n\nPROJECTS={}\nSNAPSHOT={}\n",
             include_str!("../prompts/coordinator.md"),

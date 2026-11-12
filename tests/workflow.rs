@@ -37,9 +37,15 @@ impl Fixture {
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
         let home = root.join("codex-home");
         fs::create_dir(&home).unwrap();
+        let mcp = root.join("mcp.py");
+        fs::write(&mcp, include_str!("fixtures/mcp.py")).unwrap();
         fs::write(
             home.join("config.toml"),
-            "[mcp_servers.appflowy]\ncommand = 'fixture'\n",
+            format!(
+                "[mcp_servers.appflowy]\ncommand = 'python3'\nargs = ['{}', '{}']\n",
+                mcp.display(),
+                root.display()
+            ),
         )
         .unwrap();
         let prompt = root.join("prompt.md");
@@ -413,15 +419,33 @@ async fn ignored_states_do_not_start_workers() {
     let (token, job) = f.start();
     let polled = f
         .wait(|| {
-            f.events()
-                .iter()
-                .filter(|e| e["kind"] == "coordinator")
-                .count()
-                >= 2
+            ["p0", "p1"].iter().all(|id| {
+                f.events().iter().any(|e| {
+                    e["kind"] == "coordinator"
+                        && e["projects"]
+                            .as_array()
+                            .is_some_and(|p| p.contains(&json!(id)))
+                })
+            })
         })
         .await;
+    tokio::time::sleep(Duration::from_secs(3)).await;
     f.stop(token, job).await;
     assert!(polled);
+    // Independent startup observations may arrive in different passes; each
+    // project must be coordinated once, with no repeated idle invocations.
+    for id in ["p0", "p1"] {
+        assert_eq!(
+            f.events()
+                .iter()
+                .filter(|e| e["kind"] == "coordinator"
+                    && e["projects"]
+                        .as_array()
+                        .is_some_and(|p| p.contains(&json!(id))))
+                .count(),
+            1
+        );
+    }
     assert!(!f.events().iter().any(|e| e["kind"] == "worker_start"));
 }
 
@@ -503,4 +527,274 @@ async fn status_traffic_does_not_coordinate_or_dispatch_and_shows_parallel_idle_
     assert_eq!(events_before, f.events());
     assert_eq!(board_before, f.board());
     f.stop(token, job).await;
+}
+
+#[tokio::test]
+async fn changes_during_luna_remain_dirty_and_only_one_pass_runs() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.enable_status();
+    f.status("p0", "Done");
+    f.touch("luna-hold");
+    let (token, job) = f.start();
+    assert!(
+        f.wait(|| f.events().iter().any(|e| e["kind"] == "coordinator_read"))
+            .await
+    );
+    f.status("p0", "Backlog");
+    tokio::time::sleep(Duration::from_millis(1400)).await;
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count(),
+        1
+    );
+    assert_eq!(
+        f.status_snapshot().await["projects"][0]["polling"]["dirty"],
+        true
+    );
+    fs::remove_file(f.temp.path().join("luna-hold")).unwrap();
+    assert!(
+        f.wait(|| f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count()
+            == 2)
+            .await
+    );
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count(),
+        2
+    );
+    assert_eq!(
+        f.status_snapshot().await["projects"][0]["polling"]["dirty"],
+        false
+    );
+    f.stop(token, job).await;
+}
+
+#[tokio::test]
+async fn failed_and_incomplete_luna_calls_retry_unchanged_boards_at_bounded_intervals() {
+    for failure in ["luna-fail", "luna-incomplete"] {
+        let f = Fixture::new(&[Mode::Master]);
+        f.status("p0", "Backlog");
+        f.touch(failure);
+        let (token, job) = f.start();
+        assert!(
+            f.wait(|| f
+                .events()
+                .iter()
+                .filter(|e| e["kind"] == "coordinator")
+                .count()
+                >= 2)
+                .await
+        );
+        let before = f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(
+            before,
+            f.events()
+                .iter()
+                .filter(|e| e["kind"] == "coordinator")
+                .count()
+        );
+        fs::remove_file(f.temp.path().join(failure)).unwrap();
+        assert!(
+            f.wait(|| f
+                .events()
+                .iter()
+                .filter(|e| e["kind"] == "coordinator")
+                .count()
+                > before)
+                .await
+        );
+        tokio::time::sleep(Duration::from_millis(1400)).await;
+        let count = f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count();
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        assert_eq!(
+            count,
+            f.events()
+                .iter()
+                .filter(|e| e["kind"] == "coordinator")
+                .count()
+        );
+        f.stop(token, job).await;
+    }
+}
+
+#[tokio::test]
+async fn failing_poll_is_isolated_and_does_not_start_luna_until_valid_observation() {
+    let mut f = Fixture::new(&[Mode::Master, Mode::Master]);
+    f.enable_status();
+    f.status("p0", "Backlog");
+    f.status("p1", "Done");
+    f.touch("poll-fail-p0");
+    let (token, job) = f.start();
+    assert!(
+        f.wait(|| f.events().iter().any(|e| e["kind"] == "coordinator"))
+            .await
+    );
+    tokio::time::sleep(Duration::from_millis(1400)).await;
+    let events = f.events();
+    let passes: Vec<_> = events
+        .iter()
+        .filter(|e| e["kind"] == "coordinator")
+        .collect();
+    assert_eq!(passes.len(), 1);
+    assert_eq!(passes[0]["projects"], json!(["p1"]));
+    let view = f.status_snapshot().await;
+    assert_eq!(view["projects"][0]["polling"]["dirty"], true);
+    assert!(view["projects"][0]["polling"]["last_error"].is_string());
+    assert!(view["projects"][0]["polling"]["last_change_at"].is_null());
+    fs::remove_file(f.temp.path().join("poll-fail-p0")).unwrap();
+    assert!(
+        f.wait(|| f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count()
+            == 2)
+            .await
+    );
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    f.touch("poll-incomplete-p0");
+    tokio::time::sleep(Duration::from_millis(1300)).await;
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count(),
+        2
+    );
+    let view = f.status_snapshot().await;
+    assert_eq!(view["projects"][0]["polling"]["dirty"], false);
+    assert!(view["projects"][0]["polling"]["last_error"].is_string());
+    assert!(view["projects"][0]["polling"]["last_change_at"].is_number());
+    f.stop(token, job).await;
+}
+
+#[tokio::test]
+async fn result_acknowledgement_dispatches_queued_work_without_waiting_for_poll() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.config.orchestrator.poll_interval_seconds = 60;
+    f.touch("queued-ready");
+    let (token, job) = f.start();
+    assert!(
+        f.wait(|| f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .count()
+            == 2)
+            .await
+    );
+    assert!(f.wait(|| f.board()["p0"]["status"] == "Done").await);
+    f.stop(token, job).await;
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn pending_delivery_retries_even_when_luna_returns_without_acknowledgement() {
+    let f = Fixture::new(&[Mode::Master]);
+    f.touch("delivery-incomplete");
+    let (token, job) = f.start();
+    assert!(
+        f.wait(|| f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator"
+                && e["snapshot"]["pending"]
+                    .as_array()
+                    .is_some_and(|a| !a.is_empty()))
+            .count()
+            >= 2)
+            .await
+    );
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .count(),
+        1
+    );
+    fs::remove_file(f.temp.path().join("delivery-incomplete")).unwrap();
+    assert!(
+        f.wait(|| f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator" && e["snapshot"]["pending"] == json!([]))
+            .count()
+            >= 2)
+            .await
+    );
+    f.stop(token, job).await;
+}
+
+#[tokio::test]
+async fn slow_poll_does_not_block_other_projects_or_shutdown() {
+    let mut f = Fixture::new(&[Mode::Master, Mode::Master]);
+    f.config.orchestrator.coordinator_timeout_seconds = 2;
+    f.status("p0", "Backlog");
+    f.status("p1", "Backlog");
+    f.touch("poll-slow-p0");
+    let (token, job) = f.start();
+    assert!(
+        f.wait(|| f.events().iter().any(|e| e["kind"] == "coordinator"))
+            .await
+    );
+    let passes: Vec<_> = f
+        .events()
+        .into_iter()
+        .filter(|e| e["kind"] == "coordinator")
+        .collect();
+    assert_eq!(passes[0]["projects"], json!(["p1"]));
+    f.stop(token, job).await;
+}
+
+#[tokio::test]
+async fn empty_board_has_one_initial_coordination_and_no_repeated_idle_calls() {
+    let f = Fixture::new(&[Mode::Master]);
+    let mut board = f.board();
+    board["p0"]["status"] = json!("Backlog");
+    board["p0"]["rows"] = json!([]);
+    fs::write(
+        f.temp.path().join("board.json"),
+        serde_json::to_vec(&board).unwrap(),
+    )
+    .unwrap();
+    let (token, job) = f.start();
+    assert!(
+        f.wait(|| f.events().iter().any(|e| e["kind"] == "coordinator_read"))
+            .await
+    );
+    tokio::time::sleep(Duration::from_millis(3200)).await;
+    f.stop(token, job).await;
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator")
+            .count(),
+        1
+    );
+    let polls = fs::read_to_string(f.temp.path().join("poll-events")).unwrap();
+    assert!(polls.lines().filter(|l| l.contains("get_page")).count() >= 6);
 }

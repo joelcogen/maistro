@@ -4,6 +4,7 @@ enabled = false
 port = 8044
 
 [orchestrator]
+# Cheap Rust board polls and bounded failure retries; unchanged boards do not call Luna.
 poll_interval_seconds = 30
 coordinator_timeout_seconds = 300
 worker_timeout_seconds = 3600

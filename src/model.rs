@@ -111,12 +111,21 @@ pub struct Coordination {
     pub cancel: Vec<StoryRef>,
     pub acknowledged: Vec<String>,
     pub notes: Vec<String>,
+    /// Projects with an incomplete coordination decision or failed remote operation.
+    pub retry_projects: Vec<String>,
     /// Display observations only; never used to select or authorize work.
     #[serde(default)]
     pub observations: Vec<crate::status::BoardRead>,
 }
 impl Coordination {
     pub fn validate(&self, projects: &[String], snapshot: &Snapshot) -> Result<()> {
+        let mut retrying = HashSet::new();
+        for id in &self.retry_projects {
+            ensure!(
+                projects.contains(id) && retrying.insert(id),
+                "unknown/duplicate project retry"
+            );
+        }
         let mut assigned = HashSet::new();
         for a in &self.assignments {
             ensure!(
@@ -166,7 +175,7 @@ pub fn coordination_schema() -> Value {
             "title":{"type":"string"}, "story_url":{"type":["string","null"]}, "context":{"type":"string"}, "recovery":{"type":"boolean"}
         }))},
         "cancel":{"type":"array","items":object(json!({"project_id":{"type":"string"},"story_id":{"type":"string"}}))},
-        "acknowledged":strings(), "notes":strings(),
+        "acknowledged":strings(), "notes":strings(), "retry_projects":strings(),
         "observations":{"type":"array","items":object(json!({
             "project_id":{"type":"string"},
             "counts":{"anyOf":[object(json!({

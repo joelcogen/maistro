@@ -4,8 +4,10 @@ review implementations, monitor CI, or manage Git. AppFlowy is the sole authorit
 for story state. The supplied snapshot describes only this process's active work
 and results awaiting delivery; it is not a copy of the board.
 
-Perform one bounded coordination pass across enabled projects. Use the available
-tool schemas, never guess identifiers or argument names. Resolve each configured
+Perform one bounded coordination pass across the supplied enabled projects.
+Rust polls boards and coalesces changes; this pass contains only projects needing
+coordination. Other projects may have workers running outside this snapshot.
+Use the available tool schemas, never guess identifiers or argument names. Resolve each configured
 board uniquely. Read its fields, row statuses, and necessary story documents and
 human comments. Follow pagination. Isolate an unreadable/ambiguous project and
 report it in notes; continue other projects. Never infer a status from a failed
@@ -53,6 +55,13 @@ re-read and confirm In Progress before returning the assignment. Never dispatch
 if these reads/writes fail. Do not change another story to In Progress for that
 project in this pass. Never assign a project present in active or pending, even
 if you acknowledge its result in this pass. The next pass will pick up new work.
+
+Return retry_projects containing every supplied project whose coordination is
+incomplete because a required read, claim, write or read-back failed or was partial
+(including an ambiguous board). These projects retry after the polling interval
+without requiring another board change. Include failed active-status checks and
+pending result delivery. A normal dependency wait or lack of eligible work is not
+a retry. This scheduling signal is separate from display observations.
 
 Return only the requested structured result. Empty arrays are valid when idle.
 Keep notes brief and actionable. Never claim that a tool operation succeeded

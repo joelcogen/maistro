@@ -53,11 +53,13 @@ if model == 'gpt-6-luna':
     fcntl.flock(singleton, fcntl.LOCK_EX | fcntl.LOCK_NB)
     snapshot = json.loads(prompt.split('\nSNAPSHOT=', 1)[1])
     projects = json.loads(prompt.split('\nPROJECTS=', 1)[1].split('\nSNAPSHOT=', 1)[0])
-    event('coordinator', snapshot=snapshot)
+    event('coordinator', snapshot=snapshot, projects=[p['id'] for p in projects])
+    if (ROOT / 'luna-fail').exists():
+        sys.exit(4)
     with (ROOT / 'board.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         board = json.loads((ROOT / 'board.json').read_text())
-        result = dict(assignments=[], cancel=[], acknowledged=[], notes=[], observations=[])
+        result = dict(assignments=[], cancel=[], acknowledged=[], notes=[], observations=[], retry_projects=[])
         for project in projects:
             counts = dict(ready=0, in_progress=0, blocked=0, review=0, backlog=0, done=0)
             key = board[project['id']]['status'].lower().replace(' ', '_')
@@ -79,6 +81,10 @@ if model == 'gpt-6-luna':
                                    else 'Review' if story['mode'] == 'pr' else 'Done')
                 story['result'] = completion['report']
             result['acknowledged'].append(completion['id'])
+            if (ROOT / 'queued-ready').exists():
+                (ROOT / 'queued-ready').unlink()
+                story['id'] = 'next-story'
+                story['status'] = 'Ready'
         busy = {a['project_id'] for a in snapshot['active']}
         busy.update(c['story']['project_id'] for c in snapshot['pending'])
         for project in projects:
@@ -90,6 +96,13 @@ if model == 'gpt-6-luna':
                                              recovery=story['status'] == 'In Progress'))
             story['status'] = 'In Progress'
         (ROOT / 'board.json').write_text(json.dumps(board))
+    if (ROOT / 'luna-incomplete').exists():
+        result['retry_projects'] = [p['id'] for p in projects]
+    if (ROOT / 'delivery-incomplete').exists():
+        result['acknowledged'] = []
+    event('coordinator_read')
+    while (ROOT / 'luna-hold').exists():
+        time.sleep(0.05)
     time.sleep(0.1)
     finish(result)
 else:
@@ -134,7 +147,7 @@ else:
         # A real test is performed by the worker, not by the daemon.
         subprocess.check_call([sys.executable, '-c', "assert open('result.txt').read() == 'implemented\\n'"])
         git('add', 'result.txt')
-        git('commit', '-m', git_config['story_marker'])
+        git('commit', '--allow-empty', '-m', git_config['story_marker'])
     git('push', git_config['remote'], branch)
     sha = git('rev-parse', 'HEAD')
     result = dict(outcome='completed', summary='Implemented fixture', tests=['python assertion passed'],

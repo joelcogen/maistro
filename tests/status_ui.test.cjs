@@ -20,6 +20,7 @@ function snapshot() {
     projects: [{ id: '<img onerror=evil()>', enabled: true, mode: 'master',
       story: { id: 'story', title: '<script>evil()</script>', url: 'javascript:evil()' },
       worker: { state: 'pending_update', latest_event: 'Completed; awaiting AppFlowy recording', started_at: 101, finished_at: 110, elapsed_seconds: 9 },
+      polling: { last_poll_at: 120, last_change_at: 115, dirty: true, last_error: 'Board poll failed; last fingerprint retained' },
       observation: { counts: values, stale: true, read_started_at: 101, received_at: 110, reason: 'update_failed' }
     }, { id: 'disabled', enabled: false, mode: 'pr', story: null,
       worker: { state: 'disabled', latest_event: 'Not started', started_at: null },
@@ -46,6 +47,9 @@ test('renders unknown/stale counts, pending results and malicious titles as text
   assert.match(nodes.projects.text, /Unknown.*no successful/);
   assert.match(nodes.projects.text, /<script>evil\(\)<\/script>/);
   assert.match(nodes.projects.text, /AppFlowy result update failed/);
+  assert.match(nodes.projects.text, /Rust poll:/);
+  assert.match(nodes.projects.text, /Coordination pending/);
+  assert.match(nodes.projects.text, /Board poll failed; last fingerprint retained/);
   assert.equal(nodes.projects.all().filter(n => ['script', 'img'].includes(n.tag)).length, 0);
   assert.equal(nodes.projects.all().filter(n => n.href).length, 0);
   assert.equal(timers[0].ms, 3000);
