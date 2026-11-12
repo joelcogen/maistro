@@ -45,10 +45,12 @@ function ago(value, now) {
 function workerRunning(worker) { return ['active', 'stopping'].includes(worker.state); }
 function render(snapshot) {
   const daemon = document.getElementById('daemon');
-  const coordinator = element('p', undefined, 'row coordinator');
-  coordinator.append(element('span', states[snapshot.coordinator.state] || snapshot.coordinator.state),
-    element('span', `Last coordination pass: ${ago(snapshot.coordinator.started_at, snapshot.generated_at)}`, 'muted'));
   const workers = element('ul', undefined, 'worker-list');
+  const coordinating = snapshot.coordinator.state === 'reading_boards';
+  const coordinator = element('li', undefined, 'row');
+  coordinator.append(element('span', 'Coordinator', 'worker-name'),
+    element('span', states[snapshot.coordinator.state] || snapshot.coordinator.state, coordinating ? 'worker-state running' : 'worker-state'));
+  workers.append(coordinator);
   for (const project of snapshot.projects) {
     const running = workerRunning(project.worker);
     const row = element('li', undefined, 'row');
@@ -57,7 +59,9 @@ function render(snapshot) {
     row.append(name, element('span', !project.enabled ? 'Disabled' : running ? 'Running' : 'Idle', running ? 'worker-state running' : 'worker-state'));
     workers.append(row);
   }
-  daemon.replaceChildren(element('p', `Uptime ${duration(snapshot.uptime_seconds)}`, 'muted'), coordinator, workers);
+  daemon.replaceChildren(workers,
+    element('p', `Uptime ${duration(snapshot.uptime_seconds)}`, 'muted'),
+    element('p', `Last coordination pass: ${ago(snapshot.coordinator.started_at, snapshot.generated_at)}`, 'muted'));
   const overall = snapshot.overall;
   const overview = document.getElementById('overall');
   overview.replaceChildren(counts(overall.counts));

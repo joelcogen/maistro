@@ -15,15 +15,11 @@ section, article { background: #19232c; border: 1px solid #34434f; border-radius
 .row { display: flex; align-items: baseline; justify-content: space-between; gap: 4px 12px; }
 .row > :first-child { min-width: 0; overflow-wrap: anywhere; }
 .row > :last-child:not(:first-child) { flex-shrink: 0; }
-.coordinator { flex-wrap: wrap; justify-content: flex-start; gap: 4px 6px; font-size: .75rem; }
-.coordinator .muted { font-size: inherit; }
-.coordinator > :last-child { flex-shrink: 1; }
-.worker-list { list-style: none; padding: 0; margin: 8px 0 0; font-size: .85rem; }
+.worker-list { list-style: none; padding: 0; margin: 0 0 8px; font-size: .85rem; }
 .worker-list li + li { margin-top: 4px; }
 .worker-list .worker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worker-state { color: #afbdc9; }
 .worker-state.running { color: #8bd9c3; }
-#daemon > p:first-child { margin-top: 0; }
 #daemon > p:last-child { margin-bottom: 0; }
 .counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0 0; }
 .count { min-width: 0; overflow-wrap: anywhere; background: #10171d; padding: 8px; border-radius: 6px; }

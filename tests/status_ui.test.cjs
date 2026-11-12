@@ -93,7 +93,7 @@ test('board and story links remain available without polling details', async () 
     [data.projects[0].board_url, data.projects[0].story.url]);
 });
 
-test('daemon shows only uptime, coordination age and one worker status per project', async () => {
+test('agents list starts with the coordinator followed by each project and its status', async () => {
   const data = snapshot();
   data.coordinator.state = 'idle';
   data.projects.push(...['active', 'stopping', 'idle'].map(state => ({
@@ -102,10 +102,10 @@ test('daemon shows only uptime, coordination age and one worker status per proje
   const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
   await flush();
   assert.match(nodes.daemon.text, /Uptime 0h 2m 3s/);
-  assert.match(nodes.daemon.text, /Idle\nLast coordination pass: 6 minutes ago/);
+  assert.match(nodes.daemon.text, /Last coordination pass: 6 minutes ago/);
   const rows = nodes.daemon.all().filter(n => n.tag === 'li');
   assert.deepEqual(rows.map(n => n.text), [
-    '<img onerror=evil()>\nIdle', 'disabled\nDisabled', 'active\nRunning', 'stopping\nRunning', 'idle\nIdle'
+    'Coordinator\nIdle', '<img onerror=evil()>\nIdle', 'disabled\nDisabled', 'active\nRunning', 'stopping\nRunning', 'idle\nIdle'
   ]);
   assert.doesNotMatch(nodes.daemon.text, /Started|Finished|Duration|Verbose event|<script>|Result waiting/);
 });
@@ -122,7 +122,8 @@ test('coordination age handles first run, active passes and time boundaries', as
   }
   context.data = snapshot();
   vm.runInContext('render(data)', context);
-  assert.match(nodes.daemon.text, /Coordinating\nLast coordination pass: 6 minutes ago/);
+  assert.match(nodes.daemon.text, /Coordinator\nCoordinating/);
+  assert.match(nodes.daemon.text, /Last coordination pass: 6 minutes ago/);
 });
 
 test('overview and project counts share compact labels and full observations need no note', async () => {

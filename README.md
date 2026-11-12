@@ -258,8 +258,8 @@ to project IDs, story titles/IDs, safe board/workflow and story links, and conci
 diagnostics. Titles render as text; links allow only HTTP(S). Detailed failure
 output stays in private logs and the story source.
 
-The compact daemon summary shows uptime, coordinator status, time since the latest
-coordination pass began, and one running/idle status per project. Disabled projects
+The compact Agents box lists Coordinator and each project with its status, followed
+by uptime and time since the latest coordination pass began. Disabled projects
 remain visible. Project cards show worker status, duration and latest start/finish
 time, the current story, board and story links, and concise errors. Pending results
 remain visible until source recording completes. Observations live in memory and
