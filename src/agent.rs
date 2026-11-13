@@ -65,6 +65,7 @@ impl AgentRunner {
     }
 
     pub async fn validate_cli(&self) -> Result<()> {
+        self.config.agents.validate_efforts()?;
         github::read_token(&self.config.agents.github_token_file)?;
         if self.config.agents.provider == Provider::Claude {
             return crate::claude::validate(&self.config).await;
@@ -98,6 +99,7 @@ impl AgentRunner {
         schema: Value,
         cancel: &CancellationToken,
     ) -> Result<Value> {
+        self.config.agents.validate_efforts()?;
         if self.config.agents.provider == Provider::Claude {
             return crate::claude::invoke(
                 &self.config,
@@ -119,16 +121,18 @@ impl AgentRunner {
         let output = temporary.path().join("result.json");
         let schema_path = temporary.path().join("schema.json");
         std::fs::write(&schema_path, serde_json::to_vec(&schema)?)?;
-        let (role, model, cwd, timeout) = match project {
+        let (role, model, effort, cwd, timeout) = match project {
             Some(p) => (
                 p.id.as_str(),
                 self.config.agents.big_model(),
+                self.config.agents.big_model_effort.as_deref(),
                 p.repo.as_path(),
                 self.config.orchestrator.worker_timeout_seconds,
             ),
             None => (
                 "coordinator",
                 self.config.agents.small_model(),
+                self.config.agents.small_model_effort.as_deref(),
                 temporary.path(),
                 self.config.orchestrator.coordinator_timeout_seconds,
             ),
@@ -159,6 +163,9 @@ impl AgentRunner {
             .arg(&output);
         for setting in ["features.multi_agent=false", "features.hooks=false"] {
             cmd.args(["-c", setting]);
+        }
+        if let Some(effort) = effort {
+            cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
         }
         if project.is_some() {
             github::configure_worker(
@@ -232,7 +239,7 @@ impl AgentRunner {
             }
         }
         cmd.arg("-");
-        tracing::info!(role, model, log=%log.display(), "agent starting");
+        tracing::info!(role, model, configured_effort=effort.unwrap_or("inherited/default"), log=%log.display(), "agent starting");
         let result = process::run(
             cmd,
             prompt,

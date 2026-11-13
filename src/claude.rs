@@ -104,6 +104,12 @@ pub(crate) async fn validate(config: &Config) -> Result<()> {
     let mut cmd = Command::new(&config.agents.claude);
     cmd.arg("--help");
     let help = process::checked(cmd, Duration::from_secs(15)).await?;
+    if config.agents.small_model_effort.is_some() || config.agents.big_model_effort.is_some() {
+        ensure!(
+            help.contains("--effort"),
+            "installed Claude Code lacks --effort; upgrade it or omit agents.small_model_effort and agents.big_model_effort"
+        );
+    }
     for flag in [
         "--print",
         "--output-format",
@@ -155,16 +161,18 @@ pub(crate) async fn invoke(
     let temporary = tempfile::Builder::new()
         .prefix("invocation-")
         .tempdir_in(runtime)?;
-    let (role, model, cwd, timeout) = match project {
+    let (role, model, effort, cwd, timeout) = match project {
         Some(p) => (
             p.id.as_str(),
             config.agents.big_model(),
+            config.agents.big_model_effort.as_deref(),
             p.repo.as_path(),
             config.orchestrator.worker_timeout_seconds,
         ),
         None => (
             "coordinator",
             config.agents.small_model(),
+            config.agents.small_model_effort.as_deref(),
             temporary.path(),
             config.orchestrator.coordinator_timeout_seconds,
         ),
@@ -191,6 +199,12 @@ pub(crate) async fn invoke(
             "--disallowedTools",
             "Agent,Task",
         ]);
+    if let Some(effort) = effort {
+        // Claude's environment override outranks --effort. Only remove it when
+        // Maistro explicitly configures this role; otherwise preserve inheritance.
+        cmd.env_remove("CLAUDE_CODE_EFFORT_LEVEL")
+            .args(["--effort", effort]);
+    }
     let mut connections = Map::new();
     if project.is_some() {
         github::configure_worker(
@@ -238,7 +252,7 @@ pub(crate) async fn invoke(
         serde_json::to_vec(&json!({"mcpServers": connections}))?,
     )?;
     cmd.arg("--mcp-config").arg(&mcp_path);
-    tracing::info!(role, model, provider="claude", log=%log.display(), "agent starting");
+    tracing::info!(role, model, configured_effort=effort.unwrap_or("inherited/default"), provider="claude", log=%log.display(), "agent starting");
     let result = process::run(
         cmd,
         prompt,

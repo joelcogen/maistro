@@ -106,8 +106,25 @@ test('agents list starts with the coordinator followed by each project and its s
   const rows = nodes.daemon.all().filter(n => n.tag === 'li');
   assert.deepEqual(rows.map(n => n.text), [
     'Coordinator\nIdle', '<img onerror=evil()>\nIdle', 'disabled\nDisabled', 'active\nRunning', 'stopping\nRunning', 'idle\nIdle'
-  ]);
+  ].map(text => `${text}\nConfigured effort: inherited/default`));
   assert.doesNotMatch(nodes.daemon.text, /Started|Finished|Duration|Verbose event|<script>|Result waiting/);
+});
+
+test('agents show configured effort for each role, including disabled workers, without inferring defaults', async () => {
+  const data = snapshot();
+  data.coordinator.configured_effort = 'low';
+  data.projects[0].worker.configured_effort = 'high';
+  data.projects[1].worker.configured_effort = 'high';
+  const { nodes, context } = harness(async () => ({ ok: true, json: async () => data }));
+  await flush();
+  const efforts = () => nodes.daemon.all().filter(n => n.className === 'worker-effort muted').map(n => n.text);
+  assert.deepEqual(efforts(), ['Configured effort: low', 'Configured effort: high', 'Configured effort: high']);
+  data.coordinator.configured_effort = null;
+  data.projects[0].worker.configured_effort = null;
+  context.data = data;
+  vm.runInContext('render(data)', context);
+  assert.deepEqual(efforts(), ['Configured effort: inherited/default', 'Configured effort: inherited/default', 'Configured effort: high']);
+  assert.doesNotMatch(nodes.daemon.text, /effective|runtime effort/i);
 });
 
 test('coordination age handles first run, active passes and time boundaries', async () => {

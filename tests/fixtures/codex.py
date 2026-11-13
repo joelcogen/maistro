@@ -22,6 +22,8 @@ if args == ['login', 'status']:
 if args == ['--help']:
     assert claude
     print('--print --output-format --json-schema --model --no-session-persistence --strict-mcp-config --mcp-config --tools --allowedTools --disallowedTools --setting-sources --settings --permission-mode --dangerously-skip-permissions')
+    if not (ROOT / 'no-effort-flag').exists():
+        print('--effort')
     sys.exit(0)
 if args == ['auth', 'status']:
     assert claude
@@ -33,6 +35,18 @@ coordinator = '\nPROJECTS=' in prompt
 defaults = ['haiku', 'opus'] if claude else ['gpt-6-luna', 'gpt-6-astra']
 models = json.loads((ROOT / 'models.json').read_text()) if (ROOT / 'models.json').exists() else defaults
 assert model == models[0 if coordinator else 1]
+efforts = json.loads((ROOT / 'efforts.json').read_text()) if (ROOT / 'efforts.json').exists() else [None, None]
+effort = efforts[0 if coordinator else 1]
+if claude:
+    assert args.count('--effort') == (0 if effort is None else 1)
+    if effort is not None:
+        assert args[args.index('--effort') + 1] == effort
+        assert 'CLAUDE_CODE_EFFORT_LEVEL' not in os.environ
+    elif (ROOT / 'inherited-effort.json').exists():
+        assert os.environ.get('CLAUDE_CODE_EFFORT_LEVEL') == json.loads((ROOT / 'inherited-effort.json').read_text())
+else:
+    overrides = [args[i + 1] for i, arg in enumerate(args) if arg == '-c' and args[i + 1].startswith('model_reasoning_effort=')]
+    assert overrides == ([] if effort is None else [f'model_reasoning_effort="{effort}"'])
 token = (ROOT / 'github-token').read_text().strip()
 assert token not in prompt and not any(token in arg for arg in args)
 if claude:
@@ -107,7 +121,7 @@ if coordinator:
         else:
             assert source == 'AppFlowy' and 'update_row_cells' in setting
             assert 'update_story' not in setting
-    event('coordinator', model=model, provider='claude' if claude else 'codex', snapshot=snapshot, projects=[p['id'] for p in projects])
+    event('coordinator', model=model, effort=effort, provider='claude' if claude else 'codex', snapshot=snapshot, projects=[p['id'] for p in projects])
     if (ROOT / 'luna-fail').exists():
         sys.exit(4)
     with (ROOT / 'board.lock').open('w') as lock:
@@ -187,7 +201,7 @@ else:
     git_config = json.loads(prompt.split('\nGIT=', 1)[1].split('\nASSIGNMENT=', 1)[0])
     project = assignment['project_id']
     assert Path.cwd() == ROOT / project
-    event('worker_start', model=model, provider='claude' if claude else 'codex', project=project, recovery=assignment['recovery'], git=git_config)
+    event('worker_start', model=model, effort=effort, provider='claude' if claude else 'codex', project=project, recovery=assignment['recovery'], git=git_config)
     if git_config['mode'] == 'pr':
         assert 'PR MODE:' in prompt and 'MASTER MODE:' not in prompt
     else:

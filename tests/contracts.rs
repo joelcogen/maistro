@@ -513,8 +513,90 @@ fn provider_and_models_are_global_with_compatible_defaults() {
         "provider='claude'",
         "small_model='other'",
         "big_model='other'",
+        "small_model_effort='low'",
+        "big_model_effort='high'",
     ] {
         assert!(toml::from_str::<Config>(&format!("{project}{field}\n")).is_err());
+    }
+}
+
+#[test]
+fn effort_validation_is_optional_role_specific_and_provider_specific() {
+    let project = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Stories'\nmode='master'\nbase_branch='main'\n";
+    for (provider, supported) in [
+        (
+            "codex",
+            vec![
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+            ],
+        ),
+        ("claude", vec!["low", "medium", "high", "xhigh", "max"]),
+    ] {
+        let config: Config =
+            toml::from_str(&format!("[agents]\nprovider='{provider}'\n{project}")).unwrap();
+        config.validate().unwrap();
+        assert_eq!(config.agents.small_model_effort, None);
+        assert_eq!(config.agents.big_model_effort, None);
+        for field in ["small_model_effort", "big_model_effort"] {
+            for value in &supported {
+                let config: Config = toml::from_str(&format!(
+                    "[agents]\nprovider='{provider}'\n{field}='{value}'\n{project}"
+                ))
+                .unwrap();
+                config.validate().unwrap();
+                let (selected, other) = if field == "small_model_effort" {
+                    (
+                        &config.agents.small_model_effort,
+                        &config.agents.big_model_effort,
+                    )
+                } else {
+                    (
+                        &config.agents.big_model_effort,
+                        &config.agents.small_model_effort,
+                    )
+                };
+                assert_eq!(selected.as_deref(), Some(*value));
+                assert_eq!(other, &None);
+            }
+            for value in [
+                "",
+                " ",
+                "HIGH",
+                " high",
+                "high ",
+                "default",
+                "auto",
+                "ultracode",
+                "--high",
+                "unknown",
+                "none",
+                "minimal",
+                "ultra",
+            ] {
+                if supported.contains(&value) {
+                    continue;
+                }
+                let config: Config = toml::from_str(&format!(
+                    "[agents]\nprovider='{provider}'\n{field}='{value}'\n{project}"
+                ))
+                .unwrap();
+                let error = config.validate().unwrap_err().to_string();
+                assert!(
+                    error.contains(field)
+                        && error.contains(provider)
+                        && error.contains("supported values"),
+                    "{error}"
+                );
+            }
+            for value in ["1", "true", "[]"] {
+                assert!(
+                    toml::from_str::<Config>(&format!(
+                        "[agents]\nprovider='{provider}'\n{field}={value}\n{project}"
+                    ))
+                    .is_err()
+                );
+            }
+        }
     }
 }
 

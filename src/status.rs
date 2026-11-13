@@ -97,6 +97,8 @@ pub struct Observation {
 #[derive(Clone, Debug, Serialize)]
 pub struct Activity {
     pub state: &'static str,
+    /// Requested effort only; not an observation of the provider's runtime choice.
+    pub configured_effort: Option<String>,
     pub started_at: Option<u64>,
     pub finished_at: Option<u64>,
     pub elapsed_seconds: u64,
@@ -106,9 +108,10 @@ pub struct Activity {
     clock: Option<Instant>,
 }
 impl Activity {
-    fn new(state: &'static str) -> Self {
+    fn new(state: &'static str, configured_effort: Option<String>) -> Self {
         Self {
             state,
+            configured_effort,
             started_at: None,
             finished_at: None,
             elapsed_seconds: 0,
@@ -119,7 +122,7 @@ impl Activity {
     }
     fn start(&mut self, state: &'static str) {
         let last_error = self.last_error;
-        *self = Self::new(state);
+        *self = Self::new(state, self.configured_effort.take());
         self.last_error = last_error;
         self.started_at = Some(now());
         self.clock = Some(Instant::now());
@@ -197,7 +200,10 @@ impl Status {
                 mode: p.mode,
                 board_url: p.board_url().and_then(safe_url),
                 story: None,
-                worker: Activity::new(if p.enabled { "idle" } else { "disabled" }),
+                worker: Activity::new(
+                    if p.enabled { "idle" } else { "disabled" },
+                    config.agents.big_model_effort.clone(),
+                ),
                 last_outcome: None,
                 polling: Polling {
                     method: if p.is_shortcut() {
@@ -227,7 +233,7 @@ impl Status {
                 started_at: now(),
                 generated_at: now(),
                 uptime_seconds: 0,
-                coordinator: Activity::new("idle"),
+                coordinator: Activity::new("idle", config.agents.small_model_effort.clone()),
                 projects,
                 overall: Overall {
                     counts: None,
@@ -585,6 +591,44 @@ mod tests {
         });
         r
     }
+    #[test]
+    fn configured_efforts_remain_distinct_from_runtime_state() {
+        for (small, big) in [
+            (None, None),
+            (Some("low"), Some("high")),
+            (None, Some("max")),
+        ] {
+            let mut config = config();
+            config.agents.small_model_effort = small.map(str::to_owned);
+            config.agents.big_model_effort = big.map(str::to_owned);
+            let mut status = Status::new(&config);
+            for step in 0..4 {
+                match step {
+                    1 | 3 => {
+                        status.coordinator_started();
+                        status.worker_started(&assignment("a"));
+                    }
+                    2 => {
+                        status.coordinator_finished(None);
+                        status.worker_finished("a", Some(Outcome::Completed), false);
+                    }
+                    _ => {}
+                }
+                let view = serde_json::to_value(status.snapshot()).unwrap();
+                assert_eq!(
+                    view["coordinator"]["configured_effort"],
+                    serde_json::json!(small)
+                );
+                for project in view["projects"].as_array().unwrap() {
+                    assert_eq!(
+                        project["worker"]["configured_effort"],
+                        serde_json::json!(big)
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn accepted_claim_updates_project_and_overview_once_without_another_read() {
         let mut status = Status::new(&config());

@@ -14,11 +14,17 @@ worker_timeout_seconds = 3600
 # runtime_dir = "~/.local/state/maistro"
 
 [agents]
-# Global for ALL projects; per-project provider/model overrides are not supported.
+# Global for ALL projects; per-project provider/model/effort overrides are not supported.
 provider = "codex" # "codex" or "claude" (Claude Code CLI)
 # Omit models for provider defaults: Codex gpt-6-luna/gpt-6-astra; Claude haiku/opus.
 # small_model = "gpt-6-luna" # Coordinator
 # big_model = "gpt-6-astra" # Implementation workers
+# Optional effort overrides; omit to preserve inherited configuration/provider defaults.
+# Codex: none, minimal, low, medium, high, xhigh, max, ultra.
+# Claude: low, medium, high, xhigh, max (requires CLI --effort support).
+# Available levels also depend on the selected model and CLI version.
+# small_model_effort = "low" # Coordinator
+# big_model_effort = "high" # Implementation workers
 # Uses the selected CLI's existing login and source MCP connections.
 # codex = "/home/you/.local/bin/codex"
 # codex_home = "~/.codex"

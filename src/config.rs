@@ -59,6 +59,9 @@ pub struct Agents {
     /// Model IDs/aliases understood by the selected CLI; omitted values use provider defaults.
     pub small_model: Option<String>,
     pub big_model: Option<String>,
+    /// Explicit effort overrides; omission leaves CLI configuration/defaults intact.
+    pub small_model_effort: Option<String>,
+    pub big_model_effort: Option<String>,
     pub claude: PathBuf,
     /// JSON file containing user-scoped mcpServers (normally ~/.claude.json).
     pub claude_mcp_config: PathBuf,
@@ -73,6 +76,8 @@ impl Default for Agents {
             provider: Provider::Codex,
             small_model: None,
             big_model: None,
+            small_model_effort: None,
+            big_model_effort: None,
             claude: "claude".into(),
             claude_mcp_config: "~/.claude.json".into(),
             codex: "codex".into(),
@@ -93,6 +98,31 @@ pub enum Provider {
     Claude,
 }
 impl Agents {
+    pub fn validate_efforts(&self) -> Result<()> {
+        let (provider, supported): (_, &[&str]) = match self.provider {
+            Provider::Codex => (
+                "codex",
+                &[
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                ],
+            ),
+            Provider::Claude => ("claude", &["low", "medium", "high", "xhigh", "max"]),
+        };
+        for (name, effort) in [
+            ("small_model_effort", &self.small_model_effort),
+            ("big_model_effort", &self.big_model_effort),
+        ] {
+            if let Some(effort) = effort {
+                ensure!(
+                    supported.contains(&effort.as_str()),
+                    "agents.{name}: unsupported effort {effort:?} for {provider}; supported values: {} (omit to inherit configuration/defaults)",
+                    supported.join(", ")
+                );
+            }
+        }
+        Ok(())
+    }
+
     pub fn small_model(&self) -> &str {
         self.small_model.as_deref().unwrap_or(match self.provider {
             Provider::Codex => "gpt-6-luna",
@@ -252,6 +282,7 @@ impl Config {
         Ok(config)
     }
     pub fn validate(&self) -> Result<()> {
+        self.agents.validate_efforts()?;
         ensure!(
             self.status.port > 0,
             "status.port must be between 1 and 65535"

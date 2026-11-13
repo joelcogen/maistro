@@ -43,20 +43,26 @@ function ago(value, now) {
   }
 }
 function workerRunning(worker) { return ['active', 'stopping'].includes(worker.state); }
+function agentDetails(activity, label, running) {
+  const details = element('span', undefined, 'worker-details');
+  details.append(element('span', label, running ? 'worker-state running' : 'worker-state'),
+    element('span', `Configured effort: ${activity.configured_effort ?? 'inherited/default'}`, 'worker-effort muted'));
+  return details;
+}
 function render(snapshot) {
   const daemon = document.getElementById('daemon');
   const workers = element('ul', undefined, 'worker-list');
   const coordinating = snapshot.coordinator.state === 'reading_boards';
   const coordinator = element('li', undefined, 'row');
   coordinator.append(element('span', 'Coordinator', 'worker-name'),
-    element('span', states[snapshot.coordinator.state] || snapshot.coordinator.state, coordinating ? 'worker-state running' : 'worker-state'));
+    agentDetails(snapshot.coordinator, states[snapshot.coordinator.state] || snapshot.coordinator.state, coordinating));
   workers.append(coordinator);
   for (const project of snapshot.projects) {
     const running = workerRunning(project.worker);
     const row = element('li', undefined, 'row');
     const name = element('span', project.id, 'worker-name');
     name.title = project.id;
-    row.append(name, element('span', !project.enabled ? 'Disabled' : running ? 'Running' : 'Idle', running ? 'worker-state running' : 'worker-state'));
+    row.append(name, agentDetails(project.worker, !project.enabled ? 'Disabled' : running ? 'Running' : 'Idle', running));
     workers.append(row);
   }
   daemon.replaceChildren(workers,

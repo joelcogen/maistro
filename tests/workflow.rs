@@ -1277,6 +1277,110 @@ async fn shortcut_recovers_pushed_commit_after_result_delivery_failure() {
 }
 
 #[tokio::test]
+async fn effort_overrides_reach_each_role_and_logs_for_both_providers() {
+    use tracing::instrument::WithSubscriber;
+    for claude in [false, true] {
+        for (small, big) in [
+            (None, None),
+            (Some("low"), Some("high")),
+            (Some("medium"), None),
+            (None, Some(if claude { "max" } else { "ultra" })),
+        ] {
+            let mut f = Fixture::new(&[Mode::Master; 2]);
+            if claude {
+                f.claude();
+            }
+            f.config.agents.small_model_effort = small.map(str::to_owned);
+            f.config.agents.big_model_effort = big.map(str::to_owned);
+            fs::write(
+                f.temp.path().join("inherited-effort.json"),
+                serde_json::to_vec(&std::env::var("CLAUDE_CODE_EFFORT_LEVEL").ok()).unwrap(),
+            )
+            .unwrap();
+            fs::write(
+                f.temp.path().join("efforts.json"),
+                serde_json::to_vec(&[small, big]).unwrap(),
+            )
+            .unwrap();
+            let runner = maistro::agent::AgentRunner::new(f.config.clone());
+            runner.validate_cli().await.unwrap();
+            let log_path = f.temp.path().join("start-logs.jsonl");
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_writer(fs::File::create(&log_path).unwrap())
+                .finish();
+            async {
+                let cancel = CancellationToken::new();
+                let result = runner
+                    .coordinate(&Default::default(), &["p0".into(), "p1".into()], &cancel)
+                    .await
+                    .unwrap();
+                assert_eq!(result.assignments.len(), 2);
+                for assignment in result.assignments {
+                    let project = f
+                        .config
+                        .projects
+                        .iter()
+                        .find(|p| p.id == assignment.project_id)
+                        .unwrap();
+                    runner.work(project, &assignment, &cancel).await.unwrap();
+                }
+            }
+            .with_subscriber(subscriber)
+            .await;
+            let logs: Vec<Value> = fs::read_to_string(log_path)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str::<Value>(line).unwrap())
+                .filter(|event| event["fields"]["message"] == "agent starting")
+                .collect();
+            assert_eq!(logs.len(), 3);
+            for (log, (role, effort)) in
+                logs.iter()
+                    .zip([("coordinator", small), ("p0", big), ("p1", big)])
+            {
+                assert_eq!(log["fields"]["role"], role);
+                assert_eq!(
+                    log["fields"]["configured_effort"],
+                    effort.unwrap_or("inherited/default")
+                );
+            }
+            assert_eq!(
+                f.events()
+                    .iter()
+                    .filter(|e| e["kind"] == "worker_start" && e["effort"] == json!(big))
+                    .count(),
+                2
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn claude_requires_effort_flag_only_when_configured() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.claude();
+    f.touch("no-effort-flag");
+    maistro::agent::AgentRunner::new(f.config.clone())
+        .validate_cli()
+        .await
+        .unwrap();
+    for small in [true, false] {
+        f.config.agents.small_model_effort = small.then(|| "low".into());
+        f.config.agents.big_model_effort = (!small).then(|| "high".into());
+        let error = maistro::agent::AgentRunner::new(f.config.clone())
+            .validate_cli()
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("installed Claude Code lacks --effort")
+        );
+    }
+}
+
+#[tokio::test]
 async fn global_models_apply_to_coordinator_and_every_codex_worker() {
     let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
     f.models("custom-small", "custom-big");

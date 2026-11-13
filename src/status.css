@@ -20,6 +20,8 @@ section, article { background: #19232c; border: 1px solid #34434f; border-radius
 .worker-list .worker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .worker-state { color: #afbdc9; }
 .worker-state.running { color: #8bd9c3; }
+.worker-details { text-align: right; }
+.worker-effort { display: block; }
 #daemon > p:last-child { margin-bottom: 0; }
 .counts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 8px 0 0; }
 .count { min-width: 0; overflow-wrap: anywhere; background: #10171d; padding: 8px; border-radius: 6px; }

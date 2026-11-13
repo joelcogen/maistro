@@ -123,22 +123,49 @@ To migrate, remove the obsolete `prompt_file` TOML key and move its contents to
 Other relative configuration paths resolve from the TOML file's directory;
 `~/` expands from HOME. Restart the service to apply TOML changes.
 
-### Global provider and models
+### Global provider, models and effort
 
-Set the provider and models once in `[agents]` for every project:
+Set the provider, models and optional effort once in `[agents]` for every project:
 
 ```toml
 [agents]
 provider = "codex" # Default; or "claude" for Claude Code
 small_model = "gpt-6-luna" # Coordinator
 big_model = "gpt-6-astra" # Implementation workers
+# Optional; omit to preserve inherited configuration/provider defaults.
+# small_model_effort = "low"
+# big_model_effort = "high"
 ```
 
 Model IDs and aliases pass unchanged to the selected CLI, which checks availability
 on invocation. Omitted models use provider defaults: `gpt-6-luna` / `gpt-6-astra`
 for Codex, `haiku` / `opus` for Claude. When switching providers, remove explicit
 models or replace them with supported ones. Model names must contain text;
-per-project provider and model settings are rejected.
+per-project provider, model and effort settings are rejected.
+
+Optional `small_model_effort` (coordinator) and `big_model_effort` (all workers)
+accept these exact lowercase values:
+
+| Provider | Effort values | CLI override |
+| --- | --- | --- |
+| Codex | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | `-c 'model_reasoning_effort="VALUE"'` |
+| Claude | `low`, `medium`, `high`, `xhigh`, `max` | `--effort VALUE` |
+
+Maistro rejects other values, including empty strings, during validation. Claude
+must advertise `--effort` when either setting is configured. Model-specific
+availability still depends on the selected CLI and model; these lists do not
+guarantee every model supports every level. See the
+[Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+and [Claude effort documentation](https://code.claude.com/docs/en/model-config#adjust-effort-level).
+Claude's `ultracode` mode is not an effort level supported by Maistro.
+
+Omitting a setting sends no effort override. Workers keep their normal inherited
+configuration; coordinators retain their existing isolated settings behavior and
+provider/model defaults. For explicit Claude effort, Maistro removes the inherited
+`CLAUDE_CODE_EFFORT_LEVEL` environment override for that invocation so the CLI flag
+can take effect. When effort is omitted, that environment variable is preserved.
+Agent-start logs and the dashboard show **configured effort**, or
+`inherited/default` when omitted, without claiming the effective runtime effort.
 
 For Claude Code, replace `[agents]` with:
 
@@ -259,10 +286,10 @@ to project IDs, story titles/IDs, safe board/workflow and story links, and conci
 diagnostics. Titles render as text; links allow only HTTP(S). Detailed failure
 output stays in private logs and the story source.
 
-The compact Agents box lists Coordinator and each project with its status, followed
-by uptime and time since the latest coordination pass began. Disabled projects
-remain visible. Project cards show worker status, duration and latest start/finish
-time, the current story, board and story links, and concise errors. Pending results
+The compact Agents box lists Coordinator and each project with its status and
+configured effort, followed by uptime and time since the latest coordination pass
+began. Disabled projects remain visible. Project cards show worker status, duration
+and latest start/finish time, the current story, board and story links, and concise errors. Pending results
 remain visible until source recording completes. Observations live in memory and
 reset on restart.
 
