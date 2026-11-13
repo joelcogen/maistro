@@ -83,18 +83,30 @@ impl Client {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("Shortcut API request failed"))?;
+            .map_err(|error| {
+                let reason = if error.is_timeout() {
+                    "timed out"
+                } else if error.is_connect() {
+                    "connection failed"
+                } else {
+                    "request failed"
+                };
+                anyhow::anyhow!("Shortcut API GET {path}: {reason}")
+            })?;
         ensure!(
             response.status().is_success(),
-            "Shortcut API returned HTTP {}",
+            "Shortcut API GET {path}: HTTP {}",
             response.status().as_u16()
         );
         let mut bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| anyhow::anyhow!("Shortcut API response interrupted"))?
-        {
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            let reason = if error.is_timeout() {
+                "response timed out"
+            } else {
+                "response interrupted"
+            };
+            anyhow::anyhow!("Shortcut API GET {path}: {reason}")
+        })? {
             ensure!(
                 bytes.len() + chunk.len() <= MAX_BODY,
                 "Shortcut API page exceeds size limit; read incomplete"
@@ -123,7 +135,10 @@ impl Client {
                 query.push(("limit", "100"));
                 query.extend_from_slice(extra);
             }
-            let value = self.get(path, &query).await?;
+            let value = self
+                .get(path, &query)
+                .await
+                .with_context(|| format!("Shortcut collection {path}, page {page}"))?;
             let entities = value["entities"]
                 .as_array()
                 .context("Shortcut list missing entities")?;
@@ -268,32 +283,47 @@ impl Client {
                 "Shortcut configured status label missing or ambiguous"
             );
         }
-        let stories = self
-            .list(
-                &format!("{path}/stories"),
-                STORY_FIELDS,
-                &[("filter", "exclude_archived")],
-            )
-            .await?;
-        for story in &stories {
-            ensure!(
-                story["workflow"]["id"].as_u64() == Some(id) && story["archived"] == false,
-                "Shortcut workflow listing returned an out-of-scope story"
-            );
-            ensure!(
-                story["workflow_state"]["id"]
-                    .as_u64()
-                    .is_some_and(|id| states.iter().any(|s| s["id"].as_u64() == Some(id))),
-                "Shortcut story has unknown workflow state"
-            );
-            ensure!(
-                story["updated_at"].is_string()
-                    && story["name"].is_string()
-                    && story["position"].is_number()
-                    && story["created_at"].is_string(),
-                "Shortcut story listing omitted required fields"
-            );
+        // The workflow-wide story endpoint currently stalls. Enumerate every
+        // state by numeric ID, including states not mapped to Maistro statuses.
+        let mut stories = BTreeMap::new();
+        for state in &states {
+            let state_id = state["id"].as_u64().context("missing workflow state ID")?;
+            let rows = self
+                .list(
+                    &format!("workflow-states/{state_id}/stories"),
+                    STORY_FIELDS,
+                    &[("filter", "exclude_archived")],
+                )
+                .await?;
+            for story in rows {
+                ensure!(
+                    story["workflow"]["id"].as_u64() == Some(id)
+                        && story["workflow_state"]["id"].as_u64() == Some(state_id)
+                        && story["archived"] == false,
+                    "Shortcut state {state_id} listing returned an out-of-scope story"
+                );
+                ensure!(
+                    story["updated_at"].is_string()
+                        && story["name"].is_string()
+                        && story["position"].is_number()
+                        && story["created_at"].is_string(),
+                    "Shortcut state {state_id} listing omitted required fields"
+                );
+                let story_id = story["id"].as_u64().context("missing story ID")?;
+                ensure!(
+                    stories.insert(story_id, story).is_none(),
+                    "Shortcut story {story_id} appeared in multiple states; retry complete read"
+                );
+            }
         }
+        ensure!(
+            states
+                == self
+                    .list(&format!("{path}/states"), "id,name,type,position", &[])
+                    .await?,
+            "Shortcut workflow states changed during read"
+        );
+        let stories: Vec<_> = stories.into_values().collect();
         Ok(
             json!({"workspace":project.shortcut_workspace, "workflow":workflow, "states":states, "stories":stories, "read":"complete"}),
         )
@@ -464,6 +494,9 @@ mod tests {
             .lock()
             .unwrap()
             .push((url.path().to_owned(), query.clone()));
+        if url.path().ends_with("/slow") {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
         let key = format!(
             "{}{}",
             url.path(),
@@ -529,7 +562,10 @@ mod tests {
                     json!({"id":5,"name":"Blocked"}),
                 ]),
             );
-            self.set("workflows/42/stories", page(vec![story(2)]));
+            for id in [1, 2, 3, 4, 5] {
+                self.set(&format!("workflow-states/{id}/stories"), page(vec![]));
+            }
+            self.set("workflow-states/2/stories", page(vec![story(2)]));
             self.set("stories/7/comments", page(vec![]));
             self.set("stories/7/checklist-items", page(vec![]));
             self.set("stories/7/story-links", page(vec![]));
@@ -583,7 +619,7 @@ mod tests {
     #[tokio::test]
     async fn scoped_pagination_decodes_cursor_and_keeps_only_fields_on_continuation() {
         let f = Fixture::new().await;
-        let path = "workflows/42/stories";
+        let path = "workflow-states/2/stories";
         let next = format!("{}{}?cursor=a%2Bb%2Fc%3D", f.client.base, path);
         f.set(
             path,
@@ -609,7 +645,7 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .all(|(p, _)| p.ends_with("/workflows/42/stories"))
+                .all(|(p, _)| p.ends_with("/workflow-states/2/stories"))
         );
     }
 
@@ -639,6 +675,7 @@ mod tests {
                 .list("stories", "id", &[])
                 .await
                 .unwrap_err()
+                .root_cause()
                 .to_string()
                 .contains("404")
         );
@@ -691,9 +728,9 @@ mod tests {
         p = f.project();
         let mut wrong = story(2);
         wrong["workflow"]["id"] = json!(99);
-        f.set("workflows/42/stories", page(vec![wrong]));
+        f.set("workflow-states/2/stories", page(vec![wrong]));
         assert!(f.client.board(&p).await.is_err());
-        f.set("workflows/42/stories", page(vec![]));
+        f.set("workflow-states/2/stories", page(vec![]));
         assert_eq!(f.client.board(&p).await.unwrap()["stories"], json!([]));
     }
 
@@ -744,9 +781,82 @@ mod tests {
         );
         assert_ne!(blocked, f.client.observe(&p).await.unwrap());
         // Moving/archiving/removing a story removes it from the scoped list.
-        f.set("workflows/42/stories", page(vec![]));
+        f.set("workflow-states/2/stories", page(vec![]));
         assert_ne!(baseline, f.client.observe(&p).await.unwrap());
-        f.set("workflows/42/stories", page(vec![story(3)]));
+        f.set("workflow-states/3/stories", page(vec![story(3)]));
         assert_ne!(baseline, f.client.observe(&p).await.unwrap());
+    }
+    #[tokio::test]
+    async fn board_reads_all_states_and_rejects_cross_state_races_or_failed_pages() {
+        let f = Fixture::new().await;
+        f.board();
+        let p = f.project();
+        let mut states = f.routes.lock().unwrap()["/api/v4/team/workflows/42/states"]["entities"]
+            .as_array()
+            .unwrap()
+            .clone();
+        states.push(json!({"id":6,"name":"Unmapped"}));
+        f.set("workflows/42/states", page(states));
+        let mut unmapped = story(6);
+        unmapped["id"] = json!(8);
+        f.set("workflow-states/6/stories", page(vec![unmapped]));
+        assert_eq!(
+            f.client.board(&p).await.unwrap()["stories"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(
+            f.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|(path, _)| !path.ends_with("/workflows/42/stories")
+                    && path != "/api/v4/team/stories")
+        );
+        // A story moving forward during enumeration must not be counted twice.
+        f.set("workflow-states/6/stories", page(vec![story(6)]));
+        assert!(
+            f.client
+                .board(&p)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("multiple states")
+        );
+        f.set("workflow-states/6/stories", page(vec![story(2)]));
+        assert!(
+            f.client
+                .board(&p)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("out-of-scope")
+        );
+        // A failed later state invalidates the whole snapshot, despite earlier rows.
+        f.routes
+            .lock()
+            .unwrap()
+            .remove("/api/v4/team/workflow-states/6/stories");
+        let error = format!("{:#}", f.client.board(&p).await.unwrap_err());
+        assert!(error.contains("workflow-states/6/stories") && error.contains("404"));
+    }
+
+    #[tokio::test]
+    async fn request_errors_identify_operation_and_timeout_without_credentials_or_query() {
+        let mut f = Fixture::new().await;
+        f.client.http = Http::builder()
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let error = f
+            .client
+            .get("slow", &[("cursor", "private-cursor")])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("GET slow") && error.contains("timed out"));
+        assert!(!error.contains("secret") && !error.contains("private-cursor"));
     }
 }

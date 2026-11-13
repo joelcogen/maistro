@@ -114,8 +114,15 @@ as observations; the coordinator authorizes work from fresh source reads.
 ## Shortcut API polling
 
 Rust resolves the workflow and reads only that workflow's non-archived stories
-through `GET /api/v4/{workspace}/workflows/{id}/stories`, with compact fields and
-complete pagination. It validates configured state labels and numeric membership.
+by listing all of its states and reading
+`GET /api/v4/{workspace}/workflow-states/{state-id}/stories` for each state,
+including states not mapped in Maistro. Reads use compact fields, exclude archived
+stories, and follow every page. This avoids the workflow-wide story endpoint,
+which timed out in live checks. Results must match the expected workflow and
+state; duplicate story IDs or a changed state list invalidate the whole read.
+The poller still compares two complete scans to detect changes during observation.
+Request errors identify the endpoint and distinguish timeouts from connection
+failures without logging credentials or cursor values. It validates configured state labels and numeric membership.
 Polling compares complete fingerprints; unchanged boards do not invoke the
 coordinator. Story metadata and membership changes wake it. Ready, In Progress,
 and Blocked stories also have comments, checklist items, and story links checked explicitly, along
