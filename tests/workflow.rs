@@ -1144,6 +1144,12 @@ async fn workflow_selectors_reach_both_coordinators_with_resolution_and_scope_ru
                 "Never silently use the default workflow, an entire workspace",
                 "WITHIN that workflow",
                 "Scope story enumeration to this workflow",
+                "list_workflow_stories with the verified workflow_public_id",
+                "search_stories with query=\"is:story\"",
+                "URL-decode its value exactly once",
+                "cursor and fields must be the ONLY query arguments on subsequent calls",
+                "do not claim or assign ANY story for that project",
+                "counts=null and counted_assignment=null",
                 "Recheck workflow membership as well as status before every write/claim",
                 "confirmed archive or movement outside the workflow revokes work",
                 "First recover an existing In Progress story",
@@ -1154,6 +1160,48 @@ async fn workflow_selectors_reach_both_coordinators_with_resolution_and_scope_ru
                 );
             }
         }
+    }
+}
+
+#[tokio::test]
+async fn shortcut_incomplete_read_cannot_dispatch_and_retries_until_recovery() {
+    for claude in [false, true] {
+        let mut f = Fixture::new(&[Mode::Master]);
+        f.shortcut(0, "shortcut");
+        f.workflow_selector(0, true);
+        f.enable_status();
+        if claude {
+            f.claude();
+        }
+        // The simulated coordinator incorrectly returns an assignment together
+        // with retry_projects, as if selecting from an early successful page.
+        f.touch("luna-incomplete");
+        let (token, job) = f.start();
+        assert!(
+            f.wait(|| f
+                .events()
+                .iter()
+                .filter(|e| e["kind"] == "coordinator_read")
+                .count()
+                >= 2)
+                .await
+        );
+        assert!(!f.events().iter().any(|e| e["kind"] == "worker_start"));
+        let view = f.status_snapshot().await;
+        assert!(view["projects"][0]["observation"]["counts"].is_null());
+        assert_eq!(view["projects"][0]["observation"]["stale"], true);
+        assert!(view["overall"]["counts"].is_null());
+        fs::remove_file(f.temp.path().join("luna-incomplete")).unwrap();
+        let completed = f.wait(|| f.board()["p0"]["status"] == "Done").await;
+        f.stop(token, job).await;
+        assert!(completed, "events: {:?}", f.events());
+        let starts: Vec<_> = f
+            .events()
+            .into_iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .collect();
+        assert_eq!(starts.len(), 1);
+        assert_eq!(starts[0]["recovery"], true);
     }
 }
 

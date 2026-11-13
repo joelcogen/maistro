@@ -327,6 +327,24 @@ can proceed. Scope includes all non-archived stories in that workflow. Use a
 dedicated workflow to limit available stories; space, team and label selectors are
 not supported. Name/ID selectors do not require or generate a dashboard workflow link.
 
+The coordinator prefers `list_workflow_stories` with the verified workflow ID.
+The public [v4 API](https://developer.shortcut.com/api/rest/v4#List-Workflow-Stories)
+and [OpenAPI specification](https://developer.shortcut.com/api/rest/v4/shortcut.openapi.json)
+document that listing (checked 2026-11-13). MCP availability is checked against the
+connected server's tools. If unavailable, it reads all pages of `list_stories`, or
+uses the nonempty `is:story` search, then filters by numeric workflow/state IDs.
+The [search operators](https://www.shortcut.com/help/fields-and-features/search-operators/)
+do not document `workflow:`; state names alone do not isolate workflows.
+
+For continuation calls the coordinator extracts and URL-decodes `cursor` from
+`next_page_url`, keeping the same fields and required path IDs and omitting other
+query parameters. Every page must succeed before selecting work or publishing
+complete counts. Failed, malformed or looping pagination leaves counts unknown
+(previous counts remain stale) and schedules a retry. Rust also rejects assignments
+for projects marked for retry. Shortcut reads remain in the coordinator's CLI/MCP
+connection; tests cover its prompt/tool contract and result handling without live
+workspace calls.
+
 ```toml
 [[projects]]
 id = "shortcut-service"

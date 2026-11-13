@@ -456,6 +456,8 @@ pub(crate) fn source_tools(
             "list_workflows",
             "get_workflow",
             "list_workflow_states",
+            "list_workflow_stories",
+            "list_stories",
             "search_stories",
             "get_story",
             "list_story_comments",

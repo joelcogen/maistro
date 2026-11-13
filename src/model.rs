@@ -151,6 +151,10 @@ impl Coordination {
                 "unknown/disabled project in assignment"
             );
             ensure!(
+                !retrying.contains(&a.project_id),
+                "incomplete coordination cannot authorize an assignment"
+            );
+            ensure!(
                 !snapshot.busy(&a.project_id) && assigned.insert(&a.project_id),
                 "project already has work"
             );

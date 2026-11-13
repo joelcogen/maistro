@@ -117,6 +117,7 @@ if coordinator:
             assert 'get_story' in setting and 'update_story' in setting
             assert 'list_workflows' in setting and 'get_workflow' in setting
             assert 'list_workflow_states' in setting
+            assert 'list_workflow_stories' in setting and 'list_stories' in setting
             assert 'update_row_cells' not in setting and 'create_story_comment' in setting
         else:
             assert source == 'AppFlowy' and 'update_row_cells' in setting

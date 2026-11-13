@@ -260,6 +260,165 @@ fn coordinator_retry_signal_is_required_scoped_and_unique() {
 }
 
 #[test]
+fn incomplete_coordination_cannot_authorize_new_or_recovered_work() {
+    let projects = vec!["p0".into(), "p1".into()];
+    for recovery in [false, true] {
+        let mut story = assignment("p0");
+        story.recovery = recovery;
+        let mut update = Coordination {
+            assignments: vec![story],
+            retry_projects: vec!["p0".into()],
+            ..Default::default()
+        };
+        let error = update
+            .validate(&projects, &Snapshot::default())
+            .unwrap_err();
+        assert!(error.to_string().contains("incomplete coordination"));
+        // A failed project does not prohibit work in another, fully read project.
+        update.assignments[0].project_id = "p1".into();
+        update.validate(&projects, &Snapshot::default()).unwrap();
+    }
+    // Enumeration failure must not suppress independently confirmed lifecycle reads.
+    let story = StoryRef::from(&assignment("p0"));
+    let update = Coordination {
+        retry_projects: vec!["p0".into()],
+        cancel: vec![story.clone()],
+        acknowledged: vec!["result-1".into()],
+        ..Default::default()
+    };
+    update
+        .validate(
+            &projects,
+            &Snapshot {
+                active: vec![story],
+                pending: vec![completion()],
+            },
+        )
+        .unwrap();
+}
+
+// Shortcut pagination runs in the model's MCP connection. These tests validate
+// the executable request examples and required guidance, not simulated API reads.
+fn coordinator_rules() -> String {
+    include_str!("../prompts/coordinator.md")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[test]
+fn shortcut_multi_page_examples_preserve_fields_and_decode_only_cursor_once() {
+    let prompt = include_str!("../prompts/coordinator.md");
+    let examples = prompt
+        .split("```json\n")
+        .nth(1)
+        .unwrap()
+        .split("```")
+        .next()
+        .unwrap();
+    let pages: Vec<serde_json::Value> = serde_json::from_str(examples).unwrap();
+    assert!(pages.len() >= 3, "exercise more than one continuation");
+    assert_eq!(pages[0]["request"]["query"], "is:story");
+    let fields = pages[0]["request"]["fields"].as_str().unwrap();
+    for required in [
+        "id",
+        "workflow",
+        "workflow_state",
+        "archived",
+        "position",
+        "created_at",
+    ] {
+        assert!(fields.split(',').any(|field| field == required));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for pair in pages.windows(2) {
+        let url = reqwest::Url::parse(pair[0]["next_page_url"].as_str().unwrap()).unwrap();
+        let tokens: Vec<_> = url
+            .query_pairs()
+            .filter(|(key, _)| key == "cursor")
+            .collect();
+        assert_eq!(tokens.len(), 1);
+        let token = &tokens[0].1;
+        assert!(!token.is_empty() && seen.insert(token.to_string()));
+        let next = pair[1]["request"].as_object().unwrap();
+        assert_eq!(
+            next.len(),
+            2,
+            "no query, limit, filter or ordering on continuation"
+        );
+        assert_eq!(next["cursor"], token.as_ref());
+        assert_eq!(next["fields"], fields);
+        assert_ne!(
+            next["cursor"],
+            url.as_str(),
+            "full URLs cause Invalid cursor"
+        );
+    }
+    // Preserve a literal encoded substring inside the opaque token: no second decode.
+    assert_eq!(pages[1]["request"]["cursor"], "page+2/=%2F");
+    assert!(pages.last().unwrap()["next_page_url"].is_null());
+    let rules = coordinator_rules();
+    for required in [
+        "URL-decode its value exactly once",
+        "cursor and fields must be the ONLY query arguments on subsequent calls",
+        "SAME required path identifiers",
+        "Even a page containing no matching stories must be followed",
+        "an empty page alone does not prove completion",
+    ] {
+        assert!(
+            rules.contains(required),
+            "missing pagination rule: {required}"
+        );
+    }
+}
+
+#[test]
+fn shortcut_scope_contract_requires_supported_listing_or_complete_filtered_fallback() {
+    let rules = coordinator_rules();
+    for required in [
+        "list_workflow_stories with the verified workflow_public_id",
+        "Use a workflow-scoped search only if its schema explicitly supports that scope",
+        "Do not invent a workflow: search operator",
+        "paginate list_stories across the entire workspace",
+        "search_stories with query=\"is:story\"",
+        "Never send an empty or whitespace-only search",
+        "Verify each story's numeric workflow ID against the resolved ID",
+        "its state ID against that workflow's states",
+        "Exclude archived and other-workflow stories from counts and candidates",
+        "Missing membership/status fields require a direct read",
+        "Count unique story IDs only after all pages are read",
+        "never use workspace total_items as the configured workflow's count",
+        "112 in Platform contribute only 3 to Agents' backlog",
+    ] {
+        assert!(
+            rules.contains(required),
+            "missing workflow isolation rule: {required}"
+        );
+    }
+}
+
+#[test]
+fn shortcut_pagination_failure_contract_forbids_partial_counts_and_assignments() {
+    let rules = coordinator_rules();
+    for required in [
+        "Missing/empty/duplicate cursor parameters",
+        "malformed URLs/encoding, repeated cursors, inconsistent totals",
+        "ANY page error make the read incomplete",
+        "Do not combine a restarted read with pages from an earlier attempt",
+        "do not claim or assign ANY story for that project, including recovery from an early page",
+        "read=partial (failed if no page succeeded)",
+        "counts=null and counted_assignment=null",
+        "failed enumeration alone never proves deletion or movement",
+        "If page 2 fails, even a Ready story on page 1 cannot authorize an assignment",
+    ] {
+        assert!(
+            rules.contains(required),
+            "missing pagination failure rule: {required}"
+        );
+    }
+}
+
+#[test]
 fn shortcut_configuration_is_exclusive_scoped_and_backward_compatible() {
     let old = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Board'\nmode='master'\nbase_branch='master'\n";
     let old_config: Config = toml::from_str(old).unwrap();
@@ -427,6 +586,8 @@ args = ["--fixture"]
         "list_workflows",
         "get_workflow",
         "list_workflow_states",
+        "list_workflow_stories",
+        "list_stories",
         "search_stories",
         "get_story",
         "list_story_comments",
