@@ -16,7 +16,7 @@ in this order, preserving the labels and AppFlowy color names exactly:
 | ----------- | --------- |
 | Backlog     | Cream     |
 | Ready       | Blue      |
-| In progress | Yellow    |
+| In Progress | Yellow    |
 | Review      | Purple    |
 | Done        | Aqua      |
 | Blocked     | LightPink |
@@ -39,20 +39,7 @@ and do not claim the board is ready.
 When verified, return the board's URL and name (plus database/view IDs if
 available). Explain that Maistro's project configuration must target this new
 board, not its parent page: use its URL as `appflowy_url`, or its uniquely
-resolvable name as `appflowy_page`, but not both. Include this status mapping
-under the corresponding project, because Maistro otherwise defaults to
-`In Progress` with an uppercase P:
-
-```toml
-[projects.statuses]
-backlog = "Backlog"
-ready = "Ready"
-in_progress = "In progress"
-review = "Review"
-done = "Done"
-blocked = "Blocked"
-cancelled = "Cancelled"
-```
+resolvable name as `appflowy_page`, but not both.
 
 Explain how to start: add stories with their complete requirements and
 acceptance criteria, keep drafts in Backlog, and move a story to Ready when it
