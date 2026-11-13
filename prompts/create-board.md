@@ -12,15 +12,15 @@ a primary text field for story titles. Create a single-select field named
 `Status` and group the board view by that field. Configure exactly these options
 in this order, preserving the labels and AppFlowy color names exactly:
 
-| Status | Color |
-| --- | --- |
-| Backlog | iron |
-| Ready | azure |
-| In progress | Mango |
-| Review | mauve |
-| Done | jade |
-| Blocked | camelia |
-| Cancelled | iron |
+| Status      | Color     |
+| ----------- | --------- |
+| Backlog     | Cream     |
+| Ready       | Blue      |
+| In progress | Yellow    |
+| Review      | Purple    |
+| Done        | Aqua      |
+| Blocked     | LightPink |
+| Cancelled   | Cream     |
 
 Replace any template status options on this new board with the options above.
 Leave the board empty; remove any automatically generated sample stories from
