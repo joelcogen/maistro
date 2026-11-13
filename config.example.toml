@@ -33,8 +33,10 @@ id = "example"
 repo = "/absolute/path/to/repo"
 appflowy_page = "Example Backlog"
 # Use appflowy_url instead of appflowy_page if the name is ambiguous.
-# For Shortcut, replace the AppFlowy target with your actual workflow link:
-# shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123"
+# For Shortcut, replace the AppFlowy target with exactly ONE workflow selector:
+# shortcut_workflow = "Agents" # Exact, unique name in the MCP connection's workspace.
+# shortcut_workflow_id = 500005096 # Positive numeric workflow ID, not a story ID.
+# shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123" # Existing links still work.
 # Optional per-project MCP server name (also supported for AppFlowy):
 # mcp_server = "shortcut" # Default: shortcut for Shortcut, agents.mcp_server otherwise.
 # Authorize Shortcut MCP in the selected CLI before starting; see README.md.

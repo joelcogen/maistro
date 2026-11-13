@@ -60,7 +60,8 @@ configuration while preserving an existing `config.toml`. Edit
 then start the service as described below.
 
 Each project needs a stable ID, a dedicated local Git checkout, exactly one
-`appflowy_page`, `appflowy_url`, or `shortcut_url`, a `mode`, and a `base_branch`.
+`appflowy_page`, `appflowy_url`, `shortcut_workflow`, `shortcut_workflow_id`, or
+`shortcut_url`, a `mode`, and a `base_branch`.
 Each repository and its linked worktrees must belong to a single project. Maistro
 locks each repository for the daemon's lifetime. Reserve these checkouts for
 Maistro and preserve interrupted work when restarting.
@@ -280,18 +281,29 @@ as observations; the coordinator authorizes work from fresh source reads.
 
 ## Shortcut projects
 
-Set `shortcut_url` to a link identifying one workflow. The coordinator resolves it
-with MCP and verifies membership before claims and updates. Resolving the link
-and mapping statuses must succeed before dispatch; failures produce a diagnostic
-and retry. Scope includes all non-archived stories in that workflow. Use a
-dedicated workflow to limit the available stories.
+Select one workflow with `shortcut_workflow` (exact, case-sensitive name),
+`shortcut_workflow_id` (positive integer), or an existing `shortcut_url` workflow
+link. Set exactly one selector; combining selectors is rejected even if they refer
+to the same workflow. Names must be unique in the configured MCP connection's
+workspace; use an ID when names are ambiguous. Numeric-looking names remain names.
+
+The coordinator resolves the name, ID or link through that project's configured
+MCP connection on each pass and verifies membership before claims and updates.
+Missing, inaccessible or ambiguous workflows produce a diagnostic and retry without
+dispatch or source writes. Maistro never falls back to a default workflow or the
+whole workspace. Workflow resolution and status mapping must succeed before work
+can proceed. Scope includes all non-archived stories in that workflow. Use a
+dedicated workflow to limit available stories; space, team and label selectors are
+not supported. Name/ID selectors do not require or generate a dashboard workflow link.
 
 ```toml
 [[projects]]
 id = "shortcut-service"
 repo = "/absolute/path/to/service"
-shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123"
-# Replace the illustrative URL above with your workflow's actual link.
+shortcut_workflow = "Agents"
+# Or replace the name selector with one of these:
+# shortcut_workflow_id = 500005096
+# shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123"
 mcp_server = "shortcut" # Optional; name of this workspace's entry in the selected CLI.
 mode = "pr"
 base_branch = "main"

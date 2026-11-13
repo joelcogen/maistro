@@ -314,6 +314,77 @@ fn shortcut_configuration_is_exclusive_scoped_and_backward_compatible() {
 }
 
 #[test]
+fn workflow_selectors_validate_and_preserve_source_identity() {
+    let base = "[[projects]]\nid='p'\nrepo='/tmp'\nmode='master'\nbase_branch='master'\n";
+    let selectors = [
+        "appflowy_page='Board'",
+        "appflowy_url='https://appflowy.example/board'",
+        "shortcut_url='https://app.shortcut.com/team/settings/workflows/42'",
+        "shortcut_workflow='Agents'",
+        "shortcut_workflow_id=500005096",
+    ];
+    for (index, selector) in selectors.iter().enumerate() {
+        let mut config: Config = toml::from_str(&format!("{base}{selector}")).unwrap();
+        config.validate().unwrap();
+        let shortcut = index >= 2;
+        let project = &config.projects[0];
+        assert_eq!(project.is_shortcut(), shortcut);
+        assert_eq!(
+            project.mcp_server(&config.agents),
+            if shortcut { "shortcut" } else { "appflowy" }
+        );
+        if index >= 3 {
+            assert_eq!(project.board_url(), None);
+            let prompt = maistro::agent::worker_prompt(project, &assignment("p")).unwrap();
+            assert!(prompt.contains("Shortcut story: story-1"));
+        }
+        config.projects[0].mcp_server = Some("my_workspace".into());
+        assert_eq!(
+            config.projects[0].mcp_server(&config.agents),
+            "my_workspace"
+        );
+        for other in &selectors[index + 1..] {
+            let conflicting: Config =
+                toml::from_str(&format!("{base}{selector}\n{other}")).unwrap();
+            assert!(
+                conflicting
+                    .validate()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("exactly one")
+            );
+        }
+    }
+    for invalid in [
+        "shortcut_workflow=''",
+        "shortcut_workflow='   '",
+        "shortcut_workflow_id=0",
+    ] {
+        let config: Config = toml::from_str(&format!("{base}{invalid}")).unwrap();
+        assert!(config.validate().is_err(), "accepted {invalid}");
+    }
+    for invalid in [
+        "shortcut_workflow_id=-1",
+        "shortcut_workflow_id='500005096'",
+        "shortcut_workflow_id=1.5",
+        "shortcut_workflow_id=true",
+        "shortcut_workflow=500005096",
+    ] {
+        assert!(
+            toml::from_str::<Config>(&format!("{base}{invalid}")).is_err(),
+            "accepted {invalid}"
+        );
+    }
+    let named: Config = toml::from_str(&format!("{base}shortcut_workflow='500005096'")).unwrap();
+    named.validate().unwrap();
+    assert_eq!(
+        named.projects[0].shortcut_workflow.as_deref(),
+        Some("500005096")
+    );
+    assert_eq!(named.projects[0].shortcut_workflow_id, None);
+}
+
+#[test]
 fn source_mcp_policies_reuse_connections_and_expose_only_coordination_tools() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
@@ -377,6 +448,17 @@ args = ["--fixture"]
             !enabled.contains(&toml::Value::from(tool)),
             "unexpected {tool}"
         );
+    }
+    // Every selector must expose the same workflow resolution and lifecycle tools.
+    for by_id in [false, true] {
+        let mut selected = config.projects[0].clone();
+        selected.shortcut_url = None;
+        if by_id {
+            selected.shortcut_workflow_id = Some(500005096);
+        } else {
+            selected.shortcut_workflow = Some("Agents".into());
+        }
+        assert_eq!(codex.mcp_config(&selected).unwrap(), shortcut);
     }
     config.projects[0].shortcut_url = None;
     config.projects[0].appflowy_page = Some("Board".into());
@@ -477,6 +559,8 @@ fn optional_states_preserve_defaults_and_validate_enabled_labels() {
     for source in [
         "appflowy_page='Board'",
         "shortcut_url='https://app.shortcut.com/team/settings/workflows/42'",
+        "shortcut_workflow='Agents'",
+        "shortcut_workflow_id=500005096",
     ] {
         let base = format!(
             "[[projects]]\nid='p'\nrepo='/tmp'\n{source}\nmode='master'\nbase_branch='main'\n"

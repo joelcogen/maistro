@@ -101,6 +101,8 @@ if coordinator:
             setting = ','.join(t for t in setting.split(',') if t.startswith(f"mcp__{project['mcp_server']}__"))
         if source == 'Shortcut':
             assert 'get_story' in setting and 'update_story' in setting
+            assert 'list_workflows' in setting and 'get_workflow' in setting
+            assert 'list_workflow_states' in setting
             assert 'update_row_cells' not in setting and 'create_story_comment' in setting
         else:
             assert source == 'AppFlowy' and 'update_row_cells' in setting
@@ -120,7 +122,7 @@ if coordinator:
             result['observations'].append(dict(project_id=project['id'], counts=counts,
                                                read='complete', reason='no_eligible_work'))
         for active in snapshot['active']:
-            if board[active['project_id']]['status'] == 'Cancelled':
+            if board[active['project_id']]['status'] == 'Cancelled' or (ROOT / 'archived').exists():
                 result['cancel'].append(active)
         # Simulate an unavailable AppFlowy write while a completion remains pending.
         if snapshot['pending'] and (ROOT / 'outage').exists():
@@ -140,7 +142,7 @@ if coordinator:
         busy.update(c['story']['project_id'] for c in snapshot['pending'])
         for project in projects:
             story = board[project['id']]
-            if project['id'] in busy or story['status'] not in ('Ready', 'In Progress'):
+            if project['id'] in busy or story['status'] not in ('Ready', 'In Progress') or (ROOT / 'archived').exists():
                 continue
             result['assignments'].append(dict(project_id=project['id'], story_id=story['id'],
                                              title='Fixture story', story_url='https://appflowy.example/story', context='Complete fixture requirements',

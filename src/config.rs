@@ -123,6 +123,10 @@ pub struct Project {
     pub appflowy_page: Option<String>,
     /// Link identifying one Shortcut workflow in the configured MCP workspace.
     pub shortcut_url: Option<String>,
+    /// Exact workflow name in the configured MCP workspace; must resolve uniquely.
+    pub shortcut_workflow: Option<String>,
+    /// Positive workflow ID in the configured MCP workspace.
+    pub shortcut_workflow_id: Option<u64>,
     /// Selected provider MCP server name; defaults to shortcut or agents.mcp_server.
     pub mcp_server: Option<String>,
     pub mode: Mode,
@@ -137,6 +141,8 @@ pub struct Project {
 impl Project {
     pub fn is_shortcut(&self) -> bool {
         self.shortcut_url.is_some()
+            || self.shortcut_workflow.is_some()
+            || self.shortcut_workflow_id.is_some()
     }
     pub fn source_name(&self) -> &'static str {
         if self.is_shortcut() {
@@ -299,12 +305,18 @@ impl Config {
                 "projects must have different repositories"
             );
             ensure!(
-                [&p.appflowy_url, &p.appflowy_page, &p.shortcut_url]
-                    .iter()
-                    .filter(|v| v.is_some())
-                    .count()
+                [
+                    p.appflowy_url.is_some(),
+                    p.appflowy_page.is_some(),
+                    p.shortcut_url.is_some(),
+                    p.shortcut_workflow.is_some(),
+                    p.shortcut_workflow_id.is_some(),
+                ]
+                .into_iter()
+                .filter(|present| *present)
+                .count()
                     == 1,
-                "{}: specify exactly one appflowy_url, appflowy_page or shortcut_url",
+                "{}: specify exactly one appflowy_url, appflowy_page, shortcut_url, shortcut_workflow or shortcut_workflow_id",
                 p.id
             );
             ensure!(
@@ -312,8 +324,14 @@ impl Config {
                     .as_ref()
                     .or(p.appflowy_page.as_ref())
                     .or(p.shortcut_url.as_ref())
-                    .is_some_and(|s| !s.trim().is_empty()),
+                    .or(p.shortcut_workflow.as_ref())
+                    .is_none_or(|s| !s.trim().is_empty()),
                 "empty board target"
+            );
+            ensure!(
+                p.shortcut_workflow_id.is_none_or(|id| id > 0),
+                "{}: shortcut_workflow_id must be a positive integer",
+                p.id
             );
             ensure!(
                 !p.base_branch.trim().is_empty()

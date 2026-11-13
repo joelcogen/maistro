@@ -78,6 +78,8 @@ impl Fixture {
                 appflowy_page: Some(format!("board-{i}")),
                 appflowy_url: None,
                 shortcut_url: None,
+                shortcut_workflow: None,
+                shortcut_workflow_id: None,
                 mcp_server: None,
                 mode: *mode,
                 base_branch: "main".into(),
@@ -154,6 +156,15 @@ impl Fixture {
         // Claude mode must not require a Codex installation or login/config.
         fs::remove_dir_all(&self.config.agents.codex_home).unwrap();
         self.config.agents.codex = "/nonexistent-codex".into();
+    }
+    fn workflow_selector(&mut self, index: usize, by_id: bool) {
+        let project = &mut self.config.projects[index];
+        project.shortcut_url = None;
+        if by_id {
+            project.shortcut_workflow_id = Some(500005096);
+        } else {
+            project.shortcut_workflow = Some("Agents".into());
+        }
     }
     fn models(&mut self, small: &str, big: &str) {
         self.config.agents.small_model = Some(small.into());
@@ -1058,9 +1069,124 @@ async fn mixed_sources_complete_with_per_project_servers_and_stable_markers() {
 }
 
 #[tokio::test]
+async fn workflow_selectors_reach_both_coordinators_with_resolution_and_scope_rules() {
+    for claude in [false, true] {
+        for by_id in [false, true] {
+            let mut f = Fixture::new(&[Mode::Master]);
+            f.shortcut(0, "shortcut_team");
+            f.workflow_selector(0, by_id);
+            f.config.projects[0].statuses.ready = "Available".into();
+            if claude {
+                f.claude();
+            }
+            f.config.validate().unwrap();
+            let runner = maistro::agent::AgentRunner::new(f.config.clone());
+            runner
+                .coordinate(
+                    &Default::default(),
+                    &["p0".into()],
+                    &CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let prompt = fs::read_to_string(f.temp.path().join("coordinator-prompt.txt")).unwrap();
+            let projects: Value = serde_json::from_str(
+                prompt
+                    .split("\nPROJECTS=")
+                    .nth(1)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(projects[0]["source"], "Shortcut");
+            assert_eq!(projects[0]["mcp_server"], "shortcut_team");
+            assert!(projects[0]["shortcut_url"].is_null());
+            assert_eq!(
+                projects[0]["shortcut_workflow"],
+                if by_id { Value::Null } else { json!("Agents") }
+            );
+            assert_eq!(
+                projects[0]["shortcut_workflow_id"],
+                if by_id { json!(500005096) } else { Value::Null }
+            );
+            assert_eq!(projects[0]["statuses"]["ready"], "Available");
+            // Resolution is performed by the coordinator, so guard its contract as
+            // well as the actual CLI/MCP handoff (no live source calls in tests).
+            let rules = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+            for required in [
+                "Reject conflicting selectors",
+                "exact, case-sensitive name match",
+                "following pagination",
+                "require the exact numeric ID to exist and be accessible in this workspace",
+                "Missing, inaccessible or ambiguous workflows",
+                "ambiguous_board and retry_projects",
+                "do not claim, assign or write results",
+                "or cancel work based on failed resolution",
+                "Never silently use the default workflow, an entire workspace",
+                "WITHIN that workflow",
+                "Scope story enumeration to this workflow",
+                "Recheck workflow membership as well as status before every write/claim",
+                "confirmed archive or movement outside the workflow revokes work",
+                "First recover an existing In Progress story",
+            ] {
+                assert!(
+                    rules.contains(required),
+                    "missing coordinator rule: {required}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn workflow_selectors_preserve_archive_cancellation_with_cancelled_disabled() {
+    for claude in [false, true] {
+        for by_id in [false, true] {
+            let mut f = Fixture::new(&[Mode::Master]);
+            f.shortcut(0, "shortcut");
+            f.workflow_selector(0, by_id);
+            f.config.projects[0].statuses.cancelled = None;
+            if claude {
+                f.claude();
+            }
+            f.config.validate().unwrap();
+            f.touch("hang");
+            let (token, job) = f.start();
+            let started = f
+                .wait(|| f.events().iter().any(|e| e["kind"] == "worker_start"))
+                .await;
+            // The simulated coordinator reports archive cancellation independently
+            // of the story's workflow status, as the real coordinator must do.
+            f.touch("archived");
+            let stopped = f
+                .wait(|| {
+                    f.events().iter().any(|e| {
+                        e["kind"] == "stopped" && e["model"] == f.config.agents.big_model()
+                    })
+                })
+                .await;
+            f.stop(token, job).await;
+            assert!(started && stopped, "events: {:?}", f.events());
+            assert_eq!(f.board()["p0"]["status"], "In Progress");
+            assert!(f.board()["p0"].get("result").is_none());
+            assert_eq!(
+                f.events()
+                    .iter()
+                    .filter(|e| e["kind"] == "worker_start")
+                    .count(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn shortcut_only_periodic_reads_find_new_work_and_cancel_without_rust_mcp() {
     let mut f = Fixture::new(&[Mode::Master]);
     f.shortcut(0, "shortcut");
+    f.workflow_selector(0, false);
     // Shortcut-only installations do not need an AppFlowy MCP entry.
     fs::write(
         f.config.agents.codex_home.join("config.toml"),
@@ -1102,6 +1228,7 @@ async fn shortcut_only_periodic_reads_find_new_work_and_cancel_without_rust_mcp(
 async fn shortcut_recovers_pushed_commit_after_result_delivery_failure() {
     let mut f = Fixture::new(&[Mode::Master]);
     f.shortcut(0, "shortcut");
+    f.workflow_selector(0, true);
     f.touch("outage");
     let (token, job) = f.start();
     let pending = f
@@ -1156,6 +1283,7 @@ async fn global_models_apply_to_coordinator_and_every_codex_worker() {
 async fn claude_mixed_sources_models_git_modes_and_recovery() {
     let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
     f.shortcut(1, "shortcut_team");
+    f.workflow_selector(1, false);
     f.claude();
     f.models("custom-haiku", "custom-opus");
     f.touch("parallel");

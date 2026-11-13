@@ -32,11 +32,25 @@ Source-specific rules (apply the common lifecycle below to both sources):
 
 - AppFlowy: resolve appflowy_page/appflowy_url in that project's mcp_server;
   use row cells for statuses, full page Markdown and all comment pages for context.
-- Shortcut: shortcut_url must resolve to exactly ONE workflow in that server's
-  authenticated workspace. Inspect the link and available workflows/states; verify
-  workspace identity against returned app URLs. Never silently use the default
-  workflow, an entire workspace, a saved search, or a story's workflow as a fallback
-  for an ambiguous link. Report ambiguous_board and retry if resolution fails.
+- Shortcut: exactly one of shortcut_workflow, shortcut_workflow_id, or shortcut_url
+  must be supplied (the other selectors are null). Reject conflicting selectors,
+  even if they appear to identify the same workflow. Resolve the selector through
+  that project's configured MCP server in its authenticated workspace on each pass:
+
+  - shortcut_workflow: list all available workflows, following pagination, and
+    require exactly one exact, case-sensitive name match. Do not use partial or
+    fuzzy matches; a numeric-looking name is still a name, not an ID.
+  - shortcut_workflow_id: get/list workflows and require the exact numeric ID to
+    exist and be accessible in this workspace; never interpret it as a story ID.
+  - shortcut_url: inspect the link and available workflows/states, require exactly
+    one matching workflow, and verify workspace identity against returned app URLs.
+
+  Resolve to one verified workflow ID before reading stories or mapping states.
+  Missing, inaccessible or ambiguous workflows must produce an actionable note,
+  ambiguous_board and retry_projects; do not claim, assign or write results for
+  that project, or cancel work based on failed resolution. Never silently use the
+  default workflow, an entire workspace, a saved search, or a story's workflow as a
+  fallback for any unresolved selector. Never infer a workflow URL from a name or ID.
   Map all enabled configured status labels to unique state IDs WITHIN that workflow
   before selecting or updating work; missing/duplicate states are a configuration
   problem to report and retry, not permission to invent states or use state types.
