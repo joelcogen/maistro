@@ -1,9 +1,9 @@
-//! Complete, canonical observations only. No workflow/status interpretation or board mirror.
+//! Staged, canonical change observations. Status filtering never authorizes work.
 use crate::{config::Project, mcp::Client};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub type Fingerprint = [u8; 32];
 
@@ -44,6 +44,41 @@ fn keyed(items: &Value) -> Result<BTreeMap<String, Value>> {
         );
     }
     Ok(result)
+}
+
+// Unknown schemas/cells retain full reads instead of hiding requirement edits.
+fn needs_context(row: &Value, fields: &BTreeMap<String, Value>, project: &Project) -> bool {
+    let status_fields: Vec<_> = fields.values().filter(|f| f["name"] == "Status").collect();
+    if status_fields.len() != 1 {
+        return true;
+    }
+    let field = status_fields[0];
+    let status = row["cells"]
+        .get("Status")
+        .or_else(|| field["id"].as_str().and_then(|id| row["cells"].get(id)))
+        .and_then(Value::as_str);
+    let Some(status) = status else {
+        return true;
+    };
+    let s = &project.statuses;
+    // Unknown labels are conservative; disabled labels are not interpreted.
+    ![
+        Some(s.backlog.as_str()),
+        Some(s.done.as_str()),
+        s.review.as_deref(),
+        s.cancelled.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|label| label == status)
+}
+
+fn referenced_rows(value: &Value, ids: &BTreeSet<String>) -> BTreeSet<String> {
+    let text = value.to_string();
+    ids.iter()
+        .filter(|id| text.contains(id.as_str()))
+        .cloned()
+        .collect()
 }
 
 struct Board {
@@ -159,7 +194,7 @@ impl Client {
         }
         Ok(serde_json::to_value(comments)?)
     }
-    async fn scan(&self, board: &Board) -> Result<Fingerprint> {
+    async fn scan(&self, board: &Board, project: &Project) -> Result<Fingerprint> {
         let args = json!({"workspace_id":board.workspace,"database_id":board.database});
         let metadata = self
             .call(
@@ -187,33 +222,72 @@ impl Client {
             );
             for (row_id, row) in details {
                 ensure!(row["cells"].is_object(), "row cells missing");
-                let has_doc = row["has_doc"]
-                    .as_bool()
-                    .context("row document presence missing")?;
-                let body = if has_doc {
-                    self.call(
-                        "get_page_markdown",
-                        json!({"workspace_id":board.workspace,"page_id":row_id}),
-                    )
-                    .await?
-                } else {
-                    Value::Null
-                };
-                ensure!(!has_doc || body.is_string(), "incomplete row document");
-                let comments = self.comments(&board.workspace, &row_id, "row").await?;
-                let inline_comments = if has_doc {
-                    let doc = uuid::Uuid::new_v5(
-                        &uuid::Uuid::parse_str(&row_id).context("invalid row UUID")?,
-                        b"document_id",
-                    );
-                    self.comments(&board.workspace, &doc.to_string(), "document")
-                        .await?
-                } else {
-                    Value::Null
-                };
-                rows.insert(row_id, json!({"cells":row["cells"],"body":body,"comments":comments,"inline_comments":inline_comments}));
+                ensure!(row["has_doc"].is_boolean(), "row document presence missing");
+                rows.insert(row_id, row);
             }
         }
+        // Complete the cheap cell scan before fetching any bodies or comments.
+        let all_ids: BTreeSet<_> = rows.keys().cloned().collect();
+        let mut pending: BTreeSet<_> = rows
+            .iter()
+            .filter(|(_, row)| needs_context(row, &fields, project))
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut loaded = BTreeMap::new();
+        while let Some(row_id) = pending.pop_first() {
+            if loaded.contains_key(&row_id) {
+                continue;
+            }
+            let row = &rows[&row_id];
+            let has_doc = row["has_doc"].as_bool().unwrap();
+            let body = if has_doc {
+                self.call(
+                    "get_page_markdown",
+                    json!({"workspace_id":board.workspace,"page_id":row_id}),
+                )
+                .await?
+            } else {
+                Value::Null
+            };
+            ensure!(!has_doc || body.is_string(), "incomplete row document");
+            let comments = self.comments(&board.workspace, &row_id, "row").await?;
+            let inline_comments = if has_doc {
+                let doc = uuid::Uuid::new_v5(
+                    &uuid::Uuid::parse_str(&row_id).context("invalid row UUID")?,
+                    b"document_id",
+                );
+                self.comments(&board.workspace, &doc.to_string(), "document")
+                    .await?
+            } else {
+                Value::Null
+            };
+            let context = json!({"cells":row["cells"],"body":body,
+                "comments":comments,"inline_comments":inline_comments});
+            pending.extend(referenced_rows(&context, &all_ids));
+            // Free-form dependency cells without a resolvable row ID may name
+            // stories rather than link them. Preserve detection conservatively.
+            if row["cells"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .any(|(key, value)| {
+                    let name = fields
+                        .get(key)
+                        .and_then(|f| f["name"].as_str())
+                        .unwrap_or(key);
+                    name.eq_ignore_ascii_case("dependencies")
+                        && value.as_str().is_some_and(|text| !text.trim().is_empty())
+                        && referenced_rows(value, &all_ids).is_empty()
+                })
+            {
+                pending.extend(all_ids.iter().cloned());
+            }
+            loaded.insert(row_id, context);
+        }
+        let cells: BTreeMap<_, _> = rows
+            .iter()
+            .map(|(id, row)| (id, json!({"cells":row["cells"],"has_doc":row["has_doc"]})))
+            .collect();
         // Membership/schema reads bookend each scan. Two equal complete scans
         // below also protect offset paging and cross-resource races. This is
         // still eventual consistency, not a transactional snapshot.
@@ -228,13 +302,13 @@ impl Client {
         Ok(fingerprint(
             &json!({"workspace":board.workspace,"database":board.database,"view":board.view,
             "metadata":{"name":metadata["name"],"icon":metadata["icon"],"layout":metadata["layout"],"extra":metadata["extra"]},
-            "fields":fields,"rows":rows}),
+            "fields":fields,"rows":cells,"context":loaded}),
         ))
     }
     pub async fn observe(&self, project: &Project) -> Result<Fingerprint> {
         let board = self.resolve(project).await?;
-        let first = self.scan(&board).await?;
-        let second = self.scan(&board).await?;
+        let first = self.scan(&board, project).await?;
+        let second = self.scan(&board, project).await?;
         ensure!(
             first == second,
             "board changed during observation; retrying next interval"
@@ -304,7 +378,7 @@ mod tests {
             .unwrap();
             let project: Project = serde_json::from_value(json!({"id":"p0","repo":"/unused","appflowy_page":"board-0","mode":"master","base_branch":"master"})).unwrap();
             let data = json!({"p0":{"rows":[
-                {"id":"11111111-1111-1111-1111-111111111111","title":"Done story","status":"Done","body":"# Requirements\n- [ ] task", "comments":[
+                {"id":"11111111-1111-1111-1111-111111111111","title":"Ready story","status":"Ready","body":"# Requirements\n- [ ] task", "comments":[
                     {"comment_id":"c1","content":"first","author_id":"user"},
                     {"comment_id":"c2","content":"second","author_id":"luna"},
                     {"comment_id":"c3","content":"third","author_id":"astra"}
@@ -401,6 +475,91 @@ mod tests {
         assert_eq!(initial, f.observe(&client).await);
         client.close().await;
     }
+    #[tokio::test]
+    async fn staged_reads_skip_inactive_context_but_track_requirements_and_dependencies() {
+        let (mut f, client) = Fixture::new().await;
+        let dependency = "22222222-2222-2222-2222-222222222222";
+        f.data["p0"]["rows"][1]["body"] = json!("dependency requirements");
+        f.data["p0"]["rows"][1]["status"] = json!("Done");
+        f.save();
+        let baseline = f.observe(&client).await;
+        // Inactive body changes alone no longer force coordination.
+        f.data["p0"]["rows"][1]["body"] = json!("unrelated edit");
+        f.save();
+        assert_eq!(baseline, f.observe(&client).await);
+        // All cells remain watched, including dependency status transitions.
+        f.data["p0"]["rows"][1]["status"] = json!("Backlog");
+        f.save();
+        assert_ne!(baseline, f.observe(&client).await);
+        // A body link makes even a Done dependency's context relevant.
+        f.data["p0"]["rows"][0]["body"] = json!(format!("Depends on {dependency}"));
+        f.data["p0"]["rows"][1]["status"] = json!("Done");
+        f.save();
+        let linked = f.observe(&client).await;
+        f.data["p0"]["rows"][1]["body"] = json!("changed linked requirement");
+        f.save();
+        assert_ne!(linked, f.observe(&client).await);
+        // Blocked stories still detect human clarifications in comments.
+        f.data["p0"]["rows"][0]["status"] = json!("Blocked");
+        f.save();
+        let blocked = f.observe(&client).await;
+        f.data["p0"]["rows"][0]["comments"][0]["content"] = json!("clarification");
+        f.save();
+        assert_ne!(blocked, f.observe(&client).await);
+        // An entirely inactive board performs no body/comment reads at all.
+        f.data["p0"]["rows"][0]["status"] = json!("Done");
+        f.save();
+        fs::write(f.root.path().join("poll-events"), "").unwrap();
+        f.observe(&client).await;
+        let events = fs::read_to_string(f.root.path().join("poll-events")).unwrap();
+        assert!(!events.contains("get_page_markdown"));
+        assert!(!events.contains("list_comments"));
+        // Becoming Ready makes previously skipped context visible immediately.
+        f.data["p0"]["rows"][1]["status"] = json!("Ready");
+        f.save();
+        f.observe(&client).await;
+        assert!(
+            fs::read_to_string(f.root.path().join("poll-events"))
+                .unwrap()
+                .contains("get_page_markdown")
+        );
+        client.close().await;
+    }
+
+    #[test]
+    fn context_selection_supports_named_cells_custom_labels_and_unknown_schemas() {
+        let mut project: Project = serde_json::from_value(json!({
+            "id":"p", "repo":"/unused", "appflowy_page":"Board",
+            "mode":"master", "base_branch":"main"
+        }))
+        .unwrap();
+        project.statuses.done = "Shipped".into();
+        let fields = keyed(&json!([{"id":"status-id","name":"Status"}])).unwrap();
+        assert!(!needs_context(
+            &json!({"cells":{"Status":"Shipped"}}),
+            &fields,
+            &project
+        ));
+        assert!(!needs_context(
+            &json!({"cells":{"status-id":"Shipped"}}),
+            &fields,
+            &project
+        ));
+        for status in ["Ready", "In Progress", "Blocked", "Unknown", "Done"] {
+            assert!(needs_context(
+                &json!({"cells":{"Status":status}}),
+                &fields,
+                &project
+            ));
+        }
+        assert!(needs_context(&json!({"cells":{}}), &fields, &project));
+        assert!(needs_context(
+            &json!({"cells":{"Status":"Shipped"}}),
+            &BTreeMap::new(),
+            &project
+        ));
+    }
+
     #[tokio::test]
     async fn failures_and_partial_reads_retain_baseline_and_recovery_detects_changes() {
         let (mut f, client) = Fixture::new().await;

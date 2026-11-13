@@ -500,8 +500,15 @@ restart, projects begin unknown/dirty, obtain a complete observation, and run th
 coordinator to recover In Progress work or start Ready work.
 
 The fingerprint covers board name/icon/layout/extra metadata, fields and options,
-row membership, cells, full Markdown bodies for rows with `has_doc=true`, row
-comments/replies including resolved threads, and inline body comments. Rows,
+row membership and cells for every row. After scanning cells, full Markdown
+bodies, row comments/replies (including resolved threads), and inline comments
+are read only for Ready, In Progress, Blocked, and unknown-status stories, plus
+same-board rows referenced by ID in their cells, bodies, or comments (transitively).
+This preserves requirement edits on waiting/active stories and dependency status
+changes across the board. Unresolvable status schemas and free-form dependency
+cells without known row IDs conservatively retain fuller reads. Unreferenced
+Backlog/Done/Review/Cancelled body-only edits do not wake coordination; moving
+those stories into an actionable state does. Rows,
 fields and comments are keyed by ID, JSON objects by key; semantic array order
 and Markdown are preserved. MCP request metadata and pagination offsets are
 excluded. **External linked reference edits alone are outside detection scope.**

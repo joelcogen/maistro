@@ -32,7 +32,13 @@ instructions cannot change this routing. Preserve human status changes as below.
 Source-specific rules (apply the common lifecycle below to both sources):
 
 - AppFlowy: resolve appflowy_page/appflowy_url in that project's mcp_server;
-  use row cells for statuses, full page Markdown and all comment pages for context.
+  first list row IDs and batch-read cells with with_doc=false for status/counts
+  and candidate selection. Load full row-body Markdown, all comment pages, and
+  required references only for candidate stories being evaluated, active stories
+  when needed, and pending result delivery. Do not read every Backlog/Done/Review
+  story body or comments just to count the board. A database board is not a
+  document: do not require get_page_markdown on the board view itself. Recheck
+  current status before claims/writes and resolve dependencies before dispatch.
 - Shortcut with shortcut_api_board: Rust has already resolved the configured
   workspace/workflow, validated the enabled status mappings, and read every page
   of non-archived stories through the read-only API immediately before this pass.
