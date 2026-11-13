@@ -225,7 +225,11 @@ impl AgentRunner {
                 cmd.args(["-c", setting]);
             }
             let mut servers = std::collections::BTreeSet::new();
-            for project in coordinator_projects {
+            // A shared MCP connection needs the union of tools for this pass.
+            // Legacy Shortcut access is a superset of API-backed detail access.
+            let mut connection_projects = coordinator_projects.to_vec();
+            connection_projects.sort_by_key(|p| p.shortcut_api());
+            for project in connection_projects {
                 let server = project.mcp_server(&self.config.agents);
                 if servers.insert(server) {
                     cmd.args([
@@ -282,15 +286,60 @@ impl AgentRunner {
             .iter()
             .filter(|p| p.enabled && selected.contains(&p.id))
             .collect();
-        let project_context: Vec<_> = projects
-            .iter()
-            .map(|p| {
-                let mut value = serde_json::to_value(p).expect("serializable project");
-                value["mcp_server"] = json!(p.mcp_server(&self.config.agents));
-                value["source"] = json!(p.source_name());
-                value
-            })
-            .collect();
+        let mut project_context = Vec::new();
+        let mut healthy = Vec::new();
+        let mut failed = Coordination::default();
+        for p in projects {
+            let mut value = serde_json::to_value(p).expect("serializable project");
+            value["mcp_server"] = json!(p.mcp_server(&self.config.agents));
+            value["source"] = json!(p.source_name());
+            if p.shortcut_api() {
+                match crate::shortcut::board(
+                    p,
+                    Duration::from_secs(self.config.orchestrator.coordinator_timeout_seconds),
+                    cancel,
+                )
+                .await
+                {
+                    Ok(board) => value["shortcut_api_board"] = board,
+                    Err(error) => {
+                        tracing::warn!(project=%p.id, error=%format!("{error:#}"), "Shortcut API board read failed");
+                        failed.retry_projects.push(p.id.clone());
+                        failed.notes.push(format!("{}: Shortcut API board read incomplete; retrying without source writes", p.id));
+                        failed.observations.push(crate::status::BoardRead {
+                            project_id: p.id.clone(),
+                            counts: None,
+                            read: crate::status::ReadState::Failed,
+                            reason: crate::status::Reason::ReadFailed,
+                            counted_assignment: None,
+                        });
+                        continue;
+                    }
+                }
+            }
+            project_context.push(value);
+            healthy.push(p);
+        }
+        let projects = healthy;
+        if projects.is_empty() {
+            return Ok(failed);
+        }
+        // Failed API projects cannot be written, cancelled, assigned, or acknowledged
+        // by a coordinator handling other healthy projects.
+        let snapshot = Snapshot {
+            active: snapshot
+                .active
+                .iter()
+                .filter(|s| projects.iter().any(|p| p.id == s.project_id))
+                .cloned()
+                .collect(),
+            pending: snapshot
+                .pending
+                .iter()
+                .filter(|c| projects.iter().any(|p| p.id == c.story.project_id))
+                .cloned()
+                .collect(),
+        };
         // Resolve delivery before invoking the coordinator: a PR reference or a
         // changed project default must not reroute a completed master assignment.
         let pending: Vec<Value> = snapshot
@@ -331,7 +380,7 @@ impl AgentRunner {
                 ));
             }
         }
-        let result: Coordination = serde_json::from_value(
+        let mut result: Coordination = serde_json::from_value(
             self.invoke(
                 None,
                 &projects,
@@ -343,8 +392,11 @@ impl AgentRunner {
         )?;
         result.validate(
             &projects.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
-            snapshot,
+            &snapshot,
         )?;
+        result.retry_projects.extend(failed.retry_projects);
+        result.notes.extend(failed.notes);
+        result.observations.extend(failed.observations);
         Ok(result)
     }
 
@@ -451,7 +503,17 @@ fn inline_toml(value: &toml::Value) -> Result<String> {
 pub(crate) fn source_tools(
     project: &Project,
 ) -> (&'static [&'static str], &'static [&'static str]) {
-    let reads: &[&str] = if project.is_shortcut() {
+    let reads: &[&str] = if project.shortcut_api() {
+        &[
+            "get_story",
+            "list_story_comments",
+            "get_doc",
+            "search_docs",
+            "get_epic",
+            "get_iteration",
+            "read_file",
+        ]
+    } else if project.is_shortcut() {
         &[
             "list_workflows",
             "get_workflow",

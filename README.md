@@ -200,8 +200,8 @@ Keep credentials in their private configuration files.
 AppFlowy Rust polling accepts Claude stdio (`command`, `args`, `env`) and HTTP
 (`"type": "http"`, `url`, `headers`) connections. It expands `${VAR}` and
 `${VAR:-default}` substitutions. HTTP AppFlowy polling requires explicit headers;
-stdio is also supported. Shortcut uses periodic coordinator reads with Claude's
-OAuth.
+stdio is also supported. Shortcut uses read-only API polling when configured;
+Claude's OAuth connection remains responsible for individual story reads and writes.
 
 Claude runs use `--print --output-format stream-json --json-schema` with session
 persistence disabled. The coordinator loads only selected source connections and
@@ -318,38 +318,67 @@ link. Set exactly one selector; combining selectors is rejected even if they ref
 to the same workflow. Names must be unique in the configured MCP connection's
 workspace; use an ID when names are ambiguous. Numeric-looking names remain names.
 
-The coordinator resolves the name, ID or link through that project's configured
-MCP connection on each pass and verifies membership before claims and updates.
-Missing, inaccessible or ambiguous workflows produce a diagnostic and retry without
-dispatch or source writes. Maistro never falls back to a default workflow or the
-whole workspace. Workflow resolution and status mapping must succeed before work
-can proceed. Scope includes all non-archived stories in that workflow. Use a
-dedicated workflow to limit available stories; space, team and label selectors are
-not supported. Name/ID selectors do not require or generate a dashboard workflow link.
+### Read-only API polling (recommended)
 
-The coordinator prefers `list_workflow_stories` with the verified workflow ID.
-The public [v4 API](https://developer.shortcut.com/api/rest/v4#List-Workflow-Stories)
-and [OpenAPI specification](https://developer.shortcut.com/api/rest/v4/shortcut.openapi.json)
-document that listing (checked 2026-11-13). MCP availability is checked against the
-connected server's tools. If unavailable, it reads all pages of `list_stories`, or
-uses the nonempty `is:story` search, then filters by numeric workflow/state IDs.
-The [search operators](https://www.shortcut.com/help/fields-and-features/search-operators/)
-do not document `workflow:`; state names alone do not isolate workflows.
+Create a **v4 API token** in Shortcut's
+[Settings → API tokens](https://app.shortcut.com/settings/account/api-tokens).
+Select the intended workspace and grant only **read** access. The token starts
+with `sct_r_` (older read-only v4 tokens use `sct_ro_`). A v3 token or a
+write-enabled token is not accepted for polling. The
+[v4 API](https://developer.shortcut.com/api/rest/v4) is currently beta.
 
-For continuation calls the coordinator extracts and URL-decodes `cursor` from
-`next_page_url`, keeping the same fields and required path IDs and omitting other
-query parameters. Every page must succeed before selecting work or publishing
-complete counts. Failed, malformed or looping pagination leaves counts unknown
-(previous counts remain stale) and schedules a retry. Rust also rejects assignments
-for projects marked for retry. Shortcut reads remain in the coordinator's CLI/MCP
-connection; tests cover its prompt/tool contract and result handling without live
-workspace calls.
+Save the token as the only line of a private file, for example
+`~/.config/maistro/shortcut-deecide-token`. Create it with owner-only permissions
+before pasting the token; do not put the token in TOML or repository files:
+
+```sh
+install -d -m 700 ~/.config/maistro
+(umask 077; touch ~/.config/maistro/shortcut-deecide-token)
+chmod 600 ~/.config/maistro/shortcut-deecide-token
+# Open the file in your editor and paste the read-only token on one line.
+```
+
+Add **both** `shortcut_workspace` (the workspace slug from its app URL) and
+`shortcut_token_file` to the project's configuration, alongside its workflow
+selector, as shown below. Paths support `~`; relative paths resolve from the
+configuration file's directory. Each workspace needs its own token; projects in
+one workspace may share a token file. Token files are reopened each read cycle,
+so replacing the token does not require a daemon restart. `maistro validate`
+checks the local file and token format; actual authorization is checked on reads.
+
+Rust resolves the workflow and reads only that workflow's non-archived stories
+through `GET /api/v4/{workspace}/workflows/{id}/stories`, with compact fields and
+complete pagination. It validates configured state labels and numeric membership.
+Polling compares complete fingerprints; unchanged boards do not invoke the
+coordinator. Story metadata and membership changes wake it. Ready, In Progress,
+and Blocked stories also have comments, checklist items, and story links checked explicitly, along
+with linked story statuses, so these changes do not depend solely on parent
+`updated_at` timestamps. Edits only to separately linked documents are not
+independently polled; those documents are read when a story is coordinated.
+
+Before each coordination pass Rust obtains a fresh compact workflow snapshot and
+supplies it directly to the agent. MCP workflow/state/workspace enumeration tools
+are disabled when a connection serves only API-configured projects in that pass.
+When sharing a connection with a legacy project, the coordinator is instructed
+to use the supplied API snapshot for the API-configured project. The agent still uses MCP for individual
+story requirements, comments, linked documents, current active/pending checks, and
+verified writes. Keep the CLI's Shortcut OAuth login configured for the **same
+workspace**; the read-only API token does not replace write authentication.
+Incomplete API reads isolate the affected project and retry without assigning,
+cancelling, acknowledging, or writing its stories; other projects can proceed.
+Credentials are never included in prompts or dashboard data.
+
+Without the two API settings, existing CLI/MCP-only projects retain periodic
+coordinator reads, including while idle. That compatibility mode may need to
+enumerate the entire workspace if the MCP lacks workflow-scoped listing.
 
 ```toml
 [[projects]]
 id = "shortcut-service"
 repo = "/absolute/path/to/service"
 shortcut_workflow = "Agents"
+shortcut_workspace = "deecide" # Your workspace slug
+shortcut_token_file = "~/.config/maistro/shortcut-deecide-token"
 # Or replace the name selector with one of these:
 # shortcut_workflow_id = 500005096
 # shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123"
@@ -388,15 +417,13 @@ Configure entries in `agents.codex_home/config.toml` for Codex, or the top-level
 one process. Configure servers for the sources you use, with a separate server
 name for each source type and a single project per board/workflow.
 
-**Shortcut uses periodic coordinator reads, including while idle.** Rust polling
-requires explicit transport credentials, so Shortcut uses the CLI's OAuth through
-the coordinator. `poll_interval_seconds` sets the delay after a completed or failed
-pass; worker completion can trigger earlier coordination. One global pass runs at
-a time. Failures retain pending results while other projects' workers continue.
-Increase the interval to reduce idle model calls at the cost of dispatch and
-cancellation latency. The coordinator handles fresh paginated reads and verified
-claims/status writes. Successful reads are required to authorize work; cancellation
-checks pause during a Shortcut outage.
+With API polling, `poll_interval_seconds` controls the delay between Rust polls.
+Worker completion and retries can also wake coordination. Failed polls retain
+the last complete fingerprint; unchanged successful polls do not erase a pending
+retry or worker-completion event. Polling remains active while workers run so
+archiving or moving a story can trigger cancellation checks. As with AppFlowy,
+the coordinator verifies the current story before acting; cancellation checks
+pause while the source is unavailable.
 
 Optional states can be explicitly disabled with TOML booleans:
 

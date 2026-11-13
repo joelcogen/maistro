@@ -901,3 +901,60 @@ fn disabled_review_prevents_pr_workers_including_recovery() {
             .contains("PR MODE:")
     );
 }
+
+#[test]
+fn shortcut_api_config_requires_workspace_and_private_file_reference_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    fs::create_dir(dir.path().join("repo")).unwrap();
+    let base = "[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p'\nrepo='repo'\nshortcut_workflow_id=42\nmode='master'\nbase_branch='main'\n";
+    fs::write(
+        &path,
+        format!("{base}shortcut_workspace='team'\nshortcut_token_file='token'\n"),
+    )
+    .unwrap();
+    let config = Config::load(&path).unwrap();
+    let p = &config.projects[0];
+    assert!(p.shortcut_api());
+    assert_eq!(
+        p.shortcut_token_file.as_ref().unwrap(),
+        &dir.path().join("token")
+    );
+    assert!(
+        !serde_json::to_value(p)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("shortcut_token_file")
+    );
+    for settings in [
+        "shortcut_workspace='team'",
+        "shortcut_token_file='token'",
+        "shortcut_workspace='../other'\nshortcut_token_file='token'",
+        "shortcut_workspace='team'\nshortcut_token_file=''",
+    ] {
+        fs::write(&path, format!("{base}{settings}\n")).unwrap();
+        assert!(Config::load(&path).is_err(), "{settings}");
+    }
+    fs::write(
+        &path,
+        format!(
+            "{}shortcut_workspace='team'\nshortcut_token_file='token'\n",
+            base.replace("shortcut_workflow_id=42", "appflowy_page='Board'")
+        ),
+    )
+    .unwrap();
+    assert!(Config::load(&path).is_err());
+    fs::write(
+        &path,
+        format!(
+            "{}shortcut_workspace='team'\nshortcut_token_file='token'\n",
+            base.replace(
+                "shortcut_workflow_id=42",
+                "shortcut_url='https://app.shortcut.com/other/settings/workflows/42'"
+            )
+        ),
+    )
+    .unwrap();
+    assert!(Config::load(&path).is_err());
+}

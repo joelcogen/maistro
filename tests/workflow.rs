@@ -80,6 +80,8 @@ impl Fixture {
                 shortcut_url: None,
                 shortcut_workflow: None,
                 shortcut_workflow_id: None,
+                shortcut_workspace: None,
+                shortcut_token_file: None,
                 mcp_server: None,
                 mode: *mode,
                 base_branch: "main".into(),
@@ -1702,5 +1704,56 @@ async fn shortcut_master_delivers_done_with_optional_states_disabled() {
     assert_eq!(
         f.board()["p0"]["result"]["commit"],
         git(&f.temp.path().join("remote0.git"), &["rev-parse", "main"])
+    );
+}
+
+#[tokio::test]
+async fn failed_shortcut_api_read_isolated_from_other_projects_without_cli_fallback() {
+    use maistro::{
+        agent::AgentRunner,
+        model::{Completion, Report, Snapshot, StoryRef},
+    };
+    let mut f = Fixture::new(&[Mode::Master, Mode::Master]);
+    f.shortcut(1, "shortcut");
+    f.config.projects[1].shortcut_workspace = Some("team".into());
+    f.config.projects[1].shortcut_token_file = Some(f.temp.path().join("missing-token"));
+    let pending = Completion {
+        id: "pending-api".into(),
+        story: StoryRef {
+            project_id: "p1".into(),
+            story_id: "124".into(),
+        },
+        mode: Mode::Master,
+        report: Report::blocked("Still needs delivery".into()),
+    };
+    let snapshot = Snapshot {
+        active: vec![],
+        pending: vec![pending],
+    };
+    let result = AgentRunner::new(f.config.clone())
+        .coordinate(
+            &snapshot,
+            &["p0".into(), "p1".into()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.retry_projects, vec!["p1"]);
+    assert!(result.acknowledged.is_empty());
+    assert!(result.cancel.is_empty());
+    assert_eq!(result.assignments.len(), 1);
+    assert_eq!(result.assignments[0].project_id, "p0");
+    assert_eq!(f.board()["p1"]["status"], "Ready");
+    let events_before = f.events().len();
+    let result = AgentRunner::new(f.config.clone())
+        .coordinate(&snapshot, &["p1".into()], &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(result.retry_projects, vec!["p1"]);
+    assert!(result.assignments.is_empty());
+    assert_eq!(
+        f.events().len(),
+        events_before,
+        "No CLI/model call for failed API-only pass"
     );
 }

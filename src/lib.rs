@@ -10,3 +10,5 @@ pub mod status;
 mod mcp;
 mod poll;
 mod schedule;
+
+mod shortcut;

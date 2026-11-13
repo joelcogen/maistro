@@ -125,6 +125,12 @@ impl Engine {
         self.agents.validate_cli().await?;
         let mut seen = HashSet::new();
         for p in self.config.projects.iter().filter(|p| p.enabled) {
+            if p.shortcut_api() {
+                crate::shortcut::read_token(
+                    p.shortcut_token_file.as_deref().unwrap(),
+                    p.shortcut_workspace.as_deref().unwrap(),
+                )?;
+            }
             let root = git_output(&p.repo, &["rev-parse", "--show-toplevel"]).await?;
             ensure!(
                 Path::new(&root).canonicalize()? == p.repo.canonicalize()?,
@@ -184,6 +190,16 @@ impl Engine {
         let (poll_sender, mut poll_results) =
             tokio::sync::mpsc::channel(self.config.projects.len());
         for project in self.config.projects.iter().filter(|p| p.enabled) {
+            if project.shortcut_api() {
+                polls.spawn(crate::shortcut::run(
+                    project.clone(),
+                    interval,
+                    Duration::from_secs(self.config.orchestrator.coordinator_timeout_seconds),
+                    poll_sender.clone(),
+                    stop.child_token(),
+                ));
+                continue;
+            }
             if project.is_shortcut() {
                 schedule.periodically(&project.id, interval);
                 continue;

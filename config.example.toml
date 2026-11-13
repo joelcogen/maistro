@@ -5,7 +5,8 @@ port = 8044
 
 [orchestrator]
 # AppFlowy: cheap Rust polls; unchanged boards do not call the coordinator.
-# Shortcut: periodic coordinator reads through the selected CLI, including while idle.
+# Shortcut with API settings: Rust polls; unchanged workflows skip the coordinator.
+# Without API settings: periodic coordinator reads through the selected CLI.
 # Also controls bounded failure retries.
 poll_interval_seconds = 30
 coordinator_timeout_seconds = 300
@@ -40,7 +41,9 @@ repo = "/absolute/path/to/repo"
 appflowy_page = "Example Backlog"
 # Use appflowy_url instead of appflowy_page if the name is ambiguous.
 # For Shortcut, replace the AppFlowy target with exactly ONE workflow selector:
-# shortcut_workflow = "Agents" # Exact, unique name in the MCP connection's workspace.
+# shortcut_workflow = "Agents" # Exact, unique name in the workspace.
+# shortcut_workspace = "deecide"
+# shortcut_token_file = "~/.config/maistro/shortcut-deecide-token" # Private read-only v4 token.
 # shortcut_workflow_id = 500005096 # Positive numeric workflow ID, not a story ID.
 # shortcut_url = "https://app.shortcut.com/your-workspace/settings/workflows/123" # Existing links still work.
 # Optional per-project MCP server name (also supported for AppFlowy):

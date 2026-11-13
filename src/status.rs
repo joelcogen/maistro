@@ -206,7 +206,7 @@ impl Status {
                 ),
                 last_outcome: None,
                 polling: Polling {
-                    method: if p.is_shortcut() {
+                    method: if p.is_shortcut() && !p.shortcut_api() {
                         "coordinator"
                     } else {
                         "rust"

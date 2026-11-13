@@ -157,6 +157,10 @@ pub struct Project {
     pub shortcut_workflow: Option<String>,
     /// Positive workflow ID in the configured MCP workspace.
     pub shortcut_workflow_id: Option<u64>,
+    /// Optional read-only API polling; both fields must be supplied together.
+    pub shortcut_workspace: Option<String>,
+    #[serde(skip_serializing)]
+    pub shortcut_token_file: Option<PathBuf>,
     /// Selected provider MCP server name; defaults to shortcut or agents.mcp_server.
     pub mcp_server: Option<String>,
     pub mode: Mode,
@@ -169,6 +173,9 @@ pub struct Project {
     pub statuses: Statuses,
 }
 impl Project {
+    pub fn shortcut_api(&self) -> bool {
+        self.shortcut_token_file.is_some()
+    }
     pub fn is_shortcut(&self) -> bool {
         self.shortcut_url.is_some()
             || self.shortcut_workflow.is_some()
@@ -274,6 +281,14 @@ impl Config {
             config.agents.claude = resolve(&config.agents.claude, root)?;
         }
         for p in &mut config.projects {
+            if let Some(path) = &p.shortcut_token_file {
+                ensure!(
+                    !path.as_os_str().is_empty(),
+                    "{}: shortcut_token_file must not be empty",
+                    p.id
+                );
+                p.shortcut_token_file = Some(resolve(path, root)?);
+            }
             p.repo = resolve(&p.repo, root)?
                 .canonicalize()
                 .with_context(|| format!("{}: repository does not exist", p.id))?;
@@ -371,6 +386,41 @@ impl Config {
                     && !p.remote.starts_with('-'),
                 "invalid base branch or remote"
             );
+            ensure!(
+                p.shortcut_workspace.is_some() == p.shortcut_token_file.is_some(),
+                "{}: shortcut_workspace and shortcut_token_file must be configured together",
+                p.id
+            );
+            if let Some(workspace) = &p.shortcut_workspace {
+                ensure!(
+                    p.is_shortcut(),
+                    "{}: Shortcut API settings require a Shortcut workflow",
+                    p.id
+                );
+                ensure!(
+                    !workspace.is_empty()
+                        && workspace
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'-'),
+                    "{}: invalid shortcut_workspace slug",
+                    p.id
+                );
+                ensure!(
+                    p.shortcut_token_file
+                        .as_ref()
+                        .is_some_and(|p| !p.as_os_str().is_empty()),
+                    "{}: shortcut_token_file must not be empty",
+                    p.id
+                );
+                if let Some(url) = &p.shortcut_url {
+                    let url = reqwest::Url::parse(url).context("invalid shortcut_url")?;
+                    ensure!(
+                        url.path_segments().and_then(|mut s| s.next()) == Some(workspace),
+                        "{}: shortcut_url workspace does not match shortcut_workspace",
+                        p.id
+                    );
+                }
+            }
             let server = p.mcp_server(&self.agents);
             ensure!(identifier(server), "{}: invalid MCP server name", p.id);
             if let Some(previous) = servers.insert(server, p.is_shortcut()) {

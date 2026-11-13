@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
         Action::Validate => {
             engine.validate().await?;
             println!(
-                "Configuration, private GitHub token file, repositories, selected agent login and source MCP settings are valid. No remote access, token permissions or model calls were tested."
+                "Configuration, configured private token files, repositories, selected agent login and source MCP settings are valid. No remote access, token permissions or model calls were tested."
             );
         }
         Action::Run => {
