@@ -532,7 +532,14 @@ async fn pending_completion_survives_appflowy_outage_in_memory_without_redispatc
     assert_eq!(view["projects"][0]["worker"]["state"], "pending_update");
     assert_eq!(view["projects"][0]["story"]["id"], "story-0");
     assert_eq!(view["projects"][0]["observation"]["stale"], true);
-    assert_eq!(view["projects"][0]["observation"]["counts"]["ready"], 1);
+    assert_eq!(view["projects"][0]["observation"]["counts"]["ready"], 0);
+    assert_eq!(
+        view["projects"][0]["observation"]["counts"]["in_progress"],
+        1
+    );
+    assert_eq!(view["overall"]["counts"]["ready"], 0);
+    assert_eq!(view["overall"]["counts"]["in_progress"], 1);
+    assert_eq!(view["overall"]["stale"], true);
     assert!(view["coordinator"]["last_error"].is_string());
     let held = f.board()["p0"]["status"] == "In Progress";
     fs::remove_file(f.temp.path().join("outage")).unwrap();
@@ -715,6 +722,7 @@ async fn linked_worktrees_cannot_be_configured_as_parallel_projects() {
 async fn status_traffic_does_not_coordinate_or_dispatch_and_shows_parallel_idle_disabled_projects()
 {
     let mut f = Fixture::new(&[Mode::Master, Mode::Pr, Mode::Master, Mode::Pr]);
+    f.shortcut(1, "shortcut");
     f.enable_status();
     f.config.orchestrator.poll_interval_seconds = 60;
     f.config.projects[2].enabled = false;
@@ -742,8 +750,17 @@ async fn status_traffic_does_not_coordinate_or_dispatch_and_shows_parallel_idle_
         assert_eq!(view["projects"][0]["mode"], "master");
         assert_eq!(view["projects"][1]["mode"], "pr");
         assert_eq!(view["overall"]["observed_projects"], 3);
-        assert_eq!(view["overall"]["counts"]["ready"], 2);
+        assert_eq!(view["overall"]["counts"]["ready"], 0);
+        assert_eq!(view["overall"]["counts"]["in_progress"], 2);
         assert_eq!(view["overall"]["counts"]["backlog"], 1);
+        for index in [0, 1] {
+            assert_eq!(view["projects"][index]["observation"]["counts"]["ready"], 0);
+            assert_eq!(
+                view["projects"][index]["observation"]["counts"]["in_progress"],
+                1
+            );
+            assert_eq!(view["projects"][index]["observation"]["stale"], false);
+        }
         assert_eq!(
             view["projects"][0]["story"]["url"],
             "https://appflowy.example/story"

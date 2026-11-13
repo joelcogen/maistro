@@ -197,6 +197,10 @@ pub fn coordination_schema() -> Value {
         "acknowledged":strings(), "notes":strings(), "retry_projects":strings(),
         "observations":{"type":"array","items":object(json!({
             "project_id":{"type":"string"},
+            "counted_assignment":{"anyOf":[object(json!({
+                "story_id":{"type":"string"},
+                "status":{"type":"string","enum":["ready","in_progress"]}
+            })), {"type":"null"}]},
             "counts":{"anyOf":[object(json!({
                 "ready":{"type":"integer","minimum":0,"maximum":1000000000},
                 "in_progress":{"type":"integer","minimum":0,"maximum":1000000000},

@@ -360,6 +360,7 @@ impl Engine {
                     cancel: cancel.clone(),
                 },
             );
+            diagnostics.claim_accepted(&assignment);
             diagnostics.worker_started(&assignment);
             tracing::info!(project=%project.id, story=%assignment.story_id, recovery=assignment.recovery, "dispatching story");
             let agents = self.agents.clone();

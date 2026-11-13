@@ -272,8 +272,12 @@ interrupted work. Counts use configured status labels and stay unknown until a
 complete read. Failed or partial observations retain the last complete counts and
 mark them stale. Successful reads still supply counts when writes fail.
 
-Project counts are labeled with the coordinator pass start time, so they may
-precede status writes in that pass. Overview counts sum known observations,
+Project counts are labeled with the coordinator pass start time. When a verified
+Ready claim is accepted, its Ready/In Progress counts are adjusted immediately
+if the complete read counted that story as Ready. Recovery and reads already
+including the claim do not add it again. Unknown or stale totals are retained;
+uncertain claim adjustments mark known totals stale. Other status writes may
+lag until the next complete read. Overview counts sum known observations,
 including stale ones. Missing projects, including disabled projects, make the
 total partial; compact warnings identify partial or stale totals. Both views use
 the same six count tiles, arranged in three columns on phones. Treat these counts

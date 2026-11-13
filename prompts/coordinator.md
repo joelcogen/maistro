@@ -147,7 +147,16 @@ unmapped statuses. Counts describe the last COMPLETE board read in this pass,
 not inferred totals after your writes. Set read=complete and include counts only
 if all row statuses/pages were successfully read. For partial/failed/not_read,
 counts MUST be null, never partial totals or zero. A failed write does not erase
-a successful read. Select the concise reason enum that best explains this pass
+a successful read. For both AppFlowy and Shortcut, include counted_assignment
+with the assigned story_id and its status (ready or in_progress) IN THAT SAME
+COMPLETE READ, before any later claim writes. If a later complete read already
+includes the claim, report in_progress. Set counted_assignment=null if there is
+no assignment, no complete read, or that story's contribution cannot be established.
+Do not use the claim read-back status as the status counted in an earlier read.
+Rust adjusts Ready/In Progress display counts once when accepting a new claim
+counted as Ready; recovery and claims already counted as In Progress add nothing.
+Do not adjust the returned counts yourself or read the board again for this field.
+Select the concise reason enum that best explains this pass
 (no_eligible_work, dependencies, occupied, read_failed, ambiguous_board,
 incomplete_read, claim_failed, requirements_blocked, update_failed, work_selected).
 These observations are display-only and must never replace fresh reads or claims.

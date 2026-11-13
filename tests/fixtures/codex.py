@@ -120,7 +120,7 @@ if coordinator:
             if key in counts:
                 counts[key] += 1
             result['observations'].append(dict(project_id=project['id'], counts=counts,
-                                               read='complete', reason='no_eligible_work'))
+                                               read='complete', reason='no_eligible_work', counted_assignment=None))
         for active in snapshot['active']:
             if board[active['project_id']]['status'] == 'Cancelled' or (ROOT / 'archived').exists():
                 result['cancel'].append(active)
@@ -147,6 +147,9 @@ if coordinator:
             result['assignments'].append(dict(project_id=project['id'], story_id=story['id'],
                                              title='Fixture story', story_url='https://appflowy.example/story', context='Complete fixture requirements',
                                              recovery=story['status'] == 'In Progress', pr=story.get('pr')))
+            observation = next(o for o in result['observations'] if o['project_id'] == project['id'])
+            observation['counted_assignment'] = dict(story_id=story['id'],
+                                                     status=story['status'].lower().replace(' ', '_'))
             story['status'] = 'In Progress'
         (ROOT / 'board.json').write_text(json.dumps(board))
     if (ROOT / 'luna-incomplete').exists():

@@ -13,6 +13,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -68,6 +69,20 @@ pub struct BoardRead {
     pub counts: Option<Counts>,
     pub read: ReadState,
     pub reason: Reason,
+    /// The assigned story's contribution to these exact complete-read counts.
+    pub counted_assignment: Option<CountedAssignment>,
+}
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountedAssignment {
+    pub story_id: String,
+    pub status: CountedStatus,
+}
+#[derive(Clone, Copy, Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CountedStatus {
+    Ready,
+    InProgress,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct Observation {
@@ -168,6 +183,8 @@ pub struct StatusSnapshot {
 pub struct Status {
     view: StatusSnapshot,
     started: Instant,
+    /// Complete observations from this pass, consumed once at accepted dispatch.
+    claim_reads: HashMap<String, Option<CountedAssignment>>,
 }
 impl Status {
     pub fn new(config: &Config) -> Self {
@@ -205,6 +222,7 @@ impl Status {
             .collect();
         Self {
             started: Instant::now(),
+            claim_reads: HashMap::new(),
             view: StatusSnapshot {
                 started_at: now(),
                 generated_at: now(),
@@ -242,6 +260,7 @@ impl Status {
         view
     }
     pub fn coordinator_started(&mut self) {
+        self.claim_reads.clear();
         self.view.coordinator.start("reading_boards");
         self.view.coordinator.latest_event = "Coordination pass running";
     }
@@ -257,6 +276,7 @@ impl Status {
         self.coordinator_finished_for(reads, &selected);
     }
     pub fn coordinator_finished_for(&mut self, reads: Option<&[BoardRead]>, selected: &[String]) {
+        self.claim_reads.clear();
         self.view.coordinator.finish(
             "idle",
             if reads.is_some() {
@@ -291,6 +311,8 @@ impl Status {
             o.last_read = read.map_or(ReadState::Failed, |r| r.read);
             o.reason = Some(read.map_or(Reason::ReadFailed, |r| r.reason));
             if let Some(r) = read.filter(|r| r.read == ReadState::Complete && r.counts.is_some()) {
+                self.claim_reads
+                    .insert(p.id.clone(), r.counted_assignment.clone());
                 o.counts = r.counts;
                 o.read_started_at = self.view.coordinator.started_at;
                 o.received_at = Some(now());
@@ -298,6 +320,38 @@ impl Status {
             } else {
                 o.stale = true;
             }
+        }
+    }
+    pub fn claim_accepted(&mut self, a: &Assignment) {
+        let Some(counted) = self.claim_reads.remove(&a.project_id) else {
+            // Unknown or retained stale totals cannot be adjusted reliably.
+            return;
+        };
+        if a.recovery {
+            return; // Confirming existing In Progress work is not a transition.
+        }
+        let o = &mut self.project(&a.project_id).observation;
+        let Some(counted) = counted.filter(|c| c.story_id == a.story_id) else {
+            o.stale = true;
+            return;
+        };
+        let Some(counts) = o.counts.as_mut() else {
+            return;
+        };
+        match counted.status {
+            CountedStatus::Ready => {
+                if let Some((ready, in_progress)) = counts
+                    .ready
+                    .checked_sub(1)
+                    .zip(counts.in_progress.checked_add(1))
+                {
+                    counts.ready = ready;
+                    counts.in_progress = in_progress;
+                } else {
+                    o.stale = true;
+                }
+            }
+            CountedStatus::InProgress => {} // The complete read already includes the claim.
         }
     }
     pub fn polled(&mut self, id: &str, changed: bool, failed: bool) {
@@ -509,6 +563,7 @@ mod tests {
             read: state,
             counts,
             reason: Reason::NoEligibleWork,
+            counted_assignment: None,
         }
     }
     fn assignment(project: &str) -> Assignment {
@@ -520,6 +575,165 @@ mod tests {
             context: "SECRET prompt and requirements".into(),
             recovery: false,
             pr: None,
+        }
+    }
+    fn claim_read(counts: Counts, counted_status: CountedStatus) -> BoardRead {
+        let mut r = read("a", ReadState::Complete, Some(counts));
+        r.counted_assignment = Some(CountedAssignment {
+            story_id: assignment("a").story_id,
+            status: counted_status,
+        });
+        r
+    }
+    #[test]
+    fn accepted_claim_updates_project_and_overview_once_without_another_read() {
+        let mut status = Status::new(&config());
+        let before = Counts {
+            ready: 2,
+            in_progress: 0,
+            blocked: 3,
+            review: 4,
+            backlog: 5,
+            done: 6,
+        };
+        status.coordinator_started();
+        status.coordinator_finished(Some(&[
+            claim_read(before, CountedStatus::Ready),
+            read("b", ReadState::Complete, Some(Counts::default())),
+        ]));
+        assert_eq!(status.snapshot().overall.counts, Some(before));
+        let received = status.snapshot().projects[0].observation.received_at;
+        let expected = Counts {
+            ready: 1,
+            in_progress: 1,
+            ..before
+        };
+        for _ in 0..2 {
+            status.claim_accepted(&assignment("a"));
+            status.worker_started(&assignment("a"));
+            let view = status.snapshot();
+            assert_eq!(view.projects[0].observation.counts, Some(expected));
+            assert_eq!(view.overall.counts, Some(expected));
+            assert!(!view.overall.stale);
+            assert_eq!(view.overall.observed_projects, 2);
+            assert_eq!(view.overall.total_projects, 3); // Disabled project remains unknown.
+            assert_eq!(view.projects[0].observation.received_at, received);
+        }
+    }
+    #[test]
+    fn recovery_and_reads_already_including_claim_do_not_adjust_counts() {
+        let counts = Counts {
+            ready: 2,
+            in_progress: 1,
+            ..Counts::default()
+        };
+        for recovery in [false, true] {
+            let mut status = Status::new(&config());
+            let mut a = assignment("a");
+            a.recovery = recovery;
+            status.coordinator_finished(Some(&[claim_read(counts, CountedStatus::InProgress)]));
+            status.claim_accepted(&a);
+            assert_eq!(status.snapshot().overall.counts, Some(counts));
+            assert!(!status.snapshot().projects[0].observation.stale);
+        }
+        // Recovery never represents a Ready transition, even with inconsistent metadata.
+        let mut status = Status::new(&config());
+        let mut a = assignment("a");
+        a.recovery = true;
+        status.coordinator_finished(Some(&[claim_read(counts, CountedStatus::Ready)]));
+        status.claim_accepted(&a);
+        assert_eq!(status.snapshot().overall.counts, Some(counts));
+    }
+    #[test]
+    fn retries_replace_observations_without_reapplying_an_old_claim() {
+        let mut status = Status::new(&config());
+        let before = Counts {
+            ready: 2,
+            ..Counts::default()
+        };
+        let after = Counts {
+            ready: 1,
+            in_progress: 1,
+            ..Counts::default()
+        };
+        let a = assignment("a");
+        // A failed claim produces no accepted assignment and no count adjustment.
+        let mut failed = claim_read(before, CountedStatus::Ready);
+        failed.reason = Reason::ClaimFailed;
+        status.coordinator_finished(Some(&[failed]));
+        assert_eq!(status.snapshot().overall.counts, Some(before));
+        status.coordinator_started();
+        status.coordinator_finished(Some(&[claim_read(before, CountedStatus::Ready)]));
+        status.claim_accepted(&a);
+        assert_eq!(status.snapshot().overall.counts, Some(after));
+        status.coordinator_started();
+        status.coordinator_finished(None);
+        status.claim_accepted(&a);
+        assert_eq!(status.snapshot().overall.counts, Some(after));
+        assert!(status.snapshot().projects[0].observation.stale);
+        // A later complete read supersedes the adjusted snapshot, including on recovery.
+        status.coordinator_finished(Some(&[claim_read(after, CountedStatus::InProgress)]));
+        status.claim_accepted(&a);
+        assert_eq!(status.snapshot().overall.counts, Some(after));
+        assert!(!status.snapshot().projects[0].observation.stale);
+        // A genuine later Ready claim of the same story can be adjusted again.
+        status.coordinator_finished(Some(&[claim_read(before, CountedStatus::Ready)]));
+        status.claim_accepted(&a);
+        assert_eq!(status.snapshot().overall.counts, Some(after));
+    }
+    #[test]
+    fn claims_preserve_unknown_or_stale_counts_without_a_reliable_complete_read() {
+        for retained in [
+            None,
+            Some(Counts {
+                ready: 3,
+                ..Counts::default()
+            }),
+        ] {
+            for state in [ReadState::Partial, ReadState::Failed, ReadState::NotRead] {
+                let mut status = Status::new(&config());
+                if let Some(counts) = retained {
+                    status.coordinator_finished(Some(&[claim_read(counts, CountedStatus::Ready)]));
+                }
+                let mut incomplete = claim_read(Counts::default(), CountedStatus::Ready);
+                incomplete.read = state;
+                status.coordinator_finished(Some(&[incomplete]));
+                status.claim_accepted(&assignment("a"));
+                let view = status.snapshot();
+                assert_eq!(view.projects[0].observation.counts, retained);
+                assert_eq!(view.overall.counts, retained);
+                assert!(view.projects[0].observation.stale);
+            }
+        }
+    }
+    #[test]
+    fn ambiguous_or_inconsistent_claim_evidence_marks_counts_stale_without_guessing() {
+        let counts = Counts {
+            ready: 2,
+            ..Counts::default()
+        };
+        let mut mismatch = claim_read(counts, CountedStatus::Ready);
+        mismatch.counted_assignment.as_mut().unwrap().story_id = "another-story".into();
+        for r in [
+            read("a", ReadState::Complete, Some(counts)),
+            mismatch,
+            claim_read(Counts::default(), CountedStatus::Ready),
+            claim_read(
+                Counts {
+                    in_progress: u64::MAX,
+                    ..counts
+                },
+                CountedStatus::Ready,
+            ),
+        ] {
+            let mut status = Status::new(&config());
+            let expected = r.counts;
+            status.coordinator_finished(Some(&[r]));
+            status.claim_accepted(&assignment("a"));
+            let view = status.snapshot();
+            assert_eq!(view.projects[0].observation.counts, expected);
+            assert!(view.projects[0].observation.stale);
+            assert!(view.overall.stale);
         }
     }
     #[test]
