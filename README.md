@@ -10,6 +10,8 @@ Choose Codex or Claude Code and configure the coordinator and worker models
 globally. The default is Codex with `gpt-6-luna` for coordination and
 `gpt-6-astra` for implementation.
 
+See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
+
 ## Project modes
 
 | Mode | Worker responsibility | Successful story status |
@@ -19,29 +21,6 @@ globally. The default is Codex with `gpt-6-luna` for coordination and
 
 `base_branch` can be `main`, `master`, or another branch. You handle CI, PR merging
 and moving reviewed stories to Done.
-
-A story in a `master` project can request PR delivery in its body or human
-comments: “Open a PR for this story” or “Deliver this story as a PR on branch
-`feature/new-export`.” A request to implement on a named feature/story branch also
-implies PR delivery. PR projects can request custom branches too. Custom names
-must be valid Git branch names distinct from `base_branch`.
-
-PR mode defaults to the stable branch `maistro/<project>/<story-id>`. Both modes
-use `AppFlowy story: <story-id>` or `Shortcut story: <numeric-id>` commit/PR
-markers to recover interrupted work. The repository, remote and PR target come
-from project configuration.
-
-PR overrides finish in Review with a PR link and require `gh` and token permission
-to create PRs. Delivery overrides require an explicit request; ordinary mentions
-of PRs or branches in product requirements keep the project default. The
-coordinator selects the effective mode before dispatch, and that mode stays fixed
-through result delivery.
-
-Each pending result supplies the coordinator with the exact configured destination
-status: completed master work goes directly to Done, completed PR work to Review,
-and blocked work to Blocked. A PR mention or link does not change that destination.
-Human status changes are preserved; result comments and status updates are read
-back before delivery is acknowledged.
 
 ## Install and configure
 
@@ -72,6 +51,20 @@ a child board with seven workflow statuses and colors, and returns its reference
 and status mapping. The prompt uses `In progress`, so set
 `in_progress = "In progress"` in that project's `[projects.statuses]` table.
 
+### AppFlowy MCP connection
+
+The AppFlowy poller uses `projects.mcp_server` (default `agents.mcp_server`) from
+the selected provider's configuration. Codex supports stdio `command`, `args`,
+`cwd`, `env` and inherited environment, or streamable HTTP `url`, `http_headers`,
+`env_http_headers` and `bearer_token_env_var`. Claude transport keys are described
+[below](#global-provider-models-and-effort). Rust polling uses the MCP SDK directly.
+
+Enable AppFlowy MCP's legacy read tools: `get_workspaces`, `list_databases`,
+`get_page`, `get_database_fields`, `get_database_row_ids`,
+`get_database_row_details`, `get_page_markdown` and `list_comments`. Use stdio or
+streamable HTTP with explicit headers/token for polling authentication.
+Connection/authentication errors are reported and retried at the polling interval.
+
 ### GitHub token
 
 During installation, create a [fine-grained GitHub personal access token](https://github.com/settings/personal-access-tokens/new)
@@ -91,14 +84,6 @@ old file and rerun the installer. Keep tokens private and outside prompts and Gi
 For a custom location, set `agents.github_token_file` and provision that private
 file separately.
 
-Each worker reads the file on assignment and receives `GH_TOKEN` and `GITHUB_TOKEN`,
-so rotation applies to the next worker in foreground and service runs. Token
-injection is scoped to workers. Process-scoped Git settings authenticate
-`https://github.com/` and translate standard `git@github.com:` and
-`ssh://git@github.com/` remotes to HTTPS. Saved remotes and global Git settings stay
-intact. `gh` authenticates through `GH_TOKEN`. Other Git hosts use their existing
-authentication.
-
 ### Custom agent prompts
 
 Add either or both optional UTF-8 files at the root of a project's configured
@@ -108,15 +93,6 @@ repository (`repo`):
   appended to the coordinator prompt.
 - `maistro-worker.md`: testing commands and coding conventions appended to the
   worker prompt. Start with [the worker example](examples/project-prompt.md).
-
-Maistro discovers these files automatically for both providers. Each applies to
-its agent; coordinator additions are labeled by project and included for enabled
-projects selected in that pass. Workers also read `AGENTS.md`.
-
-Files are read for each coordinator pass or worker assignment, so changes take
-effect on the next invocation. Only nonempty files add instructions; read errors
-other than missing files fail the invocation with the project and path. Keep
-secrets out of prompts.
 
 To migrate, remove the obsolete `prompt_file` TOML key and move its contents to
 `maistro-worker.md` in the repository root. Prompt examples live in this repository.
@@ -159,14 +135,6 @@ guarantee every model supports every level. See the
 and [Claude effort documentation](https://code.claude.com/docs/en/model-config#adjust-effort-level).
 Claude's `ultracode` mode is not an effort level supported by Maistro.
 
-Omitting a setting sends no effort override. Workers keep their normal inherited
-configuration; coordinators retain their existing isolated settings behavior and
-provider/model defaults. For explicit Claude effort, Maistro removes the inherited
-`CLAUDE_CODE_EFFORT_LEVEL` environment override for that invocation so the CLI flag
-can take effect. When effort is omitted, that environment variable is preserved.
-Agent-start logs and the dashboard show **configured effort**, or
-`inherited/default` when omitted, without claiming the effective runtime effort.
-
 For Claude Code, replace `[agents]` with:
 
 ```toml
@@ -203,26 +171,9 @@ AppFlowy Rust polling accepts Claude stdio (`command`, `args`, `env`) and HTTP
 stdio is also supported. Shortcut uses read-only API polling when configured;
 Claude's OAuth connection remains responsible for individual story reads and writes.
 
-Claude runs use `--print --output-format stream-json --json-schema` with session
-persistence disabled. The coordinator loads only selected source connections and
-permits their listed read/status/comment tools. Workers inherit normal Claude
-settings and development tools with noninteractive full access. Their strict MCP
-configuration includes only non-source connections from `claude_mcp_config`.
-Repository/plugin MCP entries are excluded. Both roles disable hooks and Agent/Task
-spawning. Both providers share GitHub authentication, timeouts, process-group
-cancellation, structured-result validation, Git delivery and recovery rules.
-
 See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference),
 [structured output guide](https://code.claude.com/docs/en/headless), and
 [MCP configuration guide](https://code.claude.com/docs/en/mcp).
-
-The coordinator uses the MCP servers named by projects in its pass. It writes
-AppFlowy results with `update_row_cells` and `append_comment`, and Shortcut results
-with `update_story` and `create_story_comment`. With Codex, workers use normal
-Codex configuration, tools, environment and network, plus the GitHub token, full
-filesystem access and noninteractive permissions. Story-source MCP access belongs
-to the coordinator. Maistro disables hooks and agent spawning in both roles;
-prompts direct work scope and Git behavior.
 
 ## Start, stop and logs
 
@@ -280,36 +231,6 @@ Open `http://127.0.0.1:8044/`. The server binds only to **127.0.0.1**. It starts
 disabled and defaults to port 8044. A bind failure stops startup with the address
 and OS error. Port binding happens at startup; `validate` checks configuration.
 
-The page refreshes `GET /api/status` every three seconds and marks retained data
-stale on failure. It supports GET/HEAD and gives local users unauthenticated access
-to project IDs, story titles/IDs, safe board/workflow and story links, and concise
-diagnostics. Titles render as text; links allow only HTTP(S). Detailed failure
-output stays in private logs and the story source.
-
-The compact Agents box lists Coordinator and each project with its status and
-configured effort, followed by uptime and time since the latest coordination pass
-began. Disabled projects remain visible. Project cards show worker status, duration
-and latest start/finish time, the current story, board and story links, and concise errors. Pending results
-remain visible until source recording completes. Observations live in memory and
-reset on restart.
-
-Counts come from coordinator reads and may lag Rust polling. Viewing the page
-reads in-memory data. Ready counts queued work; In Progress includes active and
-interrupted work. Counts use configured status labels and stay unknown until a
-complete read. Failed or partial observations retain the last complete counts and
-mark them stale. Successful reads still supply counts when writes fail.
-
-Project counts are labeled with the coordinator pass start time. When a verified
-Ready claim is accepted, its Ready/In Progress counts are adjusted immediately
-if the complete read counted that story as Ready. Recovery and reads already
-including the claim do not add it again. Unknown or stale totals are retained;
-uncertain claim adjustments mark known totals stale. Other status writes may
-lag until the next complete read. Overview counts sum known observations,
-including stale ones. Missing projects, including disabled projects, make the
-total partial; compact warnings identify partial or stale totals. Both views use
-the same six count tiles, arranged in three columns on phones. Treat these counts
-as observations; the coordinator authorizes work from fresh source reads.
-
 ## Shortcut projects
 
 Select one workflow with `shortcut_workflow` (exact, case-sensitive name),
@@ -346,27 +267,8 @@ one workspace may share a token file. Token files are reopened each read cycle,
 so replacing the token does not require a daemon restart. `maistro validate`
 checks the local file and token format; actual authorization is checked on reads.
 
-Rust resolves the workflow and reads only that workflow's non-archived stories
-through `GET /api/v4/{workspace}/workflows/{id}/stories`, with compact fields and
-complete pagination. It validates configured state labels and numeric membership.
-Polling compares complete fingerprints; unchanged boards do not invoke the
-coordinator. Story metadata and membership changes wake it. Ready, In Progress,
-and Blocked stories also have comments, checklist items, and story links checked explicitly, along
-with linked story statuses, so these changes do not depend solely on parent
-`updated_at` timestamps. Edits only to separately linked documents are not
-independently polled; those documents are read when a story is coordinated.
-
-Before each coordination pass Rust obtains a fresh compact workflow snapshot and
-supplies it directly to the agent. MCP workflow/state/workspace enumeration tools
-are disabled when a connection serves only API-configured projects in that pass.
-When sharing a connection with a legacy project, the coordinator is instructed
-to use the supplied API snapshot for the API-configured project. The agent still uses MCP for individual
-story requirements, comments, linked documents, current active/pending checks, and
-verified writes. Keep the CLI's Shortcut OAuth login configured for the **same
+Keep the CLI's Shortcut OAuth login configured for the **same
 workspace**; the read-only API token does not replace write authentication.
-Incomplete API reads isolate the affected project and retry without assigning,
-cancelling, acknowledging, or writing its stories; other projects can proceed.
-Credentials are never included in prompts or dashboard data.
 
 Without the two API settings, existing CLI/MCP-only projects retain periodic
 coordinator reads, including while idle. That compatibility mode may need to
@@ -417,14 +319,6 @@ Configure entries in `agents.codex_home/config.toml` for Codex, or the top-level
 one process. Configure servers for the sources you use, with a separate server
 name for each source type and a single project per board/workflow.
 
-With API polling, `poll_interval_seconds` controls the delay between Rust polls.
-Worker completion and retries can also wake coordination. Failed polls retain
-the last complete fingerprint; unchanged successful polls do not erase a pending
-retry or worker-completion event. Polling remains active while workers run so
-archiving or moving a story can trigger cancellation checks. As with AppFlowy,
-the coordinator verifies the current story before acting; cancellation checks
-pause while the source is unavailable.
-
 Optional states can be explicitly disabled with TOML booleans:
 
 ```toml
@@ -439,105 +333,6 @@ disabled in master mode. A story requesting PR delivery while Review is disabled
 is marked Blocked with an explanation, including during recovery. Shortcut
 archiving still cancels active work regardless of the Cancelled setting. These
 optional settings also apply to AppFlowy.
-
-## Story behavior and recovery
-
-Use Backlog, Ready, In Progress, Review, Done, Blocked, and Cancelled, or map their
-exact labels in `[projects.statuses]`. For boards using `In progress`, set
-`in_progress = "In progress"`.
-
-- Ready authorizes new work. The coordinator honors dependencies and priority and
-  gathers the full story body, human comments and linked references.
-- Interrupted In Progress stories take priority over new work. Workers inspect
-  existing changes, commits, remote branches and PRs, preserve unrelated changes,
-  and reuse completed work.
-- Moving an active story out of In Progress stops its worker when the coordinator
-  observes the change. Files, commits, PRs and the user-selected status are
-  preserved. Requirement edits take effect on the next assignment.
-- Worker failures or unresolved obstacles become Blocked with an explanation.
-  Resolve the obstacle and move the story to Ready to retry.
-- Completed results remain in memory and occupy the project until the coordinator
-  confirms the source update or observes a user status change. Other projects
-  continue. Failed coordination retries after the polling interval.
-
-For AppFlowy, Rust polls enabled boards over each project's MCP connection.
-`orchestrator.poll_interval_seconds` (default 30) sets the delay between completed
-poll attempts per project. After initial observation and coordination, an unchanged
-idle board waits for a change before calling the coordinator again. Changes to any
-story, including Done or Backlog stories and Maistro's own writes, wake coordination.
-
-One global coordinator pass combines pending projects while polling and workers
-continue. It acknowledges the observed generation at its start; changes during
-the pass stay pending for the next pass. Worker completion, failure, cancellation
-completion and result acknowledgement also wake coordination. Failed or incomplete
-coordination and unacknowledged results retry after the interval per project.
-
-The coordinator reads fresh data, checks active-story statuses, authorizes work,
-writes results and decides cancellation. Cancellation usually takes up to one
-polling interval plus a complete board read and coordinator decision. Busy passes,
-large boards, inconsistent reads, failures and timeouts can extend that delay.
-Pollers run independently across projects. Cancellation detection pauses during an
-AppFlowy outage. A push underway may finish before cancellation is observed.
-
-### Polling contract and consistency
-
-The AppFlowy poller uses `projects.mcp_server` (default `agents.mcp_server`) from
-the selected provider's configuration. Codex supports stdio `command`, `args`,
-`cwd`, `env` and inherited environment, or streamable HTTP `url`, `http_headers`,
-`env_http_headers` and `bearer_token_env_var`. Claude transport keys are described
-above. Rust polling uses the MCP SDK directly.
-
-Enable AppFlowy MCP's legacy read tools: `get_workspaces`, `list_databases`,
-`get_page`, `get_database_fields`, `get_database_row_ids`,
-`get_database_row_details`, `get_page_markdown` and `list_comments`. Use stdio or
-streamable HTTP with explicit headers/token for polling authentication.
-Connection/authentication errors are reported and retried at the polling interval.
-
-Boards resolve by unique view name/ID (`appflowy_page`) or view ID in an AppFlowy
-URL. Use a URL or ID for ambiguous names. Each project keeps a SHA-256 fingerprint,
-dirty generations and retry timing in memory. Poll responses are transient. After
-restart, projects begin unknown/dirty, obtain a complete observation, and run the
-coordinator to recover In Progress work or start Ready work.
-
-The fingerprint covers board name/icon/layout/extra metadata, fields and options,
-row membership and cells for every row. After scanning cells, full Markdown
-bodies, row comments/replies (including resolved threads), and inline comments
-are read only for Ready, In Progress, Blocked, and unknown-status stories, plus
-same-board rows referenced by ID in their cells, bodies, or comments (transitively).
-This preserves requirement edits on waiting/active stories and dependency status
-changes across the board. Unresolvable status schemas and free-form dependency
-cells without known row IDs conservatively retain fuller reads. Unreferenced
-Backlog/Done/Review/Cancelled body-only edits do not wake coordination; moving
-those stories into an actionable state does. Rows,
-fields and comments are keyed by ID, JSON objects by key; semantic array order
-and Markdown are preserved. MCP request metadata and pagination offsets are
-excluded. **External linked reference edits alone are outside detection scope.**
-The coordinator reads relevant references when processing a story.
-
-The read contract was checked against AppFlowy MCP's legacy handlers
-(`appflowy_mcp/server.py`, revision `008128fabb8459025c2c4fa124ea8713988af0e0`)
-and AppFlowy Cloud's `AFDatabaseRowDetail`/`list_database_row_details` in
-`libs/shared-entity/src/dto/workspace_dto.rs` and `src/biz/collab/ops.rs`.
-Row-detail reads can omit unavailable rows; their optional `doc` is plain text
-and can remain null on errors. The poller therefore requires exact requested and
-returned row IDs and reads Markdown separately. AppFlowy's `has_doc` flag
-identifies bodies; failed body reads reject the observation. Row comments use row
-collabs, while inline comments use the derived document UUID.
-
-Comments are fully paginated. Malformed or nonadvancing pages, truncated or
-partial responses, missing rows and failed reads reject the observation. Field
-and membership reads bookend each scan, and two complete scans must agree before
-a fingerprint is accepted. These checks reduce races; consistently stale reads
-and edits reverted between observations can escape detection. Ongoing edits may
-defer acceptance until a stable read. Rejections preserve the last valid
-fingerprint and dirty state. Retries wait the configured interval. Polls are
-bounded by `coordinator_timeout_seconds`, with a 60-second limit per MCP read.
-
-Restart clears assignments and pending results from memory. Recovery reconstructs
-work from the source and repository, including crashes between remote operations
-and source updates. Human edits can race with reads and status writes. Use a
-single daemon per board, even across separate clones. Agents verify claims and
-remote outcomes; Rust validates response shape and concurrency.
 
 ## Migrating the previous version
 
