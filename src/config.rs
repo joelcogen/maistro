@@ -174,10 +174,39 @@ pub struct Statuses {
     pub backlog: String,
     pub ready: String,
     pub in_progress: String,
-    pub review: String,
+    #[serde(with = "optional_status")]
+    pub review: Option<String>,
     pub done: String,
     pub blocked: String,
-    pub cancelled: String,
+    #[serde(with = "optional_status")]
+    pub cancelled: Option<String>,
+}
+// Omission uses Statuses::default; only an explicit false disables a state.
+mod optional_status {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Value {
+            Label(String),
+            Disabled(bool),
+        }
+        match Value::deserialize(d)? {
+            Value::Label(label) => Ok(Some(label)),
+            Value::Disabled(false) => Ok(None),
+            Value::Disabled(true) => {
+                Err(serde::de::Error::custom("status must be a label or false"))
+            }
+        }
+    }
+
+    pub fn serialize<S: Serializer>(value: &Option<String>, s: S) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(label) => label.serialize(s),
+            None => false.serialize(s),
+        }
+    }
 }
 impl Default for Statuses {
     fn default() -> Self {
@@ -185,10 +214,10 @@ impl Default for Statuses {
             backlog: "Backlog".into(),
             ready: "Ready".into(),
             in_progress: "In Progress".into(),
-            review: "Review".into(),
+            review: Some("Review".into()),
             done: "Done".into(),
             blocked: "Blocked".into(),
-            cancelled: "Cancelled".into(),
+            cancelled: Some("Cancelled".into()),
         }
     }
 }
@@ -317,18 +346,20 @@ impl Config {
                 );
             }
             let s = &p.statuses;
-            let statuses = [
-                &s.backlog,
-                &s.ready,
-                &s.in_progress,
-                &s.review,
-                &s.done,
-                &s.blocked,
-                &s.cancelled,
-            ];
+            let statuses: Vec<&String> =
+                [&s.backlog, &s.ready, &s.in_progress, &s.done, &s.blocked]
+                    .into_iter()
+                    .chain(s.review.iter())
+                    .chain(s.cancelled.iter())
+                    .collect();
+            ensure!(
+                p.mode != Mode::Pr || s.review.is_some(),
+                "{}: review cannot be disabled in PR mode",
+                p.id
+            );
             ensure!(
                 statuses.iter().all(|s| !s.trim().is_empty())
-                    && statuses.into_iter().collect::<HashSet<_>>().len() == 7,
+                    && statuses.iter().copied().collect::<HashSet<_>>().len() == statuses.len(),
                 "{}: status labels must be distinct and nonempty",
                 p.id
             );

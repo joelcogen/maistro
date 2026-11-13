@@ -364,7 +364,7 @@ async fn completion_prompts_route_frozen_modes_to_exact_statuses_for_both_provid
         ];
         for (project, (mode, outcome, _)) in f.config.projects.iter_mut().zip(cases) {
             project.statuses.done = "Shipped".into();
-            project.statuses.review = "Awaiting approval".into();
+            project.statuses.review = Some("Awaiting approval".into());
             project.statuses.blocked = "Needs help".into();
             board[&project.id]["status"] = json!("In Progress");
             snapshot.pending.push(Completion {
@@ -1389,4 +1389,21 @@ async fn repository_prompts_are_optional_role_specific_scoped_and_reloaded_for_b
             }
         }
     }
+}
+
+#[tokio::test]
+async fn shortcut_master_delivers_done_with_optional_states_disabled() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.shortcut(0, "shortcut");
+    f.config.projects[0].statuses.review = None;
+    f.config.projects[0].statuses.cancelled = None;
+    f.config.validate().unwrap();
+    let (token, job) = f.start();
+    let completed = f.wait(|| f.board()["p0"]["status"] == "Done").await;
+    f.stop(token, job).await;
+    assert!(completed, "events: {:?}", f.events());
+    assert_eq!(
+        f.board()["p0"]["result"]["commit"],
+        git(&f.temp.path().join("remote0.git"), &["rev-parse", "main"])
+    );
 }

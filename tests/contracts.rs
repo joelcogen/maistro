@@ -471,3 +471,106 @@ fn claude_paths_resolve_and_mcp_transport_preserves_headers_and_source_selection
             .contains("team missing")
     );
 }
+
+#[test]
+fn optional_states_preserve_defaults_and_validate_enabled_labels() {
+    for source in [
+        "appflowy_page='Board'",
+        "shortcut_url='https://app.shortcut.com/team/settings/workflows/42'",
+    ] {
+        let base = format!(
+            "[[projects]]\nid='p'\nrepo='/tmp'\n{source}\nmode='master'\nbase_branch='main'\n"
+        );
+        let defaults: Config = toml::from_str(&base).unwrap();
+        assert_eq!(
+            defaults.projects[0].statuses.review.as_deref(),
+            Some("Review")
+        );
+        assert_eq!(
+            defaults.projects[0].statuses.cancelled.as_deref(),
+            Some("Cancelled")
+        );
+        for settings in [
+            "review=false",
+            "cancelled=false",
+            "review=false\ncancelled=false",
+        ] {
+            let config: Config =
+                toml::from_str(&format!("{base}[projects.statuses]\n{settings}")).unwrap();
+            config.validate().unwrap();
+            let statuses = &config.projects[0].statuses;
+            let json = serde_json::to_value(statuses).unwrap();
+            for name in ["review", "cancelled"] {
+                if settings.contains(&format!("{name}=false")) {
+                    assert_eq!(json[name], false);
+                }
+            }
+            let encoded = toml::to_string(statuses).unwrap();
+            let decoded: maistro::config::Statuses = toml::from_str(&encoded).unwrap();
+            assert_eq!(decoded.review, statuses.review);
+            assert_eq!(decoded.cancelled, statuses.cancelled);
+        }
+        for settings in [
+            "review=true",
+            "cancelled=true",
+            "ready=false",
+            "backlog=false",
+            "in_progress=false",
+            "done=false",
+            "blocked=false",
+            "review=''",
+            "cancelled='  '",
+            "review='Done'",
+            "cancelled='Ready'",
+            "review=false\ncancelled='Done'",
+        ] {
+            let parsed =
+                toml::from_str::<Config>(&format!("{base}[projects.statuses]\n{settings}"));
+            assert!(
+                parsed.is_err() || parsed.unwrap().validate().is_err(),
+                "{settings}"
+            );
+        }
+        let pr = base.replace("mode='master'", "mode='pr'");
+        let disabled: Config =
+            toml::from_str(&format!("{pr}[projects.statuses]\nreview=false")).unwrap();
+        assert!(
+            disabled
+                .validate()
+                .unwrap_err()
+                .to_string()
+                .contains("review")
+        );
+        let cancelled: Config =
+            toml::from_str(&format!("{pr}[projects.statuses]\ncancelled=false")).unwrap();
+        cancelled.validate().unwrap();
+    }
+}
+
+#[test]
+fn disabled_review_prevents_pr_workers_including_recovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut project: maistro::config::Project = serde_json::from_value(serde_json::json!({
+        "id":"p", "repo":dir.path(), "appflowy_page":"Board",
+        "mode":"master", "base_branch":"main", "statuses":{"review":false,"cancelled":false}
+    }))
+    .unwrap();
+    let mut story = assignment("p");
+    assert!(
+        maistro::agent::worker_prompt(&project, &story)
+            .unwrap()
+            .contains("MASTER MODE:")
+    );
+    story.pr = Some(PrRequest { branch: None });
+    for recovery in [false, true] {
+        story.recovery = recovery;
+        let error = maistro::agent::worker_prompt(&project, &story).unwrap_err();
+        assert!(error.to_string().contains("review is disabled"));
+    }
+    project.statuses.review = Some("Review".into());
+    assert!(
+        maistro::agent::worker_prompt(&project, &story)
+            .unwrap()
+            .contains("PR MODE:")
+    );
+}

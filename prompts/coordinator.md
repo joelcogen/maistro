@@ -11,6 +11,12 @@ comments, following pagination. Isolate unreadable/ambiguous projects, report th
 in notes and retry_projects, and continue others. Never infer status from a failed
 read. Do not write outside configured boards. Use exact configured status labels.
 
+A review or cancelled value of false disables that state. Do not resolve, create,
+count, or transition to disabled states. Omitted configuration uses default labels;
+the supplied project statuses already include those defaults. All enabled labels
+must resolve uniquely. Disabled Review has a display count of zero. Archiving a
+Shortcut story still revokes work when Cancelled is disabled.
+
 Completion routing is fixed before this pass. Each pending result supplies an
 exact target_status derived from its outcome and effective mode frozen at dispatch:
 
@@ -31,7 +37,7 @@ Source-specific rules (apply the common lifecycle below to both sources):
   workspace identity against returned app URLs. Never silently use the default
   workflow, an entire workspace, a saved search, or a story's workflow as a fallback
   for an ambiguous link. Report ambiguous_board and retry if resolution fails.
-  Map all seven configured status labels to unique state IDs WITHIN that workflow
+  Map all enabled configured status labels to unique state IDs WITHIN that workflow
   before selecting or updating work; missing/duplicate states are a configuration
   problem to report and retry, not permission to invent states or use state types.
   Scope story enumeration to this workflow and verify each story's workflow/state
@@ -99,7 +105,9 @@ Preserve the original human instructions in context, including on recovery with
 prior branch/PR references. Never change repository, remote or base branch. A PR
 branch must be valid and distinct from the base branch. Explain unresolvable
 conflicting/invalid delivery instructions and mark Blocked; do not silently choose
-a different mode or branch.
+a different mode or branch. If review is false, PR delivery is unavailable:
+explain that Review must be enabled or direct delivery requested, mark the story
+Blocked, and return no assignment. Apply this to recovery as well as new work.
 
 For new Ready work, re-read the status, set In Progress, and read back to confirm
 the claim before returning an assignment with recovery=false. For recovery,

@@ -306,7 +306,7 @@ blocked = "Blocked"
 cancelled = "Cancelled"
 ```
 
-Create or map seven distinct workflow states using their exact names. These are
+Create or map each enabled workflow state using its exact name. These are
 workflow states, separate from Shortcut's state categories and dependency
 `blocked` flag. Configure workflow definitions in Shortcut. Claim, cancellation,
 recovery, dependency, PR override and result-delivery rules apply to both sources.
@@ -336,6 +336,21 @@ Increase the interval to reduce idle model calls at the cost of dispatch and
 cancellation latency. The coordinator handles fresh paginated reads and verified
 claims/status writes. Successful reads are required to authorize work; cancellation
 checks pause during a Shortcut outage.
+
+Optional states can be explicitly disabled with TOML booleans:
+
+```toml
+[projects.statuses]
+review = false
+cancelled = false
+```
+
+Omitted entries retain their default labels. Only Review and Cancelled can be
+disabled; enabled labels must remain distinct and nonempty. Review can only be
+disabled in master mode. A story requesting PR delivery while Review is disabled
+is marked Blocked with an explanation, including during recovery. Shortcut
+archiving still cancels active work regardless of the Cancelled setting. These
+optional settings also apply to AppFlowy.
 
 ## Story behavior and recovery
 

@@ -297,7 +297,11 @@ impl AgentRunner {
                 let target = match (completion.report.outcome, completion.mode) {
                     (Outcome::Blocked, _) => &project.statuses.blocked,
                     (Outcome::Completed, Mode::Master) => &project.statuses.done,
-                    (Outcome::Completed, Mode::Pr) => &project.statuses.review,
+                    (Outcome::Completed, Mode::Pr) => project
+                        .statuses
+                        .review
+                        .as_ref()
+                        .context("PR completion requires an enabled review status")?,
                 };
                 let mut value = serde_json::to_value(completion)?;
                 value["target_status"] = json!(target);
@@ -365,6 +369,10 @@ fn repository_prompt(project: &Project, filename: &str) -> Result<String> {
 
 pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<String> {
     let mode = assignment.effective_mode(project.mode);
+    ensure!(
+        mode != Mode::Pr || project.statuses.review.is_some(),
+        "PR delivery is unavailable because review is disabled; enable review or request direct delivery"
+    );
     let branch = if mode == Mode::Pr {
         let branch = assignment
             .pr
