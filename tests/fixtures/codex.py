@@ -122,9 +122,17 @@ if coordinator:
             assert 'list_workflows' in setting and 'get_workflow' in setting
             assert 'list_workflow_states' in setting
             assert 'list_workflow_stories' in setting and 'list_stories' in setting
-            assert 'update_row_cells' not in setting and 'create_story_comment' in setting
+            assert 'appflowy_rows' not in setting and 'create_story_comment' in setting
         else:
-            assert source == 'AppFlowy' and 'update_row_cells' in setting
+            assert source == 'AppFlowy' and 'appflowy_rows' in setting
+            assert project['appflowy_board'] == dict(workspace_id='workspace',
+                database_id=project['id'], view_id='view-' + project['id'])
+            assert 'Every workspace-scoped read AND write MUST explicitly include' in prompt
+            if not claude:
+                import tomllib
+                policy = tomllib.loads(setting)['mcp_servers'][project['mcp_server']]['tools']
+                assert policy['appflowy_database']['approval_mode'] == 'approve'
+
             assert 'update_story' not in setting
     event('coordinator', model=model, effort=effort, provider='claude' if claude else 'codex', snapshot=snapshot, projects=[p['id'] for p in projects])
     if (ROOT / 'luna-fail').exists():

@@ -1824,3 +1824,38 @@ async fn project_worker_settings_reach_both_providers() {
         }
     }
 }
+
+#[tokio::test]
+async fn unresolved_appflowy_board_is_excluded_from_coordination() {
+    let mut f = Fixture::new(&[Mode::Master, Mode::Master]);
+    f.config.projects[1].appflowy_page = Some("missing-board".into());
+    let runner = maistro::agent::AgentRunner::new(f.config.clone());
+    let result = runner
+        .coordinate(
+            &Default::default(),
+            &["p0".into(), "p1".into()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.retry_projects, vec!["p1"]);
+    assert_eq!(result.assignments.len(), 1);
+    assert_eq!(result.assignments[0].project_id, "p0");
+    assert_eq!(f.board()["p1"]["status"], "Ready");
+    let events = f.events().len();
+    let result = runner
+        .coordinate(
+            &Default::default(),
+            &["p1".into()],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.retry_projects, vec!["p1"]);
+    assert!(result.assignments.is_empty());
+    assert_eq!(
+        events,
+        f.events().len(),
+        "No model call for unresolved boards"
+    );
+}

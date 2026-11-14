@@ -123,6 +123,22 @@ impl Engine {
             config,
         }
     }
+    /// Check the remote tool manifest without reading or mutating boards.
+    pub async fn validate_appflowy_tools(&self) -> Result<()> {
+        let mut checked = HashSet::new();
+        for project in self
+            .config
+            .projects
+            .iter()
+            .filter(|p| p.enabled && !p.is_shortcut())
+        {
+            if checked.insert(project.mcp_server(&self.config.agents)) {
+                let config = self.agents.mcp_config(project)?;
+                crate::mcp::Client::connect(&config).await?.close().await;
+            }
+        }
+        Ok(())
+    }
     pub async fn validate(&self) -> Result<()> {
         self.config.validate()?;
         self.agents.validate_cli().await?;

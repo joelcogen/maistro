@@ -34,6 +34,21 @@ fn complete(value: &Value) -> Result<()> {
     );
     Ok(())
 }
+fn continuation(page: &Value, offset: u64) -> Result<Option<u64>> {
+    if !page["has_more"].as_bool().context("paging state missing")? {
+        ensure!(
+            page.get("next_offset").is_none_or(Value::is_null),
+            "unexpected continuation"
+        );
+        return Ok(None);
+    }
+    let next = page["next_offset"]
+        .as_u64()
+        .context("continuation missing")?;
+    ensure!(next > offset && next <= 1_000_000, "invalid continuation");
+    Ok(Some(next))
+}
+
 fn keyed(items: &Value) -> Result<BTreeMap<String, Value>> {
     let mut result = BTreeMap::new();
     for item in array(items)? {
@@ -87,6 +102,76 @@ struct Board {
     view: String,
 }
 impl Client {
+    async fn pages(&self, name: &'static str, mut request: Value, key: &str) -> Result<Value> {
+        let mut items = vec![];
+        let mut offset = 0;
+        loop {
+            request["offset"] = json!(offset);
+            request["limit"] = json!(100);
+            let page = self.call(name, request.clone()).await?;
+            complete(&page)?;
+            let batch = array(page.get(key).context("missing compact list")?)?;
+            for item in batch {
+                complete(item)?;
+            }
+            items.extend(batch.iter().cloned());
+            match continuation(&page, offset)? {
+                Some(next) => offset = next,
+                None => return Ok(Value::Array(items)),
+            }
+        }
+    }
+    async fn markdown(&self, workspace: &str, row: &str) -> Result<Value> {
+        let mut offset = 0;
+        let mut hash = None;
+        let mut text = String::new();
+        loop {
+            let page = self
+                .call(
+                    "appflowy_fetch",
+                    json!({"workspace_id":workspace,
+                "kind":"page", "id":row, "response_format":"markdown", "offset":offset}),
+                )
+                .await?;
+            for key in ["unavailable", "content_omitted", "partial"] {
+                ensure!(page[key] != true, "incomplete Markdown response");
+            }
+            let current = page["content_hash"]
+                .as_str()
+                .context("Markdown hash missing")?;
+            ensure!(
+                hash.as_deref().is_none_or(|h| h == current),
+                "Markdown changed during read"
+            );
+            hash = Some(current.to_owned());
+            ensure!(page["offset"] == offset, "Markdown offset mismatch");
+            let chunk = page["data"]["markdown"]
+                .as_str()
+                .context("Markdown chunk missing")?;
+            text.push_str(chunk);
+            match continuation(&page, offset)? {
+                Some(next) => {
+                    ensure!(
+                        next == offset + chunk.chars().count() as u64,
+                        "Markdown continuation mismatch"
+                    );
+                    offset = next;
+                }
+                None => {
+                    ensure!(page["truncated"] != true, "incomplete Markdown response");
+                    ensure!(
+                        Sha256::digest(text.as_bytes())
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect::<String>()
+                            == current,
+                        "Markdown content hash mismatch"
+                    );
+                    return Ok(json!(text));
+                }
+            }
+        }
+    }
     async fn resolve(&self, project: &Project) -> Result<Board> {
         let url = project
             .appflowy_url
@@ -105,7 +190,9 @@ impl Client {
                     .collect()
             })
             .unwrap_or_default();
-        let workspaces = self.call("get_workspaces", json!({})).await?;
+        let workspaces = self
+            .pages("appflowy_fetch", json!({"kind":"workspaces"}), "data")
+            .await?;
         let workspaces = array(&workspaces)?;
         let scoped_workspace = url.is_some()
             && workspaces.iter().any(|w| {
@@ -126,7 +213,11 @@ impl Client {
                 continue;
             }
             let databases = self
-                .call("list_databases", json!({"workspace_id":workspace}))
+                .pages(
+                    "appflowy_database",
+                    json!({"workspace_id":workspace,"command":"list"}),
+                    "items",
+                )
                 .await?;
             for database in array(&databases)? {
                 let db_id = id(database)?;
@@ -161,7 +252,7 @@ impl Client {
         let mut comments = BTreeMap::new();
         let mut offset = 0;
         loop {
-            let page = self.call("list_comments", json!({"workspace_id":workspace,"target_id":target,"target_type":kind,"limit":100,"offset":offset})).await?;
+            let page = self.call("appflowy_fetch", json!({"kind":"comments","workspace_id":workspace,"id":target,"target_type":kind,"limit":100,"offset":offset})).await?;
             complete(&page)?;
             for comment in array(page.get("comments").context("comments missing")?)? {
                 complete(comment)?;
@@ -195,36 +286,36 @@ impl Client {
         Ok(serde_json::to_value(comments)?)
     }
     async fn scan(&self, board: &Board, project: &Project) -> Result<Fingerprint> {
-        let args = json!({"workspace_id":board.workspace,"database_id":board.database});
         let metadata = self
             .call(
-                "get_page",
-                json!({"workspace_id":board.workspace,"view_id":board.view}),
+                "appflowy_fetch",
+                json!({"kind":"workspace_folder","workspace_id":board.workspace,"id":board.view,"depth":1}),
             )
             .await?;
         complete(&metadata)?;
-        let metadata = metadata.get("view").unwrap_or(&metadata);
+        let metadata = metadata.get("data").context("page data missing")?;
+        let metadata = metadata.get("view").unwrap_or(metadata);
         complete(metadata)?;
         ensure!(
             metadata["view_id"] == board.view || metadata["id"] == board.view,
             "board metadata identity mismatch"
         );
-        let fields = keyed(&self.call("get_database_fields", args.clone()).await?)?;
-        let ids = keyed(&self.call("get_database_row_ids", args.clone()).await?)?;
-        let mut rows = BTreeMap::new();
-        let names: Vec<_> = ids.keys().cloned().collect();
-        for batch in names.chunks(50) {
-            let details = self.call("get_database_row_details", json!({"workspace_id":board.workspace,"database_id":board.database,"row_ids":batch.join(","),"with_doc":false})).await?;
-            let details = keyed(&details)?;
-            ensure!(
-                details.keys().eq(batch.iter()),
-                "incomplete row details (AppFlowy may omit unavailable rows)"
-            );
-            for (row_id, row) in details {
-                ensure!(row["cells"].is_object(), "row cells missing");
-                ensure!(row["has_doc"].is_boolean(), "row document presence missing");
-                rows.insert(row_id, row);
-            }
+        let fields_args =
+            json!({"workspace_id":board.workspace,"database_id":board.database,"command":"fields"});
+        let rows_args = json!({"workspace_id":board.workspace,"database_id":board.database,"command":"list","with_doc":false});
+        let fields = keyed(
+            &self
+                .pages("appflowy_database", fields_args.clone(), "items")
+                .await?,
+        )?;
+        let rows = keyed(
+            &self
+                .pages("appflowy_rows", rows_args.clone(), "items")
+                .await?,
+        )?;
+        for row in rows.values() {
+            ensure!(row["cells"].is_object(), "row cells missing");
+            ensure!(row["has_doc"].is_boolean(), "row document presence missing");
         }
         // Complete the cheap cell scan before fetching any bodies or comments.
         let all_ids: BTreeSet<_> = rows.keys().cloned().collect();
@@ -241,11 +332,7 @@ impl Client {
             let row = &rows[&row_id];
             let has_doc = row["has_doc"].as_bool().unwrap();
             let body = if has_doc {
-                self.call(
-                    "get_page_markdown",
-                    json!({"workspace_id":board.workspace,"page_id":row_id}),
-                )
-                .await?
+                self.markdown(&board.workspace, &row_id).await?
             } else {
                 Value::Null
             };
@@ -292,11 +379,17 @@ impl Client {
         // below also protect offset paging and cross-resource races. This is
         // still eventual consistency, not a transactional snapshot.
         ensure!(
-            ids == keyed(&self.call("get_database_row_ids", args.clone()).await?)?,
+            rows.keys()
+                .eq(keyed(&self.pages("appflowy_rows", rows_args, "items").await?)?.keys()),
             "board membership changed during read"
         );
         ensure!(
-            fields == keyed(&self.call("get_database_fields", args).await?)?,
+            fields
+                == keyed(
+                    &self
+                        .pages("appflowy_database", fields_args, "items")
+                        .await?
+                )?,
             "board schema changed during read"
         );
         Ok(fingerprint(
@@ -315,6 +408,30 @@ impl Client {
         );
         Ok(second)
     }
+}
+
+/// Resolve the configured board afresh for the coordinator, using the same identity
+/// checks as polling. Only identities are supplied; story reads remain fresh.
+pub(crate) async fn board_context(
+    config: &toml::Value,
+    project: &Project,
+    timeout: std::time::Duration,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Value> {
+    let mut client = None;
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Err(anyhow::anyhow!("AppFlowy board resolution cancelled")),
+        result = tokio::time::timeout(timeout, async {
+            client = Some(Client::connect(config).await?);
+            let board = client.as_ref().unwrap().resolve(project).await?;
+            Ok::<_, anyhow::Error>(json!({"workspace_id":board.workspace,
+                "database_id":board.database,"view_id":board.view}))
+        }) => result.context("AppFlowy board resolution timed out").and_then(|r| r),
+    };
+    if let Some(client) = client {
+        client.close().await;
+    }
+    result
 }
 
 /// Each project polls independently, including while the single coordinator runs.
@@ -406,10 +523,33 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn compact_rejects_changed_markdown_hash_and_legacy_manifest() {
+        let (f, client) = Fixture::new().await;
+        fs::write(f.root.path().join("poll-bad-hash"), "").unwrap();
+        assert!(
+            format!("{:#}", client.observe(&f.project).await.unwrap_err())
+                .contains("Markdown changed")
+        );
+        client.close().await;
+        fs::write(f.root.path().join("legacy-profile"), "").unwrap();
+        let config = toml::from_str(&format!(
+            "command='python3'\nargs=['{}','{}']",
+            f.root.path().join("mcp.py").display(),
+            f.root.path().display()
+        ))
+        .unwrap();
+        let error = match Client::connect(&config).await {
+            Ok(_) => panic!("accepted legacy server"),
+            Err(e) => e,
+        };
+        assert!(format!("{error:#}").contains("APPFLOWY_TOOL_PROFILE=compact"));
+    }
+
+    #[tokio::test]
     async fn complete_fingerprint_covers_membership_cells_bodies_all_comments_and_schema() {
         let (mut f, client) = Fixture::new().await;
         let initial = f.observe(&client).await;
-        // Every scan reverses fields/details ordering and changes MCP/request metadata.
+        // Transport metadata changes between reads; normalized observations remain stable.
         for _ in 0..3 {
             assert_eq!(initial, f.observe(&client).await);
         }

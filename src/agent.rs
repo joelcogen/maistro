@@ -53,9 +53,15 @@ impl AgentRunner {
             .or_insert_with(|| toml::Value::Table(Default::default()))
             .as_table_mut()
             .context("invalid MCP tool policies")?;
-        for tool in writes {
+        // Compact database commands share one tool-level approval gate, including
+        // read commands. The coordinator prompt restricts its mutation commands.
+        let approvals = writes
+            .iter()
+            .copied()
+            .chain((!project.is_shortcut()).then_some("appflowy_database"));
+        for tool in approvals {
             let policy = policies
-                .entry(*tool)
+                .entry(tool)
                 .or_insert_with(|| toml::Value::Table(Default::default()))
                 .as_table_mut()
                 .context("invalid MCP tool policy")?;
@@ -323,6 +329,35 @@ impl AgentRunner {
                     }
                 }
             }
+            if !p.is_shortcut() {
+                let config = self.mcp_config(p)?;
+                match crate::poll::board_context(
+                    &config,
+                    p,
+                    Duration::from_secs(self.config.orchestrator.coordinator_timeout_seconds),
+                    cancel,
+                )
+                .await
+                {
+                    Ok(board) => value["appflowy_board"] = board,
+                    Err(error) => {
+                        tracing::warn!(project=%p.id, error=%format!("{error:#}"), "AppFlowy board resolution failed");
+                        failed.retry_projects.push(p.id.clone());
+                        failed.notes.push(format!(
+                            "{}: AppFlowy board resolution failed; retrying without source writes",
+                            p.id
+                        ));
+                        failed.observations.push(crate::status::BoardRead {
+                            project_id: p.id.clone(),
+                            counts: None,
+                            read: crate::status::ReadState::Failed,
+                            reason: crate::status::Reason::ReadFailed,
+                            counted_assignment: None,
+                        });
+                        continue;
+                    }
+                }
+            }
             project_context.push(value);
             healthy.push(p);
         }
@@ -537,22 +572,12 @@ pub(crate) fn source_tools(
             "read_file",
         ]
     } else {
-        &[
-            "get_workspaces",
-            "get_workspace_folder",
-            "list_databases",
-            "get_database_fields",
-            "get_database_row_ids",
-            "get_database_row_details",
-            "get_page",
-            "get_page_markdown",
-            "list_comments",
-        ]
+        &["appflowy_fetch", "appflowy_database", "appflowy_rows"]
     };
     let writes: &[&str] = if project.is_shortcut() {
         &["update_story", "create_story_comment"]
     } else {
-        &["update_row_cells", "append_comment"]
+        &["appflowy_rows", "appflowy_update"]
     };
     (reads, writes)
 }

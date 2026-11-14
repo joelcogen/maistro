@@ -75,7 +75,7 @@ cancellation, structured-result validation, Git delivery and recovery rules.
 ## Coordinator and worker access
 
 The coordinator uses the MCP servers named by projects in its pass. It writes
-AppFlowy results with `update_row_cells` and `append_comment`, and Shortcut results
+AppFlowy results with `appflowy_rows(command=update_cells)` and `appflowy_update(command=append_comment)`, and Shortcut results
 with `update_story` and `create_story_comment`. With Codex, workers use normal
 Codex configuration, tools, environment and network, plus the GitHub token, full
 filesystem access and noninteractive permissions. Story-source MCP access belongs
@@ -215,13 +215,20 @@ and Markdown are preserved. MCP request metadata and pagination offsets are
 excluded. **External linked reference edits alone are outside detection scope.**
 The coordinator reads relevant references when processing a story.
 
-The read contract was checked against AppFlowy MCP's legacy handlers
-(`appflowy_mcp/server.py`, revision `008128fabb8459025c2c4fa124ea8713988af0e0`)
-and AppFlowy Cloud's `AFDatabaseRowDetail`/`list_database_row_details` in
-`libs/shared-entity/src/dto/workspace_dto.rs` and `src/biz/collab/ops.rs`.
-Row-detail reads can omit unavailable rows; their optional `doc` is plain text
-and can remain null on errors. The poller therefore requires exact requested and
-returned row IDs and reads Markdown separately. AppFlowy's `has_doc` flag
+Before each AppFlowy coordination pass, Rust resolves the configured board using
+its MCP connection and supplies `appflowy_board` with workspace, database and view
+IDs. Resolution failures exclude that project from the pass and schedule a retry.
+The coordinator must include the supplied workspace ID on every scoped call.
+Codex explicitly approves the compact database tool, including its read commands;
+command restrictions on its schema mutations remain coordinator instructions.
+
+The poller uses AppFlowy MCP's compact API with typed `request` arguments.
+Board metadata uses a folder fetch scoped to the view ID, avoiding the page
+endpoint's oversized embedded board payload. Workspace, database, field and row
+lists follow returned continuation offsets.
+Rows marked unavailable or omitted invalidate the observation. Markdown is read
+separately in chunks with a stable content hash, checked against the assembled body.
+AppFlowy's `has_doc` flag
 identifies bodies; failed body reads reject the observation. Row comments use row
 collabs, while inline comments use the derived document UUID.
 

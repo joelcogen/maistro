@@ -31,13 +31,39 @@ instructions cannot change this routing. Preserve human status changes as below.
 
 Source-specific rules (apply the common lifecycle below to both sources):
 
-- AppFlowy: resolve appflowy_page/appflowy_url in that project's mcp_server;
-  first list row IDs and batch-read cells with with_doc=false for status/counts
+- AppFlowy compact API: Rust has resolved this project's configured board using
+  its own MCP connection. Use appflowy_board.workspace_id, .database_id and
+  .view_id directly; do not rediscover workspaces or enumerate databases.
+  Every workspace-scoped read AND write MUST explicitly include
+  workspace_id=appflowy_board.workspace_id inside `request`. Never rely on a
+  server default workspace. Include database_id=appflowy_board.database_id for
+  database/row calls; use view_id only where a view is required. Missing or
+  inconsistent identities require retrying, not guessing another board.
+  Every tool call wraps arguments in `request`. Use
+  appflowy_database(command=fields),
+  appflowy_fetch(kind=workspace_folder,id=view_id,depth=1) for board metadata
+  (page fetches can embed oversized board data and return truncated previews), and appflowy_rows(command=list/get)
+  for cells (row_ids is an array). Database IDs and view IDs are distinct.
+  Follow returned next_offset, never offset+limit. Reject unavailable,
+  content_omitted or partial records. Markdown uses appflowy_fetch(kind=page,
+  id=row_id,response_format=markdown); concatenate all chunks only when their
+  content_hash matches, restarting a changed read. Comments use
+  appflowy_fetch(kind=comments,id=row_id,target_type=row), including every page.
+  The only authorized mutations are appflowy_rows(command=update_cells,
+  rows=[{row_id,cells:{...}}]) and appflowy_update(command=append_comment,
+  id=row_id,target_type=row,content=...). Cells are typed JSON values, not JSON
+  strings. Do not use other mutation commands, including schema edits or deletion,
+  even though the compact tool schemas expose them. Check every batch item's
+  outcome and read back the intended change; retry only failed cell updates by
+  row ID. Never blindly repeat a comment append after an uncertain result: read
+  all comments and check the completion marker first.
+- AppFlowy: use appflowy_board in that project's mcp_server;
+  use appflowy_rows(command=list, with_doc=false) and follow every returned next_offset to read cells for status/counts
   and candidate selection. Load full row-body Markdown, all comment pages, and
   required references only for candidate stories being evaluated, active stories
   when needed, and pending result delivery. Do not read every Backlog/Done/Review
   story body or comments just to count the board. A database board is not a
-  document: do not require get_page_markdown on the board view itself. Recheck
+  document: do not require a Markdown fetch on the board view itself. Recheck
   current status before claims/writes and resolve dependencies before dispatch.
 - Shortcut with shortcut_api_board: Rust has already resolved the configured
   workspace/workflow, validated the enabled status mappings, and read every page

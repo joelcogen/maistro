@@ -59,10 +59,16 @@ the selected provider's configuration. Codex supports stdio `command`, `args`,
 `env_http_headers` and `bearer_token_env_var`. Claude transport keys are described
 [below](#global-provider-models-and-effort). Rust polling uses the MCP SDK directly.
 
-Enable AppFlowy MCP's legacy read tools: `get_workspaces`, `list_databases`,
-`get_page`, `get_database_fields`, `get_database_row_ids`,
-`get_database_row_details`, `get_page_markdown` and `list_comments`. Use stdio or
-streamable HTTP with explicit headers/token for polling authentication.
+Use AppFlowy MCP's default compact profile (`APPFLOWY_TOOL_PROFILE=compact`).
+Required read tools are `appflowy_fetch`, `appflowy_database`, and `appflowy_rows`;
+coordination also needs `appflowy_update`. Legacy-only servers are rejected during
+connection with a profile diagnostic. Rust polling uses only read commands.
+Coordinator tool allowlists operate at tool-name granularity: compact tools also
+expose other mutation commands, which coordinator instructions prohibit. Codex
+explicitly approves `appflowy_database` as well as row/comment tools because even
+its list/fields commands otherwise require approval. Rust supplies resolved board
+identities to the coordinator, which must include workspace IDs on scoped calls.
+Use stdio or streamable HTTP with explicit headers/token for polling authentication.
 Connection/authentication errors are reported and retried at the polling interval.
 
 ### GitHub token
@@ -220,7 +226,8 @@ journalctl --user -u maistro -f
 Use `systemctl --user enable maistro` to start with the user service manager.
 Configure user lingering for operation after logout. `validate` checks local
 configuration, repository identities/remotes, the selected CLI login, the private
-token file and enabled projects' MCP configuration. Remote authentication, board
+token file and enabled projects' MCP configuration. For AppFlowy it also connects
+and checks compact tool availability without reading boards. Remote authentication, board
 access and push permissions are checked during operation.
 
 The service runs as your user with `~/.local/bin` and `~/.cargo/bin` in PATH. It

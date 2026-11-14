@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Read-only MCP fixture using AppFlowy's legacy response shapes, no model/API calls."""
+"""Read-only MCP fixture using AppFlowy's compact request and response shapes, no model/API calls."""
+import hashlib
 import fcntl
 import json
 from pathlib import Path
@@ -41,7 +42,7 @@ def call(name, args):
         return dict(view=dict(view_id='view-' + project, name='board', layout=2, extra=story.get('metadata')), request_id=sequence)
     if name == 'get_database_fields':
         fields = story.get('fields', [{'id': 'title', 'name': 'Title'}, {'id': 'status', 'name': 'Status'}])
-        return fields if sequence % 2 else list(reversed(fields))
+        return list(reversed(fields))
     if name == 'get_database_row_ids':
         if (ROOT / ('poll-paged-' + project)).exists():
             return {'items': [], 'has_more': True}
@@ -76,6 +77,51 @@ def call(name, args):
     raise RuntimeError('unexpected fixture call ' + name)
 
 
+def compact(name, arguments):
+    assert set(arguments) == {'request'}
+    r = arguments['request']
+    args = dict(r)
+    if name == 'appflowy_fetch':
+        kind = r.get('kind', 'page')
+        old = {'workspaces': 'get_workspaces', 'comments': 'list_comments', 'page': 'get_page', 'workspace_folder': 'get_page'}[kind]
+        if r.get('response_format') == 'markdown':
+            old = 'get_page_markdown'
+        args.update(view_id=r.get('id', ''), target_id=r.get('id', ''), page_id=r.get('id', ''))
+    elif name == 'appflowy_database':
+        old = {'list': 'list_databases', 'fields': 'get_database_fields'}[r['command']]
+    elif name == 'appflowy_rows':
+        assert r['command'] == 'list' and r['with_doc'] is False
+        ids = call('get_database_row_ids', args)
+        if isinstance(ids, dict):
+            return ids
+        args['row_ids'] = ','.join(x['id'] for x in ids)
+        data = call('get_database_row_details', args)
+        if len(data) != len(ids):
+            data = [{'id': x['id'], 'unavailable': True} for x in ids]
+        old = None
+    else:
+        raise RuntimeError('legacy tools are not exposed')
+    if old:
+        data = call(old, args)
+    if old == 'list_comments':
+        return data
+    if old == 'get_page' and r['kind'] == 'page':
+        return {'truncated': True, 'preview': 'oversized embedded board data'}
+    if old == 'get_page':
+        return {'data': data, 'truncated': False}
+    if old == 'get_page_markdown':
+        offset = r.get('offset', 0)
+        end = min(offset + 3, len(data))
+        return dict(data={'markdown': data[offset:end]}, offset=offset,
+                    next_offset=end if end < len(data) else None, has_more=end < len(data),
+                    truncated=end < len(data), content_hash=('changed' if offset and (ROOT / 'poll-bad-hash').exists() else hashlib.sha256(data.encode()).hexdigest()))
+    offset = r.get('offset', 0)
+    end = min(offset + 2, len(data))
+    return {('data' if old == 'get_workspaces' else 'items'): data[offset:end],
+            'offset': offset, 'has_more': end < len(data),
+            'next_offset': end if end < len(data) else None}
+
+
 for line in sys.stdin:
     request = json.loads(line)
     if 'id' not in request:
@@ -85,9 +131,11 @@ for line in sys.stdin:
         if method == 'initialize':
             result = dict(protocolVersion=request['params']['protocolVersion'], capabilities={'tools': {}},
                           serverInfo=dict(name='fixture-appflowy', version='1'))
+        elif method == 'tools/list':
+            result = {'tools': []} if (ROOT / 'legacy-profile').exists() else {'tools': [dict(name=n, inputSchema={'type': 'object'}) for n in ['appflowy_fetch', 'appflowy_database', 'appflowy_rows', 'appflowy_update']]}
         elif method == 'tools/call':
             args = request['params']
-            data = call(args['name'], args.get('arguments', {}))
+            data = compact(args['name'], args.get('arguments', {}))
             result = dict(content=[dict(type='text', text=data if isinstance(data, str) else json.dumps(data))],
                           structuredContent={'result': data} if not isinstance(data, dict) else data,
                           isError=False, _meta={'request_id': sequence})

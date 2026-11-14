@@ -603,7 +603,7 @@ args = ["--fixture"]
         "create_story",
         "delete_story",
         "create_doc",
-        "update_row_cells",
+        "appflowy_rows",
         "list_workspace_tokens",
     ] {
         assert!(
@@ -627,11 +627,19 @@ args = ["--fixture"]
     config.projects[0].mcp_server = None;
     let appflowy = codex.mcp_config(&config.projects[0]).unwrap();
     assert_eq!(appflowy["command"].as_str(), Some("fixture-appflowy"));
+    for tool in ["appflowy_database", "appflowy_rows", "appflowy_update"] {
+        assert_eq!(
+            appflowy["tools"][tool]["approval_mode"].as_str(),
+            Some("approve"),
+            "compact tool {tool} must work under approval policy never"
+        );
+    }
+
     assert!(
         appflowy["enabled_tools"]
             .as_array()
             .unwrap()
-            .contains(&toml::Value::from("update_row_cells"))
+            .contains(&toml::Value::from("appflowy_rows"))
     );
     config.projects[0].mcp_server = Some("missing".into());
     assert!(

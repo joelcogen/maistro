@@ -39,8 +39,9 @@ async fn main() -> Result<()> {
     match cli.command {
         Action::Validate => {
             engine.validate().await?;
+            engine.validate_appflowy_tools().await?;
             println!(
-                "Configuration, configured private token files, repositories, selected agent login and source MCP settings are valid. No remote access, token permissions or model calls were tested."
+                "Configuration, configured private token files, repositories, selected agent login and source MCP settings and AppFlowy compact tool availability are valid. Board access, token permissions and model calls were not tested."
             );
         }
         Action::Run => {

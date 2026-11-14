@@ -10,7 +10,7 @@ use rmcp::{
         streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{collections::HashMap, process::Stdio, time::Duration};
 use tokio::process::Command;
 
@@ -78,18 +78,33 @@ impl Client {
         } else {
             bail!("AppFlowy MCP requires command or streamable HTTP url");
         };
-        Ok(Self(service))
+        let client = Self(service);
+        let check = async {
+            let tools = client.0.list_all_tools().await?;
+            for name in ["appflowy_fetch", "appflowy_database", "appflowy_rows"] {
+                ensure!(
+                    tools.iter().any(|t| t.name == name),
+                    "AppFlowy compact API tool {name} missing; select APPFLOWY_TOOL_PROFILE=compact and reconnect"
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        if let Err(error) = tokio::time::timeout(Duration::from_secs(60), check)
+            .await
+            .context("AppFlowy tool discovery timed out")
+            .and_then(|r| r)
+        {
+            client.close().await;
+            return Err(error);
+        }
+        Ok(client)
     }
     pub async fn call(&self, name: &'static str, arguments: Value) -> Result<Value> {
         let result = tokio::time::timeout(
             Duration::from_secs(60),
             self.0.call_tool(
-                CallToolRequestParams::new(name).with_arguments(
-                    arguments
-                        .as_object()
-                        .context("MCP arguments must be an object")?
-                        .clone(),
-                ),
+                CallToolRequestParams::new(name)
+                    .with_arguments(json!({"request": arguments}).as_object().unwrap().clone()),
             ),
         )
         .await
@@ -119,41 +134,10 @@ impl Client {
             texts.len() == result.content.len(),
             "AppFlowy MCP {name} returned unexpected content"
         );
-        if matches!(
-            name,
-            "get_workspaces"
-                | "list_databases"
-                | "get_database_fields"
-                | "get_database_row_ids"
-                | "get_database_row_details"
-        ) {
-            // FastMCP can emit one JSON text block per list item, including zero
-            // blocks for an empty list. Keep an already encoded array intact.
-            let values: Vec<Value> = texts
-                .iter()
-                .map(|text| serde_json::from_str(text))
-                .collect::<std::result::Result<_, _>>()
-                .with_context(|| format!("AppFlowy MCP {name} returned invalid JSON"))?;
-            if values.len() == 1 && values[0].is_array() {
-                return Ok(values.into_iter().next().unwrap());
-            }
-            ensure!(
-                values.iter().all(|v| v.is_object()
-                    && (v.get("id").is_some()
-                        || v.get("row_id").is_some()
-                        || v.get("workspace_id").is_some())),
-                "AppFlowy MCP {name} returned an incomplete or unexpected list"
-            );
-            return Ok(Value::Array(values));
-        }
         ensure!(
             texts.len() == 1,
             "AppFlowy MCP {name} returned unexpected content"
         );
-        if name == "get_page_markdown" {
-            // FastMCP strings are plain text, not JSON. Preserve exact content.
-            return Ok(Value::String(texts[0].to_owned()));
-        }
         serde_json::from_str(texts[0])
             .with_context(|| format!("AppFlowy MCP {name} returned invalid JSON"))
     }
@@ -170,43 +154,34 @@ mod tests {
         http::{HeaderMap, StatusCode},
         routing::post,
     };
-    use serde_json::json;
 
     #[tokio::test]
-    async fn streamable_http_reuses_headers_and_handles_text_results_and_tool_errors() {
+    async fn compact_http_checks_manifest_wraps_requests_and_redacts_errors() {
         async fn handler(
             headers: HeaderMap,
             Json(request): Json<Value>,
         ) -> (StatusCode, Json<Value>) {
             assert_eq!(headers["authorization"], "Bearer fixture-only");
-            assert_eq!(headers["x-appflowy-client"], "maistro-fixture");
             let Some(id) = request.get("id") else {
                 return (StatusCode::ACCEPTED, Json(Value::Null));
             };
             let result = match request["method"].as_str().unwrap() {
                 "initialize" => {
-                    json!({"protocolVersion": request["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
+                    json!({"protocolVersion":request["params"]["protocolVersion"],"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}})
                 }
-                "tools/call" => match request["params"]["name"].as_str().unwrap() {
-                    "get_workspaces" => {
-                        json!({"content":[{"type":"text","text":"[]"}], "_meta":{"volatile":123}})
-                    }
-                    "list_databases" => {
-                        json!({"content":[{"type":"text","text":"{\"id\":\"one\"}"},{"type":"text","text":"{\"id\":\"two\"}"}]})
-                    }
-                    "get_database_fields" => {
-                        json!({"content":[{"type":"text","text":"{\"id\":\"field\"}"}]})
-                    }
-                    "get_database_row_ids" => json!({"content":[]}),
-                    "get_database_row_details" => {
-                        json!({"content":[{"type":"text","text":"{\"partial\":true,\"rows\":[]}"}]})
-                    }
-                    "get_page_markdown" => json!({"content":[{"type":"text","text":"[1,2]"}]}),
-                    _ => {
+                "tools/list" => json!({"tools":[
+                    {"name":"appflowy_fetch","inputSchema":{"type":"object"}},
+                    {"name":"appflowy_database","inputSchema":{"type":"object"}},
+                    {"name":"appflowy_rows","inputSchema":{"type":"object"}}]}),
+                "tools/call" => {
+                    assert_eq!(request["params"]["arguments"].as_object().unwrap().len(), 1);
+                    if request["params"]["arguments"]["request"]["kind"] == "workspaces" {
+                        json!({"content":[{"type":"text","text":"{\"data\":[],\"has_more\":false}"}]})
+                    } else {
                         json!({"isError":true,"content":[{"type":"text","text":"private remote error"}]})
                     }
-                },
-                _ => panic!("unexpected MCP request"),
+                }
+                _ => panic!("unexpected request"),
             };
             (
                 StatusCode::OK,
@@ -220,38 +195,22 @@ mod tests {
                 .await
                 .unwrap();
         });
-        let config = toml::from_str(&format!("url='http://{address}/mcp'\n[http_headers]\nAuthorization='Bearer fixture-only'\nx-appflowy-client='maistro-fixture'\n")).unwrap();
+        let config = toml::from_str(&format!(
+            "url='http://{address}/mcp'\n[http_headers]\nAuthorization='Bearer fixture-only'\n"
+        ))
+        .unwrap();
         let client = Client::connect(&config).await.unwrap();
         assert_eq!(
-            client.call("get_workspaces", json!({})).await.unwrap(),
-            json!([])
-        );
-        assert_eq!(
-            client.call("get_page_markdown", json!({})).await.unwrap(),
-            json!("[1,2]")
-        );
-        assert_eq!(
-            client.call("list_databases", json!({})).await.unwrap(),
-            json!([{"id":"one"},{"id":"two"}])
-        );
-        assert_eq!(
-            client.call("get_database_fields", json!({})).await.unwrap(),
-            json!([{"id":"field"}])
-        );
-        assert_eq!(
             client
-                .call("get_database_row_ids", json!({}))
+                .call("appflowy_fetch", json!({"kind":"workspaces"}))
                 .await
                 .unwrap(),
-            json!([])
+            json!({"data":[],"has_more":false})
         );
-        assert!(
-            client
-                .call("get_database_row_details", json!({}))
-                .await
-                .is_err()
-        );
-        let error = client.call("get_page", json!({})).await.unwrap_err();
+        let error = client
+            .call("appflowy_fetch", json!({"kind":"page"}))
+            .await
+            .unwrap_err();
         assert!(!format!("{error:#}").contains("private remote error"));
         client.close().await;
         server.abort();
