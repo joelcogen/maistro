@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 class Node {
   constructor(tag) { this.tag = tag; this.children = []; this.textContent = ''; }
+  setAttribute(name, value) { this[name] = value; }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   set innerHTML(_) { throw new Error('Unsafe HTML rendering'); }
@@ -29,7 +30,7 @@ function snapshot() {
   };
 }
 function harness(fetch) {
-  const nodes = Object.fromEntries(['connection', 'daemon', 'overall', 'projects'].map(id => [id, new Node('div')]));
+  const nodes = Object.fromEntries(['connection', 'uptime', 'daemon', 'overall', 'projects'].map(id => [id, new Node('div')]));
   const timers = [];
   const context = vm.createContext({ document: { createElement: tag => new Node(tag), getElementById: id => nodes[id] },
     URL, Date, AbortSignal, fetch, setTimeout: (fn, ms) => timers.push({ fn, ms }) });
@@ -101,12 +102,14 @@ test('agents list starts with the coordinator followed by each project and its s
   })));
   const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
   await flush();
-  assert.match(nodes.daemon.text, /Uptime 0h 2m 3s/);
+  assert.match(nodes.uptime.text, /Uptime 0h 2m 3s/);
   assert.match(nodes.daemon.text, /Last coordination pass: 6 minutes ago/);
   const rows = nodes.daemon.all().filter(n => n.tag === 'li');
-  assert.deepEqual(rows.map(n => n.text), [
-    'Coordinator\nIdle', '<img onerror=evil()>\nIdle', 'disabled\nDisabled', 'active\nRunning', 'stopping\nRunning', 'idle\nIdle'
-  ].map(text => `${text}\nConfigured effort: inherited/default`));
+  assert.deepEqual(rows.map(n => n.children[0].children[0].text),
+    ['Coordinator', '<img onerror=evil()>', 'disabled', 'active', 'stopping', 'idle']);
+  assert.deepEqual(rows.map(n => n.children[1]['aria-label']),
+    ['Idle', 'Result waiting for board', 'Disabled', 'Worker active', 'Worker stopping', 'Idle']);
+  assert.deepEqual(rows.filter(n => n.children[1].className.includes('running')).map(n => n.children[0].children[0].text), ['active', 'stopping']);
   assert.doesNotMatch(nodes.daemon.text, /Started|Finished|Duration|Verbose event|<script>|Result waiting/);
 });
 
@@ -117,13 +120,13 @@ test('agents show configured effort for each role, including disabled workers, w
   data.projects[1].worker.configured_effort = 'high';
   const { nodes, context } = harness(async () => ({ ok: true, json: async () => data }));
   await flush();
-  const efforts = () => nodes.daemon.all().filter(n => n.className === 'worker-effort muted').map(n => n.text);
-  assert.deepEqual(efforts(), ['Configured effort: low', 'Configured effort: high', 'Configured effort: high']);
+  const efforts = () => nodes.daemon.all().filter(n => n.className === 'worker-config').map(n => n.text);
+  assert.deepEqual(efforts(), ['Default model · low', 'Default model · high', 'Default model · high']);
   data.coordinator.configured_effort = null;
   data.projects[0].worker.configured_effort = null;
   context.data = data;
   vm.runInContext('render(data)', context);
-  assert.deepEqual(efforts(), ['Configured effort: inherited/default', 'Configured effort: inherited/default', 'Configured effort: high']);
+  assert.deepEqual(efforts(), ['Default model · default', 'Default model · default', 'Default model · high']);
   assert.doesNotMatch(nodes.daemon.text, /effective|runtime effort/i);
 });
 
@@ -139,7 +142,7 @@ test('coordination age handles first run, active passes and time boundaries', as
   }
   context.data = snapshot();
   vm.runInContext('render(data)', context);
-  assert.match(nodes.daemon.text, /Coordinator\nCoordinating/);
+  assert.equal(nodes.daemon.all().find(n => n.className === 'agent-indicator running')['aria-label'], 'Coordinating');
   assert.match(nodes.daemon.text, /Last coordination pass: 6 minutes ago/);
 });
 
@@ -151,8 +154,8 @@ test('overview and project counts share compact labels and full observations nee
   assert.equal(nodes.overall.children.length, 1);
   const grid = nodes.overall.children[0];
   assert.equal(grid.className, 'counts');
-  assert.deepEqual(grid.children.map(n => n.children[1].text), ['Ready', 'In Progress', 'Blocked', 'Review', 'Backlog', 'Done']);
-  assert.deepEqual(grid.children.map(n => n.children[0].text), ['2', '3', '4', '5', '6', '7']);
+  assert.deepEqual(grid.children.map(n => n.children[1].text), ['Backlog', 'Ready', 'In Progress', 'Review', 'Done', 'Blocked']);
+  assert.deepEqual(grid.children.map(n => n.children[0].text), ['6', '2', '3', '5', '7', '4']);
   const projectGrid = nodes.projects.children[0].all().find(n => n.className === 'counts');
   assert.equal(grid.text, projectGrid.text);
   const unknownGrid = nodes.projects.children[1].all().find(n => n.className === 'counts');
@@ -161,4 +164,16 @@ test('overview and project counts share compact labels and full observations nee
   assert.ok(nodes.projects.text.includes(`Finished ${new Date(110000).toLocaleString()}`));
   assert.match(nodes.projects.text, /0h 0m 9s/);
   assert.ok(nodes.projects.text.includes(new Date(101000).toLocaleString()));
+});
+
+ test('model names remain text and appear beside effort in compact agent cards', async () => {
+  const data = snapshot();
+  data.coordinator.configured_model = 'gpt-6-luna';
+  data.coordinator.configured_effort = 'medium';
+  data.projects[0].worker.configured_model = '<script>model</script>';
+  const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
+  await flush();
+  assert.match(nodes.daemon.text, /gpt-6-luna · medium/);
+  assert.match(nodes.daemon.text, /<script>model<\/script> · default/);
+  assert.equal(nodes.daemon.all().filter(n => n.tag === 'script').length, 0);
 });

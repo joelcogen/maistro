@@ -1,5 +1,5 @@
 'use strict';
-const labels = { ready: 'Ready', in_progress: 'In Progress', blocked: 'Blocked', review: 'Review', backlog: 'Backlog', done: 'Done' };
+const labels = { backlog: 'Backlog', ready: 'Ready', in_progress: 'In Progress', review: 'Review', done: 'Done', blocked: 'Blocked' };
 const reasons = {
   no_eligible_work: 'No eligible work found', dependencies: 'Waiting for dependencies', occupied: 'Project already occupied',
   read_failed: 'Board read failed', ambiguous_board: 'Board could not be resolved uniquely', incomplete_read: 'Board read incomplete',
@@ -26,7 +26,7 @@ function link(label, value) {
 function counts(values) {
   const grid = element('div', undefined, 'counts');
   for (const [key, label] of Object.entries(labels)) {
-    const cell = element('div', undefined, values == null ? 'count unknown' : 'count');
+    const cell = element('div', undefined, `count ${key}${values == null ? ' unknown' : ''}`);
     cell.append(element('strong', values == null ? 'Unknown' : values[key]), element('span', label)); grid.append(cell);
   }
   return grid;
@@ -43,31 +43,36 @@ function ago(value, now) {
   }
 }
 function workerRunning(worker) { return ['active', 'stopping'].includes(worker.state); }
-function agentDetails(activity, label, running) {
-  const details = element('span', undefined, 'worker-details');
-  details.append(element('span', label, running ? 'worker-state running' : 'worker-state'),
-    element('span', `Configured effort: ${activity.configured_effort ?? 'inherited/default'}`, 'worker-effort muted'));
-  return details;
+function agentRow(name, activity, enabled = true) {
+  const running = enabled && (workerRunning(activity) || activity.state === 'reading_boards');
+  const label = !enabled ? 'Disabled' : states[activity.state] || activity.state;
+  const row = element('li', undefined, 'agent-card');
+  const info = element('div', undefined, 'agent-info');
+  const title = element('span', name, 'worker-name');
+  title.title = name;
+  const model = activity.configured_model ?? 'Default model';
+  const effort = activity.configured_effort ?? 'default';
+  const config = element('span', `${model} · ${effort}`, 'worker-config');
+  config.title = `Configured model: ${model}; effort: ${activity.configured_effort ?? 'inherited/default'}`;
+  info.append(title, config);
+  const indicator = element('span', running ? '▶' : activity.state === 'pending_update' ? '◷' : 'Ⅱ',
+    `agent-indicator${running ? ' running' : ''}${!enabled ? ' disabled' : ''}`);
+  indicator.title = label;
+  indicator.setAttribute('role', 'img');
+  indicator.setAttribute('aria-label', label);
+  row.append(info, indicator);
+  return row;
 }
 function render(snapshot) {
   const daemon = document.getElementById('daemon');
   const workers = element('ul', undefined, 'worker-list');
-  const coordinating = snapshot.coordinator.state === 'reading_boards';
-  const coordinator = element('li', undefined, 'row');
-  coordinator.append(element('span', 'Coordinator', 'worker-name'),
-    agentDetails(snapshot.coordinator, states[snapshot.coordinator.state] || snapshot.coordinator.state, coordinating));
-  workers.append(coordinator);
+  workers.append(agentRow('Coordinator', snapshot.coordinator));
   for (const project of snapshot.projects) {
-    const running = workerRunning(project.worker);
-    const row = element('li', undefined, 'row');
-    const name = element('span', project.id, 'worker-name');
-    name.title = project.id;
-    row.append(name, agentDetails(project.worker, !project.enabled ? 'Disabled' : running ? 'Running' : 'Idle', running));
-    workers.append(row);
+    workers.append(agentRow(project.id, project.worker, project.enabled));
   }
+  document.getElementById('uptime').textContent = `Uptime ${duration(snapshot.uptime_seconds)}`;
   daemon.replaceChildren(workers,
-    element('p', `Uptime ${duration(snapshot.uptime_seconds)}`, 'muted'),
-    element('p', `Last coordination pass: ${ago(snapshot.coordinator.started_at, snapshot.generated_at)}`, 'muted'));
+    element('p', `Last coordination pass: ${ago(snapshot.coordinator.started_at, snapshot.generated_at)}`, 'muted coordination-age'));
   const overall = snapshot.overall;
   const overview = document.getElementById('overall');
   overview.replaceChildren(counts(overall.counts));
@@ -76,14 +81,15 @@ function render(snapshot) {
   if (overall.stale) coverage.push('Stale counts');
   if (coverage.length) overview.append(element('p', coverage.join(' · '), 'warning'));
   const projects = document.getElementById('projects'); projects.replaceChildren();
+  if (!snapshot.projects.length) projects.append(element('p', 'No projects configured yet.', 'empty-state'));
   for (const project of snapshot.projects) {
-    const card = element('article'); const observation = project.observation;
+    const card = element('article', undefined, 'project-card'); const observation = project.observation;
     const heading = element('div', undefined, 'row card-heading');
     heading.append(element('h2', project.id));
     if (project.board_url) heading.append(link('Open board', project.board_url));
     card.append(heading);
     const worker = project.worker;
-    card.append(element('p', `${states[worker.state] || worker.state}${worker.started_at == null ? '' : ` · ${duration(worker.elapsed_seconds)}`}`));
+    card.append(element('p', `${!project.enabled ? 'Disabled' : states[worker.state] || worker.state}${worker.started_at == null ? '' : ` · ${duration(worker.elapsed_seconds)}`}`, `project-state${project.enabled && workerRunning(worker) ? ' running' : ''}`));
     if (worker.started_at != null) card.append(element('p', worker.finished_at == null ? `Started ${date(worker.started_at)}` : `Finished ${date(worker.finished_at)}`, 'muted'));
     if (worker.last_error) card.append(element('p', worker.last_error, 'warning'));
     if (project.story) {
@@ -114,6 +120,9 @@ async function refresh() {
   } catch {
     connection.textContent = `Disconnected · displayed information is stale. ${lastReceived == null ? 'No status received yet.' : `Last received ${new Date(lastReceived).toLocaleString()}.`} Retrying…`;
     connection.className = 'notice error';
-  } finally { setTimeout(refresh, 3000); }
+  } finally {
+    connection.title = connection.textContent;
+    setTimeout(refresh, 3000);
+  }
 }
 refresh();

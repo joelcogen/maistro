@@ -99,6 +99,7 @@ pub struct Activity {
     pub state: &'static str,
     /// Requested effort only; not an observation of the provider's runtime choice.
     pub configured_effort: Option<String>,
+    pub configured_model: String,
     pub started_at: Option<u64>,
     pub finished_at: Option<u64>,
     pub elapsed_seconds: u64,
@@ -108,10 +109,15 @@ pub struct Activity {
     clock: Option<Instant>,
 }
 impl Activity {
-    fn new(state: &'static str, configured_effort: Option<String>) -> Self {
+    fn new(
+        state: &'static str,
+        configured_effort: Option<String>,
+        configured_model: String,
+    ) -> Self {
         Self {
             state,
             configured_effort,
+            configured_model,
             started_at: None,
             finished_at: None,
             elapsed_seconds: 0,
@@ -122,7 +128,11 @@ impl Activity {
     }
     fn start(&mut self, state: &'static str) {
         let last_error = self.last_error;
-        *self = Self::new(state, self.configured_effort.take());
+        *self = Self::new(
+            state,
+            self.configured_effort.take(),
+            std::mem::take(&mut self.configured_model),
+        );
         self.last_error = last_error;
         self.started_at = Some(now());
         self.clock = Some(Instant::now());
@@ -203,6 +213,7 @@ impl Status {
                 worker: Activity::new(
                     if p.enabled { "idle" } else { "disabled" },
                     config.agents.big_model_effort.clone(),
+                    config.agents.big_model().to_owned(),
                 ),
                 last_outcome: None,
                 polling: Polling {
@@ -233,7 +244,11 @@ impl Status {
                 started_at: now(),
                 generated_at: now(),
                 uptime_seconds: 0,
-                coordinator: Activity::new("idle", config.agents.small_model_effort.clone()),
+                coordinator: Activity::new(
+                    "idle",
+                    config.agents.small_model_effort.clone(),
+                    config.agents.small_model().to_owned(),
+                ),
                 projects,
                 overall: Overall {
                     counts: None,
@@ -616,10 +631,18 @@ mod tests {
                 }
                 let view = serde_json::to_value(status.snapshot()).unwrap();
                 assert_eq!(
+                    view["coordinator"]["configured_model"],
+                    config.agents.small_model()
+                );
+                assert_eq!(
                     view["coordinator"]["configured_effort"],
                     serde_json::json!(small)
                 );
                 for project in view["projects"].as_array().unwrap() {
+                    assert_eq!(
+                        project["worker"]["configured_model"],
+                        config.agents.big_model()
+                    );
                     assert_eq!(
                         project["worker"]["configured_effort"],
                         serde_json::json!(big)
