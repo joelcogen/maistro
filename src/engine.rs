@@ -439,6 +439,7 @@ mod tests {
                 story: (&a).into(),
                 mode: Mode::Master,
                 cancel: CancellationToken::new(),
+                started: Instant::now(),
             },
         );
         (state, a)
