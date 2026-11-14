@@ -99,26 +99,12 @@ pub enum Provider {
 }
 impl Agents {
     pub fn validate_efforts(&self) -> Result<()> {
-        let (provider, supported): (_, &[&str]) = match self.provider {
-            Provider::Codex => (
-                "codex",
-                &[
-                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-                ],
-            ),
-            Provider::Claude => ("claude", &["low", "medium", "high", "xhigh", "max"]),
-        };
         for (name, effort) in [
             ("small_model_effort", &self.small_model_effort),
             ("big_model_effort", &self.big_model_effort),
         ] {
-            if let Some(effort) = effort {
-                ensure!(
-                    supported.contains(&effort.as_str()),
-                    "agents.{name}: unsupported effort {effort:?} for {provider}; supported values: {} (omit to inherit configuration/defaults)",
-                    supported.join(", ")
-                );
-            }
+            self.provider
+                .validate_effort(&format!("agents.{name}"), effort.as_deref())?;
         }
         Ok(())
     }
@@ -137,6 +123,65 @@ impl Agents {
     }
 }
 
+impl Provider {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::Claude => "claude",
+        }
+    }
+
+    fn validate_effort(self, field: &str, effort: Option<&str>) -> Result<()> {
+        let supported: &[&str] = match self {
+            Self::Codex => &[
+                "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+            ],
+            Self::Claude => &["low", "medium", "high", "xhigh", "max"],
+        };
+        if let Some(effort) = effort {
+            ensure!(
+                supported.contains(&effort),
+                "{field}: unsupported effort {effort:?} for {}; supported values: {} (omit to inherit configuration/defaults)",
+                self.name(),
+                supported.join(", ")
+            );
+        }
+        Ok(())
+    }
+
+    fn validate_model(self, field: &str, model: &str) -> Result<()> {
+        ensure!(
+            !model.trim().is_empty()
+                && !model.starts_with('-')
+                && !model.chars().any(char::is_control),
+            "{field}: {} requires a nonempty model ID or alias, not a CLI option",
+            self.name()
+        );
+        // Custom CLI aliases remain supported; reject recognizable IDs from the other provider.
+        let incompatible = match self {
+            Self::Codex => {
+                model.starts_with("claude-")
+                    || [
+                        "haiku",
+                        "sonnet",
+                        "opus",
+                        "sonnet[1m]",
+                        "opus[1m]",
+                        "opusplan",
+                    ]
+                    .contains(&model)
+            }
+            Self::Claude => model.starts_with("gpt-") || ["o1", "o3", "o4-mini"].contains(&model),
+        };
+        ensure!(
+            !incompatible,
+            "{field}: model {model:?} belongs to another provider; choose a {} model ID or alias, or omit to use defaults",
+            self.name()
+        );
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Mode {
@@ -148,6 +193,9 @@ pub enum Mode {
 #[serde(deny_unknown_fields)]
 pub struct Project {
     pub id: String,
+    /// Independent overrides of agents.big_model and agents.big_model_effort.
+    pub worker_model: Option<String>,
+    pub worker_model_effort: Option<String>,
     pub repo: PathBuf,
     pub appflowy_url: Option<String>,
     pub appflowy_page: Option<String>,
@@ -173,6 +221,28 @@ pub struct Project {
     pub statuses: Statuses,
 }
 impl Project {
+    pub fn worker_model<'a>(&'a self, agents: &'a Agents) -> &'a str {
+        self.worker_model
+            .as_deref()
+            .unwrap_or_else(|| agents.big_model())
+    }
+    pub fn worker_model_effort<'a>(&'a self, agents: &'a Agents) -> Option<&'a str> {
+        self.worker_model_effort
+            .as_deref()
+            .or(agents.big_model_effort.as_deref())
+    }
+    pub fn validate_worker_settings(&self, agents: &Agents) -> Result<()> {
+        if let Some(model) = &self.worker_model {
+            agents
+                .provider
+                .validate_model(&format!("projects.{}.worker_model", self.id), model)?;
+        }
+        agents.provider.validate_effort(
+            &format!("projects.{}.worker_model_effort", self.id),
+            self.worker_model_effort.as_deref(),
+        )
+    }
+
     pub fn shortcut_api(&self) -> bool {
         self.shortcut_token_file.is_some()
     }
@@ -317,12 +387,9 @@ impl Config {
             ("small_model", self.agents.small_model()),
             ("big_model", self.agents.big_model()),
         ] {
-            ensure!(
-                !model.trim().is_empty()
-                    && !model.starts_with('-')
-                    && !model.chars().any(char::is_control),
-                "agents.{name} must be a nonempty model ID or alias, not a CLI option"
-            );
+            self.agents
+                .provider
+                .validate_model(&format!("agents.{name}"), model)?;
         }
         let executable = match self.agents.provider {
             Provider::Codex => &self.agents.codex,
@@ -336,6 +403,7 @@ impl Config {
         let mut repos = HashSet::new();
         let mut servers = std::collections::HashMap::new();
         for p in &self.projects {
+            p.validate_worker_settings(&self.agents)?;
             ensure!(
                 identifier(&p.id) && ids.insert(&p.id),
                 "invalid or duplicate project ID: {}",

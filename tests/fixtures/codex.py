@@ -34,9 +34,13 @@ prompt = sys.stdin.read()
 coordinator = '\nPROJECTS=' in prompt
 defaults = ['haiku', 'opus'] if claude else ['gpt-6-luna', 'gpt-6-astra']
 models = json.loads((ROOT / 'models.json').read_text()) if (ROOT / 'models.json').exists() else defaults
-assert model == models[0 if coordinator else 1]
 efforts = json.loads((ROOT / 'efforts.json').read_text()) if (ROOT / 'efforts.json').exists() else [None, None]
+expected_model = models[0 if coordinator else 1]
 effort = efforts[0 if coordinator else 1]
+if not coordinator and (ROOT / 'project-settings.json').exists():
+    assignment = json.loads(prompt.split('\nASSIGNMENT=')[1].splitlines()[0])
+    expected_model, effort = json.loads((ROOT / 'project-settings.json').read_text())[assignment['project_id']]
+assert model == expected_model
 if claude:
     assert args.count('--effort') == (0 if effort is None else 1)
     if effort is not None:

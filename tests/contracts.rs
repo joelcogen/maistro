@@ -958,3 +958,59 @@ fn shortcut_api_config_requires_workspace_and_private_file_reference_together() 
     .unwrap();
     assert!(Config::load(&path).is_err());
 }
+
+#[test]
+fn project_worker_settings_inherit_independently_and_validate() {
+    let project = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Stories'\nmode='master'\nbase_branch='main'\n";
+    for (provider, default, wrong_model) in [
+        ("codex", "gpt-6-astra", "claude-sonnet-4"),
+        ("claude", "opus", "gpt-6-astra"),
+    ] {
+        for global in [false, true] {
+            for model in [None, Some("custom-worker")] {
+                for effort in [None, Some("low")] {
+                    let mut text = format!("[agents]\nprovider='{provider}'\n");
+                    if global {
+                        text.push_str("big_model='custom-global'\nbig_model_effort='high'\n");
+                    }
+                    text.push_str(project);
+                    if let Some(model) = model {
+                        text.push_str(&format!("worker_model='{model}'\n"));
+                    }
+                    if let Some(effort) = effort {
+                        text.push_str(&format!("worker_model_effort='{effort}'\n"));
+                    }
+                    let config: Config = toml::from_str(&text).unwrap();
+                    config.validate().unwrap();
+                    let p = &config.projects[0];
+                    assert_eq!(
+                        p.worker_model(&config.agents),
+                        model.unwrap_or(if global { "custom-global" } else { default })
+                    );
+                    assert_eq!(
+                        p.worker_model_effort(&config.agents),
+                        effort.or(global.then_some("high"))
+                    );
+                }
+            }
+        }
+        for (field, value) in [
+            ("worker_model", ""),
+            ("worker_model", "--option"),
+            ("worker_model", wrong_model),
+            ("worker_model_effort", "HIGH"),
+            ("worker_model_effort", "unknown"),
+        ] {
+            let config: Config = toml::from_str(&format!(
+                "[agents]\nprovider='{provider}'\n{project}{field}='{value}'\n"
+            ))
+            .unwrap();
+            let error = config.validate().unwrap_err().to_string();
+            assert!(error.contains(&format!("projects.p.{field}")), "{error}");
+            assert!(error.contains(provider), "{error}");
+            if field.ends_with("effort") {
+                assert!(error.contains("supported values"), "{error}");
+            }
+        }
+    }
+}

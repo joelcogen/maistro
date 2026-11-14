@@ -15,7 +15,7 @@ worker_timeout_seconds = 3600
 # runtime_dir = "~/.local/state/maistro"
 
 [agents]
-# Global for ALL projects; per-project provider/model/effort overrides are not supported.
+# Provider is global; projects can independently override worker model and effort.
 provider = "codex" # "codex" or "claude" (Claude Code CLI)
 # Omit models for provider defaults: Codex gpt-6-luna/gpt-6-astra; Claude haiku/opus.
 # small_model = "gpt-6-luna" # Coordinator
@@ -53,6 +53,10 @@ mode = "pr" # "pr": push a story branch and open a PR; "master": commit/push bas
 base_branch = "main" # May be main, master, or another branch.
 remote = "origin"
 enabled = true
+# Optional overrides of agents.big_model and agents.big_model_effort, independently.
+# Omit both levels for the provider model default and inherited/default effort.
+# worker_model = "gpt-6-luna"
+# worker_model_effort = "medium"
 # Optional repository-root maistro-coordinator.md and maistro-worker.md add
 # instructions for each agent; no prompt configuration is needed (see README.md).
 

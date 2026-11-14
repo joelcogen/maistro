@@ -117,7 +117,8 @@ Model IDs and aliases pass unchanged to the selected CLI, which checks availabil
 on invocation. Omitted models use provider defaults: `gpt-6-luna` / `gpt-6-astra`
 for Codex, `haiku` / `opus` for Claude. When switching providers, remove explicit
 models or replace them with supported ones. Model names must contain text;
-per-project provider, model and effort settings are rejected.
+known model IDs from the other provider are rejected. Custom CLI aliases remain
+supported; the CLI checks their availability. The provider is global.
 
 Optional `small_model_effort` (coordinator) and `big_model_effort` (all workers)
 accept these exact lowercase values:
@@ -128,12 +129,41 @@ accept these exact lowercase values:
 | Claude | `low`, `medium`, `high`, `xhigh`, `max` | `--effort VALUE` |
 
 Maistro rejects other values, including empty strings, during validation. Claude
-must advertise `--effort` when either setting is configured. Model-specific
-availability still depends on the selected CLI and model; these lists do not
+must advertise `--effort` when any global or project effort setting is configured.
+Model-specific availability still depends on the selected CLI and model; these lists do not
 guarantee every model supports every level. See the
 [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
 and [Claude effort documentation](https://code.claude.com/docs/en/model-config#adjust-effort-level).
 Claude's `ultracode` mode is not an effort level supported by Maistro.
+
+Each `[[projects]]` entry can set `worker_model` and `worker_model_effort`.
+Each field independently takes precedence over `[agents].big_model` and
+`[agents].big_model_effort`. If both levels omit the model, the existing provider
+worker default above applies. If both omit effort, no effort override is sent.
+Coordinator settings are unaffected. Project effort uses the same validation
+and supported values as global effort; errors identify the project and field.
+
+```toml
+[[projects]]
+id = "backend"
+repo = "/work/backend"
+appflowy_page = "Backend Stories"
+mode = "pr"
+base_branch = "main"
+worker_model = "gpt-6-astra"
+worker_model_effort = "high"
+
+[[projects]]
+id = "frontend"
+repo = "/work/frontend"
+appflowy_page = "Frontend Stories"
+mode = "pr"
+base_branch = "main"
+worker_model = "gpt-6-luna"
+worker_model_effort = "medium"
+# Remove worker_model to inherit only the global model, or remove
+# worker_model_effort to inherit only the global effort.
+```
 
 For Claude Code, replace `[agents]` with:
 

@@ -73,6 +73,8 @@ impl Fixture {
                 json!({"id":format!("story-{i}"),"status":"Ready", "mode":mode}),
             );
             projects.push(Project {
+                worker_model: None,
+                worker_model_effort: None,
                 id,
                 repo,
                 appflowy_page: Some(format!("board-{i}")),
@@ -1756,4 +1758,67 @@ async fn failed_shortcut_api_read_isolated_from_other_projects_without_cli_fallb
         events_before,
         "No CLI/model call for failed API-only pass"
     );
+}
+
+#[tokio::test]
+async fn project_worker_settings_reach_both_providers() {
+    for claude in [false, true] {
+        let mut f = Fixture::new(&[Mode::Master; 3]);
+        if claude {
+            f.claude();
+        }
+        f.models("custom-small", "custom-big");
+        f.config.agents.big_model_effort = Some("high".into());
+        f.config.projects[0].worker_model = Some("custom-project".into());
+        f.config.projects[0].worker_model_effort = Some("low".into());
+        f.config.projects[1].worker_model = Some("custom-other".into());
+        f.config.projects[2].worker_model_effort = Some("medium".into());
+        let expected = json!({"p0": ["custom-project", "low"], "p1": ["custom-other", "high"], "p2": ["custom-big", "medium"]});
+        fs::write(
+            f.temp.path().join("project-settings.json"),
+            serde_json::to_vec(&expected).unwrap(),
+        )
+        .unwrap();
+        let runner = maistro::agent::AgentRunner::new(f.config.clone());
+        runner.validate_cli().await.unwrap();
+        let cancel = CancellationToken::new();
+        let result = runner
+            .coordinate(
+                &Default::default(),
+                &["p0".into(), "p1".into(), "p2".into()],
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.assignments.len(), 3);
+        for assignment in result.assignments {
+            let project = f
+                .config
+                .projects
+                .iter()
+                .find(|p| p.id == assignment.project_id)
+                .unwrap();
+            runner.work(project, &assignment, &cancel).await.unwrap();
+        }
+        let events = f.events();
+        let workers: Vec<_> = events
+            .iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .collect();
+        assert_eq!(workers.len(), 3);
+        for event in workers {
+            let settings = &expected[event["project"].as_str().unwrap()];
+            assert_eq!(event["model"], settings[0]);
+            assert_eq!(event["effort"], settings[1]);
+        }
+        if claude {
+            f.config.agents.big_model_effort = None;
+            f.touch("no-effort-flag");
+            let error = maistro::agent::AgentRunner::new(f.config.clone())
+                .validate_cli()
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("projects[].worker_model_effort"));
+        }
+    }
 }

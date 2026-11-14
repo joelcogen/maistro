@@ -66,6 +66,9 @@ impl AgentRunner {
 
     pub async fn validate_cli(&self) -> Result<()> {
         self.config.agents.validate_efforts()?;
+        for p in &self.config.projects {
+            p.validate_worker_settings(&self.config.agents)?;
+        }
         github::read_token(&self.config.agents.github_token_file)?;
         if self.config.agents.provider == Provider::Claude {
             return crate::claude::validate(&self.config).await;
@@ -100,6 +103,9 @@ impl AgentRunner {
         cancel: &CancellationToken,
     ) -> Result<Value> {
         self.config.agents.validate_efforts()?;
+        for p in &self.config.projects {
+            p.validate_worker_settings(&self.config.agents)?;
+        }
         if self.config.agents.provider == Provider::Claude {
             return crate::claude::invoke(
                 &self.config,
@@ -124,8 +130,8 @@ impl AgentRunner {
         let (role, model, effort, cwd, timeout) = match project {
             Some(p) => (
                 p.id.as_str(),
-                self.config.agents.big_model(),
-                self.config.agents.big_model_effort.as_deref(),
+                p.worker_model(&self.config.agents),
+                p.worker_model_effort(&self.config.agents),
                 p.repo.as_path(),
                 self.config.orchestrator.worker_timeout_seconds,
             ),
@@ -406,6 +412,7 @@ impl AgentRunner {
         assignment: &Assignment,
         cancel: &CancellationToken,
     ) -> Result<Report> {
+        project.validate_worker_settings(&self.config.agents)?;
         let prompt = worker_prompt(project, assignment)?;
         let report: Report = serde_json::from_value(
             self.invoke(Some(project), &[], &prompt, model::report_schema(), cancel)

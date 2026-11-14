@@ -212,8 +212,8 @@ impl Status {
                 story: None,
                 worker: Activity::new(
                     if p.enabled { "idle" } else { "disabled" },
-                    config.agents.big_model_effort.clone(),
-                    config.agents.big_model().to_owned(),
+                    p.worker_model_effort(&config.agents).map(str::to_owned),
+                    p.worker_model(&config.agents).to_owned(),
                 ),
                 last_outcome: None,
                 polling: Polling {
@@ -606,6 +606,30 @@ mod tests {
         });
         r
     }
+    #[test]
+    fn project_worker_overrides_are_visible_in_status() {
+        let mut config = config();
+        config.agents.big_model_effort = Some("high".into());
+        config.projects[0].worker_model = Some("custom-worker".into());
+        config.projects[0].worker_model_effort = Some("low".into());
+        let view = serde_json::to_value(Status::new(&config).snapshot()).unwrap();
+        for (project, settings) in view["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(&config.projects)
+        {
+            assert_eq!(
+                project["worker"]["configured_model"],
+                settings.worker_model(&config.agents)
+            );
+            assert_eq!(
+                project["worker"]["configured_effort"],
+                serde_json::json!(settings.worker_model_effort(&config.agents))
+            );
+        }
+    }
+
     #[test]
     fn configured_efforts_remain_distinct_from_runtime_state() {
         for (small, big) in [
