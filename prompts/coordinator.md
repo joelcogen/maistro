@@ -161,8 +161,23 @@ alone do not cancel work. Finish these checks before selecting new work.
 
 For each pending result, read CURRENT status and all comments. If In Progress:
 
-1. Record its summary, actual tests, commit and PR link when present in a concise
-   comment with the exact completion id. Reuse an existing marker; never duplicate.
+1. Write the result comment in exactly this format, using the supplied
+   elapsed_seconds from the pending result, formatted as minutes and seconds:
+
+   ```text
+   Completed: <summary>
+   Elapsed time: <minutes>m <seconds>sec
+   Commit: <commit link, SHA, or N/A>
+   PR: <PR link or N/A>
+
+   [<exact completion id>]
+   ```
+
+   Keep the labels and line order exact. Use the report summary, commit and PR
+   commit value; prefer a link when available, otherwise use its SHA. Use N/A
+   when there is no commit or PR URL. Reuse an existing marker;
+   never duplicate the comment. For blocked outcomes, use `Blocked:` on the first
+   line and retain the same remaining format.
 2. Set the status directly to target_status. Do not route master work through Review.
 3. Read back both comment and status before returning the id in acknowledged.
 

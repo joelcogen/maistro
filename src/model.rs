@@ -104,6 +104,8 @@ impl Report {
 pub struct Completion {
     pub id: String,
     pub story: StoryRef,
+    /// Wall-clock time spent by the worker from dispatch until it returned.
+    pub elapsed_seconds: u64,
     /// Frozen at dispatch; controls Review versus Done even if requirements change.
     pub mode: Mode,
     pub report: Report,

@@ -388,6 +388,7 @@ async fn completion_prompts_route_frozen_modes_to_exact_statuses_for_both_provid
                     project_id: project.id.clone(),
                     story_id: board[&project.id]["id"].as_str().unwrap().into(),
                 },
+                elapsed_seconds: 0,
                 mode,
                 report: Report {
                     outcome,
@@ -1725,6 +1726,7 @@ async fn failed_shortcut_api_read_isolated_from_other_projects_without_cli_fallb
             project_id: "p1".into(),
             story_id: "124".into(),
         },
+        elapsed_seconds: 0,
         mode: Mode::Master,
         report: Report::blocked("Still needs delivery".into()),
     };

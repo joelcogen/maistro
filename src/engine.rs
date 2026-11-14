@@ -43,6 +43,7 @@ struct Active {
     story: StoryRef,
     mode: Mode,
     cancel: CancellationToken,
+    started: Instant,
 }
 #[derive(Default)]
 struct State {
@@ -95,12 +96,14 @@ impl State {
                 "Worker failed: {e:#}. Inspect existing work before retrying."
             ))
         });
+        let elapsed_seconds = active.started.elapsed().as_secs();
         tracing::info!(project=%assignment.project_id, story=%assignment.story_id, outcome=?report.outcome, "worker finished; awaiting board update");
         self.pending.insert(
             assignment.project_id,
             Completion {
                 id: uuid::Uuid::new_v4().to_string(),
                 story: active.story,
+                elapsed_seconds,
                 mode: active.mode,
                 report,
             },
@@ -374,6 +377,7 @@ impl Engine {
                     story: (&assignment).into(),
                     mode: assignment.effective_mode(project.mode),
                     cancel: cancel.clone(),
+                    started: Instant::now(),
                 },
             );
             diagnostics.claim_accepted(&assignment);

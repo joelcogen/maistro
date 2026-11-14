@@ -18,6 +18,7 @@ fn assignment(project: &str) -> Assignment {
 fn completion() -> Completion {
     Completion {
         id: "result-1".into(),
+        elapsed_seconds: 0,
         mode: Mode::Master,
         story: StoryRef::from(&assignment("p0")),
         report: Report::blocked("blocked".into()),
