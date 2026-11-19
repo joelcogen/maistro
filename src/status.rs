@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::State,
     http::{Method, StatusCode, Uri},
     response::Response,
@@ -494,24 +494,39 @@ async fn handle(State(status): State<Published>, method: Method, uri: Uri) -> Re
         (
             StatusCode::METHOD_NOT_ALLOWED,
             "text/plain; charset=utf-8",
-            b"Read-only: GET or HEAD only".to_vec(),
+            Bytes::from_static(b"Read-only: GET or HEAD only"),
         )
     } else {
         match uri.path() {
             "/" => (
                 StatusCode::OK,
                 "text/html; charset=utf-8",
-                include_bytes!("status.html").to_vec(),
+                Bytes::from_static(include_bytes!("status.html")),
             ),
             "/status.js" => (
                 StatusCode::OK,
                 "text/javascript; charset=utf-8",
-                include_bytes!("status.js").to_vec(),
+                Bytes::from_static(include_bytes!("status.js")),
             ),
             "/status.css" => (
                 StatusCode::OK,
                 "text/css; charset=utf-8",
-                include_bytes!("status.css").to_vec(),
+                Bytes::from_static(include_bytes!("status.css")),
+            ),
+            "/vendor/tabler-1.7.5/tabler.min.css" => (
+                StatusCode::OK,
+                "text/css; charset=utf-8",
+                Bytes::from_static(include_bytes!("vendor/tabler-1.7.5/tabler.min.css")),
+            ),
+            "/vendor/tabler-1.7.5/LICENSE" => (
+                StatusCode::OK,
+                "text/plain; charset=utf-8",
+                Bytes::from_static(include_bytes!("vendor/tabler-1.7.5/LICENSE")),
+            ),
+            "/favicon.svg" => (
+                StatusCode::OK,
+                "image/svg+xml",
+                Bytes::from_static(include_bytes!("favicon.svg")),
             ),
             "/api/status" => {
                 // Drop the watch borrow before serialization or network I/O.
@@ -519,13 +534,13 @@ async fn handle(State(status): State<Published>, method: Method, uri: Uri) -> Re
                 (
                     StatusCode::OK,
                     "application/json",
-                    serde_json::to_vec(&*snapshot).expect("status serializes"),
+                    Bytes::from(serde_json::to_vec(&*snapshot).expect("status serializes")),
                 )
             }
             _ => (
                 StatusCode::NOT_FOUND,
                 "text/plain; charset=utf-8",
-                b"Not found".to_vec(),
+                Bytes::from_static(b"Not found"),
             ),
         }
     };
@@ -533,7 +548,7 @@ async fn handle(State(status): State<Published>, method: Method, uri: Uri) -> Re
         .header("Content-Type", content_type).header("Cache-Control", "no-store")
         .header("X-Content-Type-Options", "nosniff")
         .header("Referrer-Policy", "no-referrer")
-        .header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+        .header("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
         .header("Content-Length", body.len());
     if code == StatusCode::METHOD_NOT_ALLOWED {
         response = response.header("Allow", "GET, HEAD");
@@ -1006,6 +1021,26 @@ mod tests {
             if method == "HEAD" {
                 assert!(response.ends_with("\r\n\r\n"));
             }
+        }
+        for (path, content_type, content) in [
+            ("/", "text/html", "data-bs-theme=\"dark\""),
+            (
+                "/vendor/tabler-1.7.5/tabler.min.css",
+                "text/css",
+                "Tabler v1.7.5",
+            ),
+            (
+                "/vendor/tabler-1.7.5/LICENSE",
+                "text/plain",
+                "The MIT License",
+            ),
+            ("/favicon.svg", "image/svg+xml", "<svg"),
+        ] {
+            let response = request(address, "GET", path).await;
+            let (headers, body) = response.split_once("\r\n\r\n").unwrap();
+            assert!(headers.starts_with("HTTP/1.1 200"), "{path}: {headers}");
+            assert!(headers.contains(&format!("content-type: {content_type}")));
+            assert!(body.contains(content), "wrong content at {path}");
         }
         let response = request(address, "GET", "/api/status").await;
         let value: serde_json::Value =

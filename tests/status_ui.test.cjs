@@ -4,12 +4,22 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 class Node {
-  constructor(tag) { this.tag = tag; this.children = []; this.textContent = ''; }
+  constructor(tag, document) {
+    this.tag = tag; this.document = document; this.children = []; this.textContent = ''; this.dataset = {};
+  }
   setAttribute(name, value) { this[name] = value; }
   append(...children) { this.children.push(...children); }
-  replaceChildren(...children) { this.children = children; }
+  replaceChildren(...children) {
+    if (this.all().includes(this.document.activeElement)) this.document.activeElement = null;
+    this.children = children;
+  }
+  querySelectorAll(selector) {
+    assert.equal(selector, 'a[data-status-link]');
+    return this.all().filter(node => node.tag === 'a' && node.dataset.statusLink);
+  }
+  focus() { this.document.activeElement = this; }
   set innerHTML(_) { throw new Error('Unsafe HTML rendering'); }
-  get text() { return this.textContent + this.children.map(c => c.text).join('\n'); }
+  get text() { return this.textContent + this.children.map(c => c.text).filter(Boolean).join('\n'); }
   all() { return [this, ...this.children.flatMap(c => c.all())]; }
 }
 const values = { ready: 2, in_progress: 3, blocked: 4, review: 5, backlog: 6, done: 7 };
@@ -30,21 +40,31 @@ function snapshot() {
   };
 }
 function harness(fetch) {
-  const nodes = Object.fromEntries(['connection', 'uptime', 'daemon', 'overall', 'projects'].map(id => [id, new Node('div')]));
+  const document = { activeElement: null, createElement: tag => new Node(tag, document), getElementById: id => nodes[id] };
+  const ids = ['connection', 'connection-state', 'connection-detail', 'uptime', 'daemon', 'overall', 'projects', 'agents-section', 'projects-section'];
+  const nodes = Object.fromEntries(ids.map(id => [id, new Node('div', document)]));
+  nodes.connection.className = 'status status-yellow';
+  nodes['connection-state'].textContent = 'Connecting…';
+  nodes['agents-section'].hidden = nodes['projects-section'].hidden = true;
   const timers = [];
-  const context = vm.createContext({ document: { createElement: tag => new Node(tag), getElementById: id => nodes[id] },
+  const context = vm.createContext({ document,
     URL, Date, AbortSignal, fetch, setTimeout: (fn, ms) => timers.push({ fn, ms }) });
   vm.runInContext(fs.readFileSync('src/status.js', 'utf8'), context);
-  return { nodes, timers, context };
+  return { nodes, timers, context, document };
 }
 const flush = () => new Promise(resolve => setImmediate(resolve));
+const withClass = (node, className) => node.all().filter(n => n.className?.split(' ').includes(className));
+
 test('renders unknown/stale counts, pending results and malicious titles as text', async () => {
   const { nodes, timers } = harness(async () => ({ ok: true, json: async () => snapshot() }));
   await flush();
-  assert.match(nodes.connection.text, /Connected/);
+  assert.equal(nodes['connection-state'].text, 'Connected');
+  assert.equal(nodes['agents-section'].hidden, false);
+  assert.equal(nodes['projects-section'].hidden, false);
   assert.match(nodes.overall.text, /Partial subtotal/);
   assert.match(nodes.projects.text, /Result waiting for board/);
-  assert.match(nodes.projects.text, /Stale counts/);
+  assert.equal(withClass(nodes.projects, 'card-footer')[0].text,
+    `Stale counts · Last successful read ${new Date(101000).toLocaleString()}`);
   assert.match(nodes.projects.text, /Unknown.*no complete/);
   assert.match(nodes.projects.text, /<script>evil\(\)<\/script>/);
   assert.match(nodes.projects.text, /Board result update failed/);
@@ -57,21 +77,29 @@ test('refresh failure preserves data, marks disconnected, and recovers', async (
   let fail = false;
   const { nodes, timers } = harness(async (path, options) => {
     assert.equal(path, 'api/status'); assert.equal(options.cache, 'no-store');
+    assert.ok(options.signal instanceof AbortSignal);
     if (fail) throw new Error('offline');
     return { ok: true, json: async () => snapshot() };
   });
   await flush(); const before = nodes.projects.text;
   fail = true; await timers.shift().fn();
-  assert.match(nodes.connection.text, /Disconnected.*stale/);
+  assert.equal(nodes['connection-state'].text, 'Disconnected');
+  assert.equal(nodes.connection.className, 'status status-red');
+  assert.match(nodes['connection-detail'].text, /stale.*Last received.*Retrying/);
   assert.equal(nodes.projects.text, before);
   fail = false; await timers.shift().fn();
-  assert.match(nodes.connection.text, /Connected/);
-  assert.equal(nodes.connection.className, 'notice');
+  assert.equal(nodes['connection-state'].text, 'Connected');
+  assert.equal(nodes.connection.className, 'status status-green');
+  assert.match(nodes['connection-detail'].text, /^Updated /);
 });
 test('initial HTTP error stays unknown and links reject unsafe protocols/credentials', async () => {
   const { nodes, context } = harness(async () => ({ ok: false }));
+  assert.equal(nodes['connection-state'].text, 'Connecting…');
   await flush();
-  assert.match(nodes.connection.text, /No status received yet/);
+  assert.equal(nodes['connection-state'].text, 'Disconnected');
+  assert.match(nodes['connection-detail'].text, /No status received yet.*Retrying/);
+  assert.equal(nodes['agents-section'].hidden, true);
+  assert.equal(nodes['projects-section'].hidden, true);
   for (const value of ['javascript:alert(1)', 'data:text/html,evil', 'https://secret@host']) {
     context.value = value;
     assert.equal(vm.runInContext("link('story', value).tag", context), 'span');
@@ -94,6 +122,24 @@ test('board and story links remain available without polling details', async () 
     [data.projects[0].board_url, data.projects[0].story.url]);
 });
 
+test('refresh restores keyboard focus for the same story on the same project', async () => {
+  const data = snapshot();
+  const project = data.projects[0];
+  project.story.url = 'https://example.test/story/123';
+  data.projects.push({ ...project, id: 'other' });
+  const { nodes, timers, document } = harness(async () => ({ ok: true, json: async () => data }));
+  await flush();
+  nodes.projects.children[0].querySelectorAll('a[data-status-link]')[0].focus();
+
+  data.projects.reverse();
+  await timers.shift().fn();
+  assert.equal(document.activeElement, nodes.projects.children[2].querySelectorAll('a[data-status-link]')[0]);
+
+  project.story = { ...project.story, id: 'replacement' };
+  await timers.shift().fn();
+  assert.equal(document.activeElement, null);
+});
+
 test('agents list starts with the coordinator followed by each project and its status', async () => {
   const data = snapshot();
   data.coordinator.state = 'idle';
@@ -105,12 +151,14 @@ test('agents list starts with the coordinator followed by each project and its s
   assert.match(nodes.uptime.text, /Uptime 0h 2m 3s/);
   assert.match(nodes.daemon.text, /Last coordination pass: 6 minutes ago/);
   const rows = nodes.daemon.all().filter(n => n.tag === 'li');
-  assert.deepEqual(rows.map(n => n.children[0].children[0].text),
+  const names = row => withClass(row, 'fw-semibold')[0].text;
+  assert.deepEqual(rows.map(names),
     ['Coordinator', '<img onerror=evil()>', 'disabled', 'active', 'stopping', 'idle']);
-  assert.deepEqual(rows.map(n => n.children[1]['aria-label']),
+  assert.deepEqual(rows.map(row => withClass(row, 'status')[0].text),
     ['Idle', 'Result waiting for board', 'Disabled', 'Worker active', 'Worker stopping', 'Idle']);
-  assert.deepEqual(rows.filter(n => n.children[1].className.includes('running')).map(n => n.children[0].children[0].text), ['active', 'stopping']);
-  assert.doesNotMatch(nodes.daemon.text, /Started|Finished|Duration|Verbose event|<script>|Result waiting/);
+  assert.deepEqual(rows.filter(row => withClass(row, 'status-green').length).map(names), ['active', 'stopping']);
+  assert.deepEqual(rows.filter(row => withClass(row, 'status-yellow').length).map(names), ['<img onerror=evil()>']);
+  assert.doesNotMatch(nodes.daemon.text, /Started|Finished|Duration|Verbose event|<script>/);
 });
 
 test('agents show configured effort for each role, including disabled workers, without inferring defaults', async () => {
@@ -120,7 +168,7 @@ test('agents show configured effort for each role, including disabled workers, w
   data.projects[1].worker.configured_effort = 'high';
   const { nodes, context } = harness(async () => ({ ok: true, json: async () => data }));
   await flush();
-  const efforts = () => nodes.daemon.all().filter(n => n.className === 'worker-config').map(n => n.text);
+  const efforts = () => withClass(nodes.daemon, 'worker-config').map(n => n.text);
   assert.deepEqual(efforts(), ['Default model · low', 'Default model · high', 'Default model · high']);
   data.coordinator.configured_effort = null;
   data.projects[0].worker.configured_effort = null;
@@ -142,7 +190,7 @@ test('coordination age handles first run, active passes and time boundaries', as
   }
   context.data = snapshot();
   vm.runInContext('render(data)', context);
-  assert.equal(nodes.daemon.all().find(n => n.className === 'agent-indicator running')['aria-label'], 'Coordinating');
+  assert.equal(withClass(nodes.daemon, 'status-green')[0].text, 'Coordinating');
   assert.match(nodes.daemon.text, /Last coordination pass: 6 minutes ago/);
 });
 
@@ -153,20 +201,23 @@ test('overview and project counts share compact labels and full observations nee
   await flush();
   assert.equal(nodes.overall.children.length, 1);
   const grid = nodes.overall.children[0];
-  assert.equal(grid.className, 'counts');
-  assert.deepEqual(grid.children.map(n => n.children[1].text), ['Backlog', 'Ready', 'In Progress', 'Review', 'Done', 'Blocked']);
-  assert.deepEqual(grid.children.map(n => n.children[0].text), ['6', '2', '3', '5', '7', '4']);
-  const projectGrid = nodes.projects.children[0].all().find(n => n.className === 'counts');
+  const labels = grid => grid.all().filter(n => n.tag === 'span' && n.textContent).map(n => n.text);
+  const counts = grid => withClass(grid, 'tabular-nums').map(n => n.text);
+  assert.deepEqual(labels(grid), ['Backlog', 'Ready', 'In Progress', 'Review', 'Done', 'Blocked']);
+  assert.deepEqual(counts(grid), ['6', '2', '3', '5', '7', '4']);
+  assert.deepEqual(withClass(grid, 'status-dot').map(n => n.className),
+    ['secondary', 'blue', 'yellow', 'indigo', 'green', 'pink'].map(color => `status-dot status-${color}`));
+  const projectGrid = withClass(nodes.projects.children[0], 'counts')[0];
   assert.equal(grid.text, projectGrid.text);
-  const unknownGrid = nodes.projects.children[1].all().find(n => n.className === 'counts');
-  assert.equal(unknownGrid.children.filter(n => n.children[0].text === 'Unknown').length, 6);
+  const unknownGrid = withClass(nodes.projects.children[1], 'counts')[0];
+  assert.deepEqual(counts(unknownGrid), Array(6).fill('Unknown'));
   assert.doesNotMatch(nodes.projects.text, /Git mode|Current process|Board observation|Story story|No current story|Started|Rust poll|Last change/);
   assert.ok(nodes.projects.text.includes(`Finished ${new Date(110000).toLocaleString()}`));
   assert.match(nodes.projects.text, /0h 0m 9s/);
   assert.ok(nodes.projects.text.includes(new Date(101000).toLocaleString()));
 });
 
- test('model names remain text and appear beside effort in compact agent cards', async () => {
+test('model names remain text and appear beside effort in compact agent cards', async () => {
   const data = snapshot();
   data.coordinator.configured_model = 'gpt-6-luna';
   data.coordinator.configured_effort = 'medium';

@@ -268,6 +268,10 @@ Open `http://127.0.0.1:8044/`. The server binds only to **127.0.0.1**. It starts
 disabled and defaults to port 8044. A bind failure stops startup with the address
 and OS error. Port binding happens at startup; `validate` checks configuration.
 
+The dashboard uses a dark blue palette. Cargo embeds the precompiled CSS and
+MIT license from `src/vendor/tabler-1.7.5` in the Maistro executable.
+[Tabler 1.7.5 package](https://www.npmjs.com/package/@tabler/core/v/1.7.5)
+
 ## Shortcut projects
 
 Select one workflow with `shortcut_workflow` (exact, case-sensitive name),
