@@ -136,15 +136,15 @@ impl AgentRunner {
         let (role, model, effort, cwd, timeout) = match project {
             Some(p) => (
                 p.id.as_str(),
-                p.worker_model(&self.config.agents),
-                p.worker_model_effort(&self.config.agents),
+                p.worker(&self.config.agents),
+                p.worker_effort(&self.config.agents),
                 p.repo.as_path(),
                 self.config.orchestrator.worker_timeout_seconds,
             ),
             None => (
                 "coordinator",
-                self.config.agents.small_model(),
-                self.config.agents.small_model_effort.as_deref(),
+                self.config.agents.coordinator(),
+                self.config.agents.coordinator_effort.as_deref(),
                 temporary.path(),
                 self.config.orchestrator.coordinator_timeout_seconds,
             ),

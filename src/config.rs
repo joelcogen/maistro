@@ -57,11 +57,11 @@ impl Default for Orchestrator {
 pub struct Agents {
     pub provider: Provider,
     /// Model IDs/aliases understood by the selected CLI; omitted values use provider defaults.
-    pub small_model: Option<String>,
-    pub big_model: Option<String>,
+    pub coordinator: Option<String>,
+    pub worker: Option<String>,
     /// Explicit effort overrides; omission leaves CLI configuration/defaults intact.
-    pub small_model_effort: Option<String>,
-    pub big_model_effort: Option<String>,
+    pub coordinator_effort: Option<String>,
+    pub worker_effort: Option<String>,
     pub claude: PathBuf,
     /// JSON file containing user-scoped mcpServers (normally ~/.claude.json).
     pub claude_mcp_config: PathBuf,
@@ -74,10 +74,10 @@ impl Default for Agents {
     fn default() -> Self {
         Self {
             provider: Provider::Codex,
-            small_model: None,
-            big_model: None,
-            small_model_effort: None,
-            big_model_effort: None,
+            coordinator: None,
+            worker: None,
+            coordinator_effort: None,
+            worker_effort: None,
             claude: "claude".into(),
             claude_mcp_config: "~/.claude.json".into(),
             codex: "codex".into(),
@@ -100,8 +100,8 @@ pub enum Provider {
 impl Agents {
     pub fn validate_efforts(&self) -> Result<()> {
         for (name, effort) in [
-            ("small_model_effort", &self.small_model_effort),
-            ("big_model_effort", &self.big_model_effort),
+            ("coordinator_effort", &self.coordinator_effort),
+            ("worker_effort", &self.worker_effort),
         ] {
             self.provider
                 .validate_effort(&format!("agents.{name}"), effort.as_deref())?;
@@ -109,14 +109,14 @@ impl Agents {
         Ok(())
     }
 
-    pub fn small_model(&self) -> &str {
-        self.small_model.as_deref().unwrap_or(match self.provider {
+    pub fn coordinator(&self) -> &str {
+        self.coordinator.as_deref().unwrap_or(match self.provider {
             Provider::Codex => "gpt-6-luna",
             Provider::Claude => "haiku",
         })
     }
-    pub fn big_model(&self) -> &str {
-        self.big_model.as_deref().unwrap_or(match self.provider {
+    pub fn worker(&self) -> &str {
+        self.worker.as_deref().unwrap_or(match self.provider {
             Provider::Codex => "gpt-6-astra",
             Provider::Claude => "opus",
         })
@@ -193,9 +193,9 @@ pub enum Mode {
 #[serde(deny_unknown_fields)]
 pub struct Project {
     pub id: String,
-    /// Independent overrides of agents.big_model and agents.big_model_effort.
-    pub worker_model: Option<String>,
-    pub worker_model_effort: Option<String>,
+    /// Independent overrides of agents.worker and agents.worker_effort.
+    pub worker: Option<String>,
+    pub worker_effort: Option<String>,
     pub repo: PathBuf,
     pub appflowy_url: Option<String>,
     pub appflowy_page: Option<String>,
@@ -221,25 +221,23 @@ pub struct Project {
     pub statuses: Statuses,
 }
 impl Project {
-    pub fn worker_model<'a>(&'a self, agents: &'a Agents) -> &'a str {
-        self.worker_model
-            .as_deref()
-            .unwrap_or_else(|| agents.big_model())
+    pub fn worker<'a>(&'a self, agents: &'a Agents) -> &'a str {
+        self.worker.as_deref().unwrap_or_else(|| agents.worker())
     }
-    pub fn worker_model_effort<'a>(&'a self, agents: &'a Agents) -> Option<&'a str> {
-        self.worker_model_effort
+    pub fn worker_effort<'a>(&'a self, agents: &'a Agents) -> Option<&'a str> {
+        self.worker_effort
             .as_deref()
-            .or(agents.big_model_effort.as_deref())
+            .or(agents.worker_effort.as_deref())
     }
     pub fn validate_worker_settings(&self, agents: &Agents) -> Result<()> {
-        if let Some(model) = &self.worker_model {
+        if let Some(model) = &self.worker {
             agents
                 .provider
-                .validate_model(&format!("projects.{}.worker_model", self.id), model)?;
+                .validate_model(&format!("projects.{}.worker", self.id), model)?;
         }
         agents.provider.validate_effort(
-            &format!("projects.{}.worker_model_effort", self.id),
-            self.worker_model_effort.as_deref(),
+            &format!("projects.{}.worker_effort", self.id),
+            self.worker_effort.as_deref(),
         )
     }
 
@@ -384,8 +382,8 @@ impl Config {
             "invalid MCP server name"
         );
         for (name, model) in [
-            ("small_model", self.agents.small_model()),
-            ("big_model", self.agents.big_model()),
+            ("coordinator", self.agents.coordinator()),
+            ("worker", self.agents.worker()),
         ] {
             self.agents
                 .provider

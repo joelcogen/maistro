@@ -212,8 +212,8 @@ impl Status {
                 story: None,
                 worker: Activity::new(
                     if p.enabled { "idle" } else { "disabled" },
-                    p.worker_model_effort(&config.agents).map(str::to_owned),
-                    p.worker_model(&config.agents).to_owned(),
+                    p.worker_effort(&config.agents).map(str::to_owned),
+                    p.worker(&config.agents).to_owned(),
                 ),
                 last_outcome: None,
                 polling: Polling {
@@ -246,8 +246,8 @@ impl Status {
                 uptime_seconds: 0,
                 coordinator: Activity::new(
                     "idle",
-                    config.agents.small_model_effort.clone(),
-                    config.agents.small_model().to_owned(),
+                    config.agents.coordinator_effort.clone(),
+                    config.agents.coordinator().to_owned(),
                 ),
                 projects,
                 overall: Overall {
@@ -624,9 +624,9 @@ mod tests {
     #[test]
     fn project_worker_overrides_are_visible_in_status() {
         let mut config = config();
-        config.agents.big_model_effort = Some("high".into());
-        config.projects[0].worker_model = Some("custom-worker".into());
-        config.projects[0].worker_model_effort = Some("low".into());
+        config.agents.worker_effort = Some("high".into());
+        config.projects[0].worker = Some("custom-worker".into());
+        config.projects[0].worker_effort = Some("low".into());
         let view = serde_json::to_value(Status::new(&config).snapshot()).unwrap();
         for (project, settings) in view["projects"]
             .as_array()
@@ -636,25 +636,25 @@ mod tests {
         {
             assert_eq!(
                 project["worker"]["configured_model"],
-                settings.worker_model(&config.agents)
+                settings.worker(&config.agents)
             );
             assert_eq!(
                 project["worker"]["configured_effort"],
-                serde_json::json!(settings.worker_model_effort(&config.agents))
+                serde_json::json!(settings.worker_effort(&config.agents))
             );
         }
     }
 
     #[test]
     fn configured_efforts_remain_distinct_from_runtime_state() {
-        for (small, big) in [
+        for (coordinator_effort, worker_effort) in [
             (None, None),
             (Some("low"), Some("high")),
             (None, Some("max")),
         ] {
             let mut config = config();
-            config.agents.small_model_effort = small.map(str::to_owned);
-            config.agents.big_model_effort = big.map(str::to_owned);
+            config.agents.coordinator_effort = coordinator_effort.map(str::to_owned);
+            config.agents.worker_effort = worker_effort.map(str::to_owned);
             let mut status = Status::new(&config);
             for step in 0..4 {
                 match step {
@@ -671,20 +671,20 @@ mod tests {
                 let view = serde_json::to_value(status.snapshot()).unwrap();
                 assert_eq!(
                     view["coordinator"]["configured_model"],
-                    config.agents.small_model()
+                    config.agents.coordinator()
                 );
                 assert_eq!(
                     view["coordinator"]["configured_effort"],
-                    serde_json::json!(small)
+                    serde_json::json!(coordinator_effort)
                 );
                 for project in view["projects"].as_array().unwrap() {
                     assert_eq!(
                         project["worker"]["configured_model"],
-                        config.agents.big_model()
+                        config.agents.worker()
                     );
                     assert_eq!(
                         project["worker"]["configured_effort"],
-                        serde_json::json!(big)
+                        serde_json::json!(worker_effort)
                     );
                 }
             }

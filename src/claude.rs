@@ -104,16 +104,13 @@ pub(crate) async fn validate(config: &Config) -> Result<()> {
     let mut cmd = Command::new(&config.agents.claude);
     cmd.arg("--help");
     let help = process::checked(cmd, Duration::from_secs(15)).await?;
-    if config.agents.small_model_effort.is_some()
-        || config.agents.big_model_effort.is_some()
-        || config
-            .projects
-            .iter()
-            .any(|p| p.worker_model_effort.is_some())
+    if config.agents.coordinator_effort.is_some()
+        || config.agents.worker_effort.is_some()
+        || config.projects.iter().any(|p| p.worker_effort.is_some())
     {
         ensure!(
             help.contains("--effort"),
-            "installed Claude Code lacks --effort; upgrade it or omit agents.small_model_effort and agents.big_model_effort and projects[].worker_model_effort"
+            "installed Claude Code lacks --effort; upgrade it or omit agents.coordinator_effort and agents.worker_effort and projects[].worker_effort"
         );
     }
     for flag in [
@@ -170,15 +167,15 @@ pub(crate) async fn invoke(
     let (role, model, effort, cwd, timeout) = match project {
         Some(p) => (
             p.id.as_str(),
-            p.worker_model(&config.agents),
-            p.worker_model_effort(&config.agents),
+            p.worker(&config.agents),
+            p.worker_effort(&config.agents),
             p.repo.as_path(),
             config.orchestrator.worker_timeout_seconds,
         ),
         None => (
             "coordinator",
-            config.agents.small_model(),
-            config.agents.small_model_effort.as_deref(),
+            config.agents.coordinator(),
+            config.agents.coordinator_effort.as_deref(),
             temporary.path(),
             config.orchestrator.coordinator_timeout_seconds,
         ),

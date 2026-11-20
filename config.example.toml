@@ -18,14 +18,14 @@ worker_timeout_seconds = 3600
 # Provider is global; projects can independently override worker model and effort.
 provider = "codex" # "codex" or "claude" (Claude Code CLI)
 # Omit models for provider defaults: Codex gpt-6-luna/gpt-6-astra; Claude haiku/opus.
-# small_model = "gpt-6-luna" # Coordinator
-# big_model = "gpt-6-astra" # Implementation workers
+# coordinator = "gpt-6-luna" # Coordinator
+# worker = "gpt-6-astra" # Implementation workers
 # Optional effort overrides; omit to preserve inherited configuration/provider defaults.
 # Codex: none, minimal, low, medium, high, xhigh, max, ultra.
 # Claude: low, medium, high, xhigh, max (requires CLI --effort support).
 # Available levels also depend on the selected model and CLI version.
-# small_model_effort = "low" # Coordinator
-# big_model_effort = "high" # Implementation workers
+# coordinator_effort = "low" # Coordinator
+# worker_effort = "high" # Implementation workers
 # Uses the selected CLI's existing login and source MCP connections.
 # codex = "/home/you/.local/bin/codex"
 # codex_home = "~/.codex"
@@ -53,10 +53,10 @@ mode = "pr" # "pr": push a story branch and open a PR; "master": commit/push bas
 base_branch = "main" # May be main, master, or another branch.
 remote = "origin"
 enabled = true
-# Optional overrides of agents.big_model and agents.big_model_effort, independently.
+# Optional overrides of agents.worker and agents.worker_effort, independently.
 # Omit both levels for the provider model default and inherited/default effort.
-# worker_model = "gpt-6-luna"
-# worker_model_effort = "medium"
+# worker = "gpt-6-luna"
+# worker_effort = "medium"
 # Optional repository-root maistro-coordinator.md and maistro-worker.md add
 # instructions for each agent; no prompt configuration is needed (see README.md).
 

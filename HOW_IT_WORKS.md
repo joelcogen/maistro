@@ -50,9 +50,9 @@ secrets out of prompts.
 
 ## Configured effort
 
-Worker model and effort resolve independently from `projects[].worker_model` and
-`projects[].worker_model_effort`, then global `agents.big_model` and
-`agents.big_model_effort`. Omitting both model settings keeps the existing provider
+Worker model and effort resolve independently from `projects[].worker` and
+`projects[].worker_effort`, then global `agents.worker` and
+`agents.worker_effort`. Omitting both model settings keeps the existing provider
 worker model default. Omitting effort at both levels sends no effort override.
 Workers keep their normal inherited configuration; coordinators retain their existing isolated settings behavior and
 provider/model defaults. For explicit Claude effort, Maistro removes the inherited

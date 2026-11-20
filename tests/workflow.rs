@@ -73,8 +73,8 @@ impl Fixture {
                 json!({"id":format!("story-{i}"),"status":"Ready", "mode":mode}),
             );
             projects.push(Project {
-                worker_model: None,
-                worker_model_effort: None,
+                worker: None,
+                worker_effort: None,
                 id,
                 repo,
                 appflowy_page: Some(format!("board-{i}")),
@@ -170,12 +170,12 @@ impl Fixture {
             project.shortcut_workflow = Some("Agents".into());
         }
     }
-    fn models(&mut self, small: &str, big: &str) {
-        self.config.agents.small_model = Some(small.into());
-        self.config.agents.big_model = Some(big.into());
+    fn models(&mut self, coordinator: &str, worker: &str) {
+        self.config.agents.coordinator = Some(coordinator.into());
+        self.config.agents.worker = Some(worker.into());
         fs::write(
             self.temp.path().join("models.json"),
-            serde_json::to_vec(&json!([small, big])).unwrap(),
+            serde_json::to_vec(&json!([coordinator, worker])).unwrap(),
         )
         .unwrap();
     }
@@ -1232,9 +1232,9 @@ async fn workflow_selectors_preserve_archive_cancellation_with_cancelled_disable
             f.touch("archived");
             let stopped = f
                 .wait(|| {
-                    f.events().iter().any(|e| {
-                        e["kind"] == "stopped" && e["model"] == f.config.agents.big_model()
-                    })
+                    f.events()
+                        .iter()
+                        .any(|e| e["kind"] == "stopped" && e["model"] == f.config.agents.worker())
                 })
                 .await;
             f.stop(token, job).await;
@@ -1332,8 +1332,11 @@ async fn shortcut_recovers_pushed_commit_after_result_delivery_failure() {
 #[tokio::test]
 async fn effort_overrides_reach_each_role_and_logs_for_both_providers() {
     use tracing::instrument::WithSubscriber;
+    // Keep a second dispatcher registered so tracing checks the test subscriber
+    // even when a parallel test is first to reach an agent log callsite.
+    let _fallback_dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     for claude in [false, true] {
-        for (small, big) in [
+        for (coordinator_effort, worker_effort) in [
             (None, None),
             (Some("low"), Some("high")),
             (Some("medium"), None),
@@ -1343,8 +1346,8 @@ async fn effort_overrides_reach_each_role_and_logs_for_both_providers() {
             if claude {
                 f.claude();
             }
-            f.config.agents.small_model_effort = small.map(str::to_owned);
-            f.config.agents.big_model_effort = big.map(str::to_owned);
+            f.config.agents.coordinator_effort = coordinator_effort.map(str::to_owned);
+            f.config.agents.worker_effort = worker_effort.map(str::to_owned);
             fs::write(
                 f.temp.path().join("inherited-effort.json"),
                 serde_json::to_vec(&std::env::var("CLAUDE_CODE_EFFORT_LEVEL").ok()).unwrap(),
@@ -1352,7 +1355,7 @@ async fn effort_overrides_reach_each_role_and_logs_for_both_providers() {
             .unwrap();
             fs::write(
                 f.temp.path().join("efforts.json"),
-                serde_json::to_vec(&[small, big]).unwrap(),
+                serde_json::to_vec(&[coordinator_effort, worker_effort]).unwrap(),
             )
             .unwrap();
             let runner = maistro::agent::AgentRunner::new(f.config.clone());
@@ -1388,10 +1391,11 @@ async fn effort_overrides_reach_each_role_and_logs_for_both_providers() {
                 .filter(|event| event["fields"]["message"] == "agent starting")
                 .collect();
             assert_eq!(logs.len(), 3);
-            for (log, (role, effort)) in
-                logs.iter()
-                    .zip([("coordinator", small), ("p0", big), ("p1", big)])
-            {
+            for (log, (role, effort)) in logs.iter().zip([
+                ("coordinator", coordinator_effort),
+                ("p0", worker_effort),
+                ("p1", worker_effort),
+            ]) {
                 assert_eq!(log["fields"]["role"], role);
                 assert_eq!(
                     log["fields"]["configured_effort"],
@@ -1401,7 +1405,7 @@ async fn effort_overrides_reach_each_role_and_logs_for_both_providers() {
             assert_eq!(
                 f.events()
                     .iter()
-                    .filter(|e| e["kind"] == "worker_start" && e["effort"] == json!(big))
+                    .filter(|e| e["kind"] == "worker_start" && e["effort"] == json!(worker_effort))
                     .count(),
                 2
             );
@@ -1418,9 +1422,9 @@ async fn claude_requires_effort_flag_only_when_configured() {
         .validate_cli()
         .await
         .unwrap();
-    for small in [true, false] {
-        f.config.agents.small_model_effort = small.then(|| "low".into());
-        f.config.agents.big_model_effort = (!small).then(|| "high".into());
+    for (coordinator_effort, worker_effort) in [(Some("low"), None), (None, Some("high"))] {
+        f.config.agents.coordinator_effort = coordinator_effort.map(str::to_owned);
+        f.config.agents.worker_effort = worker_effort.map(str::to_owned);
         let error = maistro::agent::AgentRunner::new(f.config.clone())
             .validate_cli()
             .await
@@ -1436,7 +1440,7 @@ async fn claude_requires_effort_flag_only_when_configured() {
 #[tokio::test]
 async fn global_models_apply_to_coordinator_and_every_codex_worker() {
     let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
-    f.models("custom-small", "custom-big");
+    f.models("custom-coordinator", "custom-worker");
     f.touch("parallel");
     let (token, job) = f.start();
     let complete = f
@@ -1447,7 +1451,7 @@ async fn global_models_apply_to_coordinator_and_every_codex_worker() {
     assert_eq!(
         f.events()
             .iter()
-            .filter(|e| e["kind"] == "worker_start" && e["model"] == "custom-big")
+            .filter(|e| e["kind"] == "worker_start" && e["model"] == "custom-worker")
             .count(),
         2
     );
@@ -1769,13 +1773,13 @@ async fn project_worker_settings_reach_both_providers() {
         if claude {
             f.claude();
         }
-        f.models("custom-small", "custom-big");
-        f.config.agents.big_model_effort = Some("high".into());
-        f.config.projects[0].worker_model = Some("custom-project".into());
-        f.config.projects[0].worker_model_effort = Some("low".into());
-        f.config.projects[1].worker_model = Some("custom-other".into());
-        f.config.projects[2].worker_model_effort = Some("medium".into());
-        let expected = json!({"p0": ["custom-project", "low"], "p1": ["custom-other", "high"], "p2": ["custom-big", "medium"]});
+        f.models("custom-coordinator", "custom-worker");
+        f.config.agents.worker_effort = Some("high".into());
+        f.config.projects[0].worker = Some("custom-project".into());
+        f.config.projects[0].worker_effort = Some("low".into());
+        f.config.projects[1].worker = Some("custom-other".into());
+        f.config.projects[2].worker_effort = Some("medium".into());
+        let expected = json!({"p0": ["custom-project", "low"], "p1": ["custom-other", "high"], "p2": ["custom-worker", "medium"]});
         fs::write(
             f.temp.path().join("project-settings.json"),
             serde_json::to_vec(&expected).unwrap(),
@@ -1814,13 +1818,13 @@ async fn project_worker_settings_reach_both_providers() {
             assert_eq!(event["effort"], settings[1]);
         }
         if claude {
-            f.config.agents.big_model_effort = None;
+            f.config.agents.worker_effort = None;
             f.touch("no-effort-flag");
             let error = maistro::agent::AgentRunner::new(f.config.clone())
                 .validate_cli()
                 .await
                 .unwrap_err();
-            assert!(error.to_string().contains("projects[].worker_model_effort"));
+            assert!(error.to_string().contains("projects[].worker_effort"));
         }
     }
 }

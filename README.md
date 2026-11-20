@@ -112,11 +112,11 @@ Set the provider, models and optional effort once in `[agents]` for every projec
 ```toml
 [agents]
 provider = "codex" # Default; or "claude" for Claude Code
-small_model = "gpt-6-luna" # Coordinator
-big_model = "gpt-6-astra" # Implementation workers
+coordinator = "gpt-6-luna" # Coordinator
+worker = "gpt-6-astra" # Implementation workers
 # Optional; omit to preserve inherited configuration/provider defaults.
-# small_model_effort = "low"
-# big_model_effort = "high"
+# coordinator_effort = "low"
+# worker_effort = "high"
 ```
 
 Model IDs and aliases pass unchanged to the selected CLI, which checks availability
@@ -126,7 +126,7 @@ models or replace them with supported ones. Model names must contain text;
 known model IDs from the other provider are rejected. Custom CLI aliases remain
 supported; the CLI checks their availability. The provider is global.
 
-Optional `small_model_effort` (coordinator) and `big_model_effort` (all workers)
+Optional `coordinator_effort` (coordinator) and `worker_effort` (all workers)
 accept these exact lowercase values:
 
 | Provider | Effort values | CLI override |
@@ -142,9 +142,9 @@ guarantee every model supports every level. See the
 and [Claude effort documentation](https://code.claude.com/docs/en/model-config#adjust-effort-level).
 Claude's `ultracode` mode is not an effort level supported by Maistro.
 
-Each `[[projects]]` entry can set `worker_model` and `worker_model_effort`.
-Each field independently takes precedence over `[agents].big_model` and
-`[agents].big_model_effort`. If both levels omit the model, the existing provider
+Each `[[projects]]` entry can set `worker` and `worker_effort`.
+Each field independently takes precedence over `[agents].worker` and
+`[agents].worker_effort`. If both levels omit the model, the existing provider
 worker default above applies. If both omit effort, no effort override is sent.
 Coordinator settings are unaffected. Project effort uses the same validation
 and supported values as global effort; errors identify the project and field.
@@ -156,8 +156,8 @@ repo = "/work/backend"
 appflowy_page = "Backend Stories"
 mode = "pr"
 base_branch = "main"
-worker_model = "gpt-6-astra"
-worker_model_effort = "high"
+worker = "gpt-6-astra"
+worker_effort = "high"
 
 [[projects]]
 id = "frontend"
@@ -165,10 +165,10 @@ repo = "/work/frontend"
 appflowy_page = "Frontend Stories"
 mode = "pr"
 base_branch = "main"
-worker_model = "gpt-6-luna"
-worker_model_effort = "medium"
-# Remove worker_model to inherit only the global model, or remove
-# worker_model_effort to inherit only the global effort.
+worker = "gpt-6-luna"
+worker_effort = "medium"
+# Remove worker to inherit only the global model, or remove
+# worker_effort to inherit only the global effort.
 ```
 
 For Claude Code, replace `[agents]` with:
@@ -176,8 +176,8 @@ For Claude Code, replace `[agents]` with:
 ```toml
 [agents]
 provider = "claude"
-# small_model = "haiku"
-# big_model = "opus"
+# coordinator = "haiku"
+# worker = "opus"
 # claude = "/absolute/path/to/claude" # Defaults to claude on PATH
 # claude_mcp_config = "~/.claude.json"
 ```

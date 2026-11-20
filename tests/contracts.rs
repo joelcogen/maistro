@@ -657,34 +657,33 @@ fn provider_and_models_are_global_with_compatible_defaults() {
     let project = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Stories'\nmode='master'\nbase_branch='main'\n";
     let config: Config = toml::from_str(project).unwrap();
     assert_eq!(config.agents.provider, Provider::Codex);
-    assert_eq!(config.agents.small_model(), "gpt-6-luna");
-    assert_eq!(config.agents.big_model(), "gpt-6-astra");
+    assert_eq!(config.agents.coordinator(), "gpt-6-luna");
+    assert_eq!(config.agents.worker(), "gpt-6-astra");
     let config: Config =
         toml::from_str(&format!("[agents]\nprovider='claude'\n{project}")).unwrap();
-    assert_eq!(config.agents.small_model(), "haiku");
-    assert_eq!(config.agents.big_model(), "opus");
+    assert_eq!(config.agents.coordinator(), "haiku");
+    assert_eq!(config.agents.worker(), "opus");
     for provider in ["codex", "claude"] {
-        let config: Config = toml::from_str(&format!("[agents]\nprovider='{provider}'\nsmall_model='custom-small'\nbig_model='custom-big'\n{project}")).unwrap();
+        let config: Config = toml::from_str(&format!("[agents]\nprovider='{provider}'\ncoordinator='custom-coordinator'\nworker='custom-worker'\n{project}")).unwrap();
         config.validate().unwrap();
-        assert_eq!(config.agents.small_model(), "custom-small");
-        assert_eq!(config.agents.big_model(), "custom-big");
-        for field in ["small_model", "big_model"] {
+        assert_eq!(config.agents.coordinator(), "custom-coordinator");
+        assert_eq!(config.agents.worker(), "custom-worker");
+        for field in ["coordinator", "worker"] {
             for value in ["", "   ", "--bad-option", "bad\\nmodel"] {
                 let config: Config = toml::from_str(&format!(
                     "[agents]\nprovider='{provider}'\n{field}=\"{value}\"\n{project}"
                 ))
                 .unwrap();
-                assert!(config.validate().is_err());
+                let error = config.validate().unwrap_err().to_string();
+                assert!(error.contains(&format!("agents.{field}")), "{error}");
             }
         }
     }
     assert!(toml::from_str::<Config>(&format!("[agents]\nprovider='other'\n{project}")).is_err());
     for field in [
         "provider='claude'",
-        "small_model='other'",
-        "big_model='other'",
-        "small_model_effort='low'",
-        "big_model_effort='high'",
+        "coordinator='other'",
+        "coordinator_effort='low'",
     ] {
         assert!(toml::from_str::<Config>(&format!("{project}{field}\n")).is_err());
     }
@@ -705,24 +704,24 @@ fn effort_validation_is_optional_role_specific_and_provider_specific() {
         let config: Config =
             toml::from_str(&format!("[agents]\nprovider='{provider}'\n{project}")).unwrap();
         config.validate().unwrap();
-        assert_eq!(config.agents.small_model_effort, None);
-        assert_eq!(config.agents.big_model_effort, None);
-        for field in ["small_model_effort", "big_model_effort"] {
+        assert_eq!(config.agents.coordinator_effort, None);
+        assert_eq!(config.agents.worker_effort, None);
+        for field in ["coordinator_effort", "worker_effort"] {
             for value in &supported {
                 let config: Config = toml::from_str(&format!(
                     "[agents]\nprovider='{provider}'\n{field}='{value}'\n{project}"
                 ))
                 .unwrap();
                 config.validate().unwrap();
-                let (selected, other) = if field == "small_model_effort" {
+                let (selected, other) = if field == "coordinator_effort" {
                     (
-                        &config.agents.small_model_effort,
-                        &config.agents.big_model_effort,
+                        &config.agents.coordinator_effort,
+                        &config.agents.worker_effort,
                     )
                 } else {
                     (
-                        &config.agents.big_model_effort,
-                        &config.agents.small_model_effort,
+                        &config.agents.worker_effort,
+                        &config.agents.coordinator_effort,
                     )
                 };
                 assert_eq!(selected.as_deref(), Some(*value));
@@ -980,35 +979,38 @@ fn project_worker_settings_inherit_independently_and_validate() {
                 for effort in [None, Some("low")] {
                     let mut text = format!("[agents]\nprovider='{provider}'\n");
                     if global {
-                        text.push_str("big_model='custom-global'\nbig_model_effort='high'\n");
+                        text.push_str("worker='custom-global'\nworker_effort='high'\n");
                     }
                     text.push_str(project);
                     if let Some(model) = model {
-                        text.push_str(&format!("worker_model='{model}'\n"));
+                        text.push_str(&format!("worker='{model}'\n"));
                     }
                     if let Some(effort) = effort {
-                        text.push_str(&format!("worker_model_effort='{effort}'\n"));
+                        text.push_str(&format!("worker_effort='{effort}'\n"));
                     }
                     let config: Config = toml::from_str(&text).unwrap();
                     config.validate().unwrap();
                     let p = &config.projects[0];
+                    let serialized = serde_json::to_value(p).unwrap();
+                    assert_eq!(serialized["worker"], serde_json::json!(model));
+                    assert_eq!(serialized["worker_effort"], serde_json::json!(effort));
                     assert_eq!(
-                        p.worker_model(&config.agents),
+                        p.worker(&config.agents),
                         model.unwrap_or(if global { "custom-global" } else { default })
                     );
                     assert_eq!(
-                        p.worker_model_effort(&config.agents),
+                        p.worker_effort(&config.agents),
                         effort.or(global.then_some("high"))
                     );
                 }
             }
         }
         for (field, value) in [
-            ("worker_model", ""),
-            ("worker_model", "--option"),
-            ("worker_model", wrong_model),
-            ("worker_model_effort", "HIGH"),
-            ("worker_model_effort", "unknown"),
+            ("worker", ""),
+            ("worker", "--option"),
+            ("worker", wrong_model),
+            ("worker_effort", "HIGH"),
+            ("worker_effort", "unknown"),
         ] {
             let config: Config = toml::from_str(&format!(
                 "[agents]\nprovider='{provider}'\n{project}{field}='{value}'\n"
