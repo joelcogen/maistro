@@ -19,9 +19,10 @@ a different Git endpoint.
   report a blocker. Push dream changes to that branch. If the rebase rewrote
   published dream commits, use an explicit force-with-lease for only the dreams
   ref with the exact remote SHA observed before the rebase. Stop if the lease is
-  rejected. Do not open a PR. You can prepare a rebase on a detached checkout
-  to keep the local branch at its recorded tip until there is a tested change
-  to push. If the task made no changes, leave the original branch reusable.
+  rejected. Do not open a PR. Maistro handles it after the phase finishes.
+  You can prepare a rebase on a detached checkout to keep the local branch at
+  its recorded tip until there is a tested change to push. If the task made no
+  changes, leave the original branch reusable.
 
 Use the supplied GH_TOKEN (also GITHUB_TOKEN) and process-scoped Git settings.
 Keep credentials out of output and reports. Do not alter stored credentials or

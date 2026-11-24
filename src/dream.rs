@@ -14,6 +14,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) const BRANCH: &str = "dreams";
+
 pub(crate) fn parse_time(value: &str) -> Result<NaiveTime> {
     let bytes = value.as_bytes();
     ensure!(

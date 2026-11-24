@@ -2,6 +2,7 @@ use crate::{
     agent::AgentRunner,
     config::{Config, Mode},
     dream::{self, Dream, Dreams},
+    github,
     model::{Assignment, Completion, Coordination, Outcome, Report, Snapshot, StoryRef},
     poll, process,
     schedule::Schedule,
@@ -336,9 +337,10 @@ impl Engine {
                                     schedule.pause(&id);
                                     diagnostics.dream_started(&id);
                                     let agents = self.agents.clone();
+                                    let token_file = self.config.agents.github_token_file.clone();
                                     let cancel = stop.child_token();
                                     dream_workers.spawn(async move {
-                                        let result = run_dreams(&agents, &project, tasks, &cancel).await;
+                                        let result = run_dreams(&agents, &project, tasks, &token_file, &cancel).await;
                                         (id, result)
                                     });
                                 }
@@ -491,10 +493,12 @@ async fn run_dreams(
     agents: &AgentRunner,
     project: &crate::config::Project,
     tasks: Vec<Dream>,
+    token_file: &Path,
     cancel: &CancellationToken,
 ) -> Result<bool> {
     tracing::info!(project=%project.id, dreams=tasks.len(), "dream phase started");
     let mut completed = true;
+    let mut pushed = false;
     for dream in tasks {
         if cancel.is_cancelled() {
             completed = false;
@@ -504,6 +508,7 @@ async fn run_dreams(
         match agents.dream(project, &dream, cancel).await {
             Ok(report) => {
                 completed &= report.outcome == Outcome::Completed;
+                pushed |= report.commit.is_some();
                 tracing::info!(project=%project.id, dream=%dream.name, outcome=?report.outcome, summary=%report.summary, tests=?report.tests, commit=?report.commit, "dream finished");
             }
             Err(error) => {
@@ -515,6 +520,22 @@ async fn run_dreams(
                 }
                 completed = false;
                 tracing::warn!(project=%project.id, dream=%dream.name, error=%format!("{error:#}"), "dream worker failed");
+            }
+        }
+    }
+    if completed && pushed && project.mode == Mode::Pr && !cancel.is_cancelled() {
+        match github::publish_dream_pr(project, token_file, cancel).await {
+            Ok(Some(url)) => tracing::info!(project=%project.id, %url, "dream pull request ready"),
+            Ok(None) => (),
+            Err(error) => {
+                if error
+                    .downcast_ref::<process::UnconfirmedTermination>()
+                    .is_some()
+                {
+                    return Err(error);
+                }
+                completed = false;
+                tracing::warn!(project=%project.id, error=%format!("{error:#}"), "dream pull request failed");
             }
         }
     }

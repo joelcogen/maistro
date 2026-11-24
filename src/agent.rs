@@ -1,6 +1,6 @@
 use crate::{
     config::{Config, Mode, Project, Provider},
-    dream::{Dream, DreamReport},
+    dream::{self, Dream, DreamReport},
     github,
     model::{self, Assignment, Coordination, Outcome, Report, Snapshot},
     process,
@@ -505,10 +505,10 @@ impl AgentRunner {
             Mode::Master => &project.base_branch,
             Mode::Pr => {
                 ensure!(
-                    project.base_branch != "dreams",
+                    project.base_branch != dream::BRANCH,
                     "the dreams branch must be distinct from the base branch in PR mode"
                 );
-                "dreams"
+                dream::BRANCH
             }
         };
         let custom = repository_prompt(project, "maistro-worker.md")?;

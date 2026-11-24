@@ -137,8 +137,12 @@ Before starting a phase, Maistro atomically checkpoints the local date and
 input manifest under `runtime_dir/dreams/`. A restart that day skips the phase
 even if it was interrupted. Git changes from a completed dream are delivered
 individually, and Maistro checks the reported commit against the configured
-remote branch. Changes made to dream files during a phase can make the project
-eligible the following day.
+remote branch. After all dreams succeed in PR mode and at least one pushed a
+commit, the daemon checks for an open `dreams` PR against the configured base
+on the GitHub push remote. If none is open and `dreams` is ahead of the base,
+the daemon opens one with the configured worker token. It holds the worker slot
+until that step finishes. Changes made to dream files during a phase can make
+the project eligible the following day.
 
 ## Shortcut API polling
 

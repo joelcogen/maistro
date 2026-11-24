@@ -418,7 +418,7 @@ impl Status {
         let worker = &mut self.project(id).worker;
         worker.finish("idle", "Daily dream phase finished");
         worker.last_error =
-            (!completed).then_some("A dream was blocked or failed; see private daemon logs");
+            (!completed).then_some("Daily dream phase failed; see private daemon logs");
     }
     pub fn worker_finished(&mut self, id: &str, outcome: Option<Outcome>, failed: bool) {
         if outcome.is_some() {

@@ -41,8 +41,10 @@ dream_time = "03:00" # HH:MM in the daemon's local timezone
 
 A dream that changes the repository tests, commits, and pushes its changes. Master
 projects push to their configured base branch. PR projects use a dedicated
-`dreams` branch, rebased onto the updated base as needed, with no PR created by
-Maistro. Review and integrate that branch when appropriate.
+`dreams` branch, rebased onto the updated base as needed. After a successful phase
+that pushed a commit, Maistro opens a PR from `dreams` to the configured base if
+the branch is ahead, or reuses the open PR for those branches. The PR URL and
+any publication errors appear in the private daemon logs.
 
 Examples of dreams:
 

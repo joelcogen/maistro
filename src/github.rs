@@ -1,6 +1,9 @@
+use crate::{config::Project, dream, process};
 use anyhow::{Context, Result, ensure};
-use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+use reqwest::Url;
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, time::Duration};
 use tokio::process::Command;
+use tokio_util::sync::CancellationToken;
 
 // Never put the token in command arguments, prompts, remote URLs or Git config.
 // Git invokes this helper with get/store/erase; only get returns credentials.
@@ -66,6 +69,146 @@ pub fn configure_worker(cmd: &mut Command, token: &str) -> Result<()> {
     }
     cmd.env("GIT_CONFIG_COUNT", count.to_string());
     Ok(())
+}
+
+pub(crate) async fn publish_dream_pr(
+    project: &Project,
+    token_file: &Path,
+    cancel: &CancellationToken,
+) -> Result<Option<String>> {
+    let token = read_token(token_file)?;
+    let timeout = Duration::from_secs(30);
+    let mut git = Command::new("git");
+    git.current_dir(&project.repo).args([
+        "remote",
+        "get-url",
+        "--push",
+        "--all",
+        "--",
+        &project.remote,
+    ]);
+    configure_worker(&mut git, &token)?;
+    let remote = process::run(git, "", timeout, cancel, None).await?;
+    ensure!(
+        remote.code == 0,
+        "could not resolve the configured Git push remote"
+    );
+    let repository = remote.stdout.trim().strip_prefix("https://github.com/");
+    let (owner, name) = repository
+        .and_then(|repo| repo.strip_suffix(".git").unwrap_or(repo).split_once('/'))
+        .filter(|(owner, name)| {
+            [*owner, *name].into_iter().all(|part| {
+                !part.is_empty()
+                    && part != "."
+                    && part != ".."
+                    && part
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+            })
+        })
+        .context("dream pull requests require a single GitHub push repository")?;
+    let pulls = format!("repos/{owner}/{name}/pulls");
+    let qualified_head = format!("head={owner}:{}", dream::BRANCH);
+    let head = format!("head={}", dream::BRANCH);
+    let base = format!("base={}", project.base_branch);
+
+    let api = async |method: &str, endpoint: &str, jq: &str, fields: &[&str]| {
+        let mut gh = Command::new("gh");
+        gh.current_dir(&project.repo)
+            .env("GH_TOKEN", &token)
+            .env("GITHUB_TOKEN", &token)
+            .env("GH_PROMPT_DISABLED", "1")
+            .env_remove("GH_DEBUG")
+            .args([
+                "api",
+                "--hostname",
+                "github.com",
+                "--method",
+                method,
+                endpoint,
+                "--jq",
+                jq,
+            ]);
+        for field in fields {
+            gh.args(["-f", field]);
+        }
+        process::run(gh, "", timeout, cancel, None)
+            .await
+            .context("run GitHub CLI for the dream pull request")
+    };
+    let checked = |output: process::Output, operation| {
+        ensure!(
+            output.code == 0,
+            "{operation} (gh exit {}): {}",
+            output.code,
+            output
+                .stderr
+                .replace(&token, "[redacted]")
+                .chars()
+                .take(1000)
+                .collect::<String>()
+                .trim()
+        );
+        Ok(output.stdout.trim().to_owned())
+    };
+    let find_open = async || {
+        let result = api(
+            "GET",
+            &pulls,
+            ".[0].html_url // empty",
+            &["state=open", &qualified_head, &base],
+        )
+        .await?;
+        checked(result, "list open dream pull requests")
+    };
+    let existing = find_open().await?;
+    if !existing.is_empty() {
+        return Ok(Some(existing));
+    }
+
+    let mut compare = Url::parse("https://api.github.com").unwrap();
+    let refs = format!("{}...{}", project.base_branch, dream::BRANCH);
+    compare
+        .path_segments_mut()
+        .unwrap()
+        .extend(["repos", owner, name, "compare", &refs]);
+    let ahead = checked(
+        api("GET", compare.path(), ".ahead_by", &["per_page=1"]).await?,
+        "compare the dreams branch with the base branch",
+    )?;
+    if ahead
+        .parse::<u64>()
+        .context("invalid GitHub comparison result")?
+        == 0
+    {
+        return Ok(None);
+    }
+
+    let created = api(
+        "POST",
+        &pulls,
+        ".html_url",
+        &[
+            &head,
+            &base,
+            "title=Daily dreams",
+            "body=Changes from Maistro's daily dream phases.",
+        ],
+    )
+    .await?;
+    if created.code != 0 {
+        // Another client may have opened the same PR after the initial lookup.
+        let existing = find_open().await?;
+        if !existing.is_empty() {
+            return Ok(Some(existing));
+        }
+    }
+    let url = checked(created, "create dream pull request")?;
+    ensure!(
+        url.starts_with("https://github.com/"),
+        "GitHub returned no pull request URL"
+    );
+    Ok(Some(url))
 }
 
 #[cfg(test)]

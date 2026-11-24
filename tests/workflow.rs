@@ -377,6 +377,115 @@ async fn daily_dreams_require_complete_empty_queues_and_push_changes_in_order() 
 }
 
 #[tokio::test]
+async fn dream_phases_open_or_reuse_one_pr_only_when_needed() {
+    let f = Fixture::new(&[Mode::Pr, Mode::Pr, Mode::Pr, Mode::Master, Mode::Pr]);
+    let root = f.temp.path();
+    let tools = root.join("tools");
+    fs::create_dir(&tools).unwrap();
+    for (name, script) in [
+        ("gh", include_str!("fixtures/dream-gh.py")),
+        (
+            "git",
+            r#"#!/bin/sh
+if [ "$*" = 'remote get-url --push --all -- delivery' ]; then
+    printf 'https://github.com/fixture/%s.git\n' "${PWD##*/}"
+    exit
+fi
+PATH=${PATH#*:}
+export PATH
+exec git "$@"
+"#,
+        ),
+    ] {
+        let path = tools.join(name);
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut config = String::from(
+        "[orchestrator]\ndream_time='00:00'\nruntime_dir='runtime'\npoll_interval_seconds=1\n\
+         [agents]\ncodex='./fake-codex'\ncodex_home='codex-home'\ngithub_token_file='github-token'\n",
+    );
+    for (i, project) in f.config.projects.iter().enumerate() {
+        git(&project.repo, &["remote", "rename", "origin", "delivery"]);
+        git(&project.repo, &["branch", "-m", "release/main"]);
+        git(&project.repo, &["push", "delivery", "release/main"]);
+        f.status(&project.id, "Backlog");
+        if i != 2 {
+            write_dream(project, "01-first.md", "run first");
+            write_dream(project, "02-second.md", "run after first");
+        }
+        write_dream(project, "03-noop.md", "no changes");
+        let mode = if project.mode == Mode::Pr {
+            "pr"
+        } else {
+            "master"
+        };
+        config.push_str(&format!(
+            "\n[[projects]]\nid='{id}'\nrepo='{id}'\nappflowy_page='board-{i}'\n\
+             mode='{mode}'\nremote='delivery'\nbase_branch='release/main'\n",
+            id = project.id,
+        ));
+    }
+    let config_path = root.join("config.toml");
+    fs::write(&config_path, config).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(tools).chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let log = root.join("daemon.log");
+    let mut daemon = tokio::process::Command::new(env!("CARGO_BIN_EXE_maistro"))
+        .args(["run", "--config"])
+        .arg(config_path)
+        .env("PATH", path)
+        .env("RUST_LOG", "info")
+        .stderr(fs::File::create(&log).unwrap())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    let finished = f
+        .wait(|| {
+            fs::read_to_string(&log)
+                .unwrap()
+                .matches("dream phase finished")
+                .count()
+                == 5
+        })
+        .await;
+    let pid = daemon.id().unwrap() as i32;
+    unsafe { libc::kill(pid, libc::SIGTERM) };
+    assert!(
+        tokio::time::timeout(Duration::from_secs(10), daemon.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let logs = fs::read_to_string(log).unwrap();
+    assert!(finished, "{logs}");
+    assert_eq!(logs.matches("completed=true").count(), 5, "{logs}");
+    assert_eq!(
+        logs.matches("dream pull request ready").count(),
+        2,
+        "{logs}"
+    );
+    let events = f.events();
+    for (id, expected) in [
+        ("p0", &["GET", "GET", "POST"][..]),
+        ("p1", &["GET"][..]),
+        ("p2", &[][..]),
+        ("p3", &[][..]),
+        ("p4", &["GET", "GET"][..]),
+    ] {
+        let methods: Vec<_> = events
+            .iter()
+            .filter(|event| event["kind"] == "dream_github" && event["project"] == id)
+            .map(|event| event["method"].as_str().unwrap())
+            .collect();
+        assert_eq!(methods, expected, "{id}");
+    }
+}
+
+#[tokio::test]
 async fn dream_phase_holds_its_projects_worker_slot_until_it_finishes() {
     let mut f = Fixture::new(&[Mode::Master, Mode::Master]);
     f.config.orchestrator.dream_time = "00:00".into();
