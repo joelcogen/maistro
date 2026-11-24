@@ -1,6 +1,6 @@
 //! Claude Code print-mode adapter. Authentication stays with the user's CLI.
 use crate::{
-    agent::source_tools,
+    agent::{Invocation, source_tools},
     config::{Config, Project},
     github, process,
 };
@@ -152,12 +152,12 @@ pub(crate) async fn validate(config: &Config) -> Result<()> {
 
 pub(crate) async fn invoke(
     config: &Config,
-    project: Option<&Project>,
-    coordinator_projects: &[&Project],
+    invocation: Invocation<'_>,
     prompt: &str,
     schema: Value,
     cancel: &CancellationToken,
 ) -> Result<Value> {
+    let project = invocation.project();
     let runtime = &config.orchestrator.runtime_dir;
     let logs = runtime.join("logs");
     std::fs::create_dir_all(&logs)?;
@@ -222,7 +222,13 @@ pub(crate) async fn invoke(
         for p in &config.projects {
             connections.remove(p.mcp_server(&config.agents));
         }
-    } else {
+        if let Invocation::Dream(project) = invocation {
+            connections.insert(
+                project.mcp_server(&config.agents).into(),
+                server(config, project)?,
+            );
+        }
+    } else if let Invocation::Coordinator(coordinator_projects) = invocation {
         cmd.env_remove("GH_TOKEN")
             .env_remove("GITHUB_TOKEN")
             .env_remove("MAISTRO_GITHUB_TOKEN");

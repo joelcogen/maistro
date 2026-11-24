@@ -11,7 +11,9 @@ port = 8044
 poll_interval_seconds = 30
 coordinator_timeout_seconds = 300
 worker_timeout_seconds = 3600
-# Diagnostic logs and OS locks only. No local story database.
+# Daily Dreams start after this time in the daemon's local timezone.
+dream_time = "03:00"
+# Diagnostic logs, OS locks, and daily dream checkpoints.
 # runtime_dir = "~/.local/state/maistro"
 
 [agents]

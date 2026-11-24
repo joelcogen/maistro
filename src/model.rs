@@ -133,7 +133,7 @@ pub struct Coordination {
     pub notes: Vec<String>,
     /// Projects with an incomplete coordination decision or failed remote operation.
     pub retry_projects: Vec<String>,
-    /// Display observations only; never used to select or authorize work.
+    /// Fresh board observations. A daily dream phase requires a complete empty queue.
     #[serde(default)]
     pub observations: Vec<crate::status::BoardRead>,
 }
@@ -225,5 +225,12 @@ pub fn report_schema() -> Value {
         "outcome":{"type":"string","enum":["completed","blocked"]},
         "summary":{"type":"string"}, "tests":strings(),
         "commit":{"type":["string","null"]}, "pr_url":{"type":["string","null"]}
+    }))
+}
+
+pub(crate) fn dream_report_schema() -> Value {
+    object(json!({
+        "outcome":{"type":"string","enum":["completed","blocked"]},
+        "summary":{"type":"string"}, "tests":strings(), "commit":{"type":["string","null"]}
     }))
 }

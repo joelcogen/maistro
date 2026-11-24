@@ -1,12 +1,14 @@
 use crate::{
     agent::AgentRunner,
     config::{Config, Mode},
-    model::{Assignment, Completion, Coordination, Report, Snapshot, StoryRef},
+    dream::{self, Dream, Dreams},
+    model::{Assignment, Completion, Coordination, Outcome, Report, Snapshot, StoryRef},
     poll, process,
     schedule::Schedule,
     status::{self, Status},
 };
 use anyhow::{Context, Result, ensure};
+use chrono::Local;
 use fs2::FileExt;
 use std::{
     collections::{BTreeMap, HashSet},
@@ -51,6 +53,9 @@ struct State {
     pending: BTreeMap<String, Completion>,
 }
 impl State {
+    fn busy(&self, id: &str) -> bool {
+        self.active.contains_key(id) || self.pending.contains_key(id)
+    }
     fn snapshot(&self) -> Snapshot {
         Snapshot {
             active: self.active.values().map(|a| a.story.clone()).collect(),
@@ -195,9 +200,13 @@ impl Engine {
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
         status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut workers = JoinSet::new();
+        let mut dream_workers = JoinSet::new();
+        let mut dreams = Dreams::new(&self.config)?;
         let mut coordinator = JoinSet::new();
         let mut state = State::default();
         let interval = Duration::from_secs(self.config.orchestrator.poll_interval_seconds);
+        let mut dream_tick = tokio::time::interval(interval.min(Duration::from_secs(30)));
+        dream_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut schedule = Schedule::new(
             self.config
                 .projects
@@ -234,6 +243,7 @@ impl Engine {
         }
         drop(poll_sender);
         let mut pass = BTreeMap::new();
+        let mut dream_pass = BTreeMap::new();
         // Briefly coalesce independent startup observations and simultaneous events.
         let mut coalesce_until = Instant::now() + Duration::from_millis(100);
         tracing::info!(projects = repo_locks.len(), "maistro started");
@@ -243,6 +253,7 @@ impl Engine {
                 if coordinator.is_empty() && Instant::now() >= coalesce_until {
                     pass = schedule.ready();
                     if !pass.is_empty() {
+                        dream_pass = pass.keys().filter_map(|id| dreams.candidate(id).map(|day| (id.clone(), day))).collect();
                         diagnostics.coordinator_started();
                         let mut snapshot = state.snapshot();
                         snapshot.active.retain(|s| pass.contains_key(&s.project_id));
@@ -264,6 +275,20 @@ impl Engine {
                         anyhow::bail!("status server stopped unexpectedly");
                     }
                     _ = status_tick.tick() => {},
+                    _ = dream_tick.tick() => {
+                        let day = dreams.day(Local::now().naive_local());
+                        for project in self.config.projects.iter().filter(|p| p.enabled) {
+                            let id = &project.id;
+                            if schedule.is_paused(id) || state.busy(id) {
+                                continue;
+                            }
+                            match dreams.refresh(project, day) {
+                                Ok(true) => schedule.wake(id),
+                                Ok(false) => {}
+                                Err(error) => tracing::warn!(project=%id, error=%format!("{error:#}"), "dream discovery failed"),
+                            }
+                        }
+                    }
                     outcome = coordinator.join_next(), if !coordinator.is_empty() => {
                         match outcome.context("coordinator disappeared")?? {
                             Ok(update) => {
@@ -271,11 +296,52 @@ impl Engine {
                                 let released: Vec<_> = state.pending.values()
                                     .filter(|c| update.acknowledged.contains(&c.id) || update.cancel.contains(&c.story))
                                     .map(|c| c.story.project_id.clone()).collect();
+                                let mut dream_starts = Vec::new();
+                                let day = dreams.day(Local::now().naive_local());
                                 for (id, generation) in &pass {
-                                    if update.retry_projects.contains(id) { schedule.retry(id, interval); }
-                                    else { schedule.acknowledge(id, *generation); }
+                                    if update.retry_projects.contains(id) {
+                                        schedule.retry(id, interval);
+                                        continue;
+                                    }
+                                    schedule.acknowledge(id, *generation);
+                                    if dream_pass.get(id).copied() != day || day.is_none()
+                                        || dreams.candidate(id) != day || !schedule.is_current(id, *generation)
+                                        || state.busy(id)
+                                        || update.assignments.iter().any(|a| &a.project_id == id)
+                                    {
+                                        continue;
+                                    }
+                                    match dream::empty_queue(&update, id) {
+                                        Some(true) => dream_starts.push(id.clone()),
+                                        Some(false) => {},
+                                        None => {
+                                            schedule.wake(id);
+                                            schedule.retry(id, interval);
+                                        }
+                                    }
                                 }
                                 self.apply(update, &mut state, &mut workers, &stop, &mut diagnostics)?;
+                                for id in dream_starts {
+                                    let project = self.config.projects.iter().find(|p| p.id == id).unwrap().clone();
+                                    // The instructions may have changed while the coordinator was reading the board.
+                                    if let Err(error) = dreams.refresh(&project, day) {
+                                        tracing::warn!(project=%id, error=%format!("{error:#}"), "dream discovery failed");
+                                        continue;
+                                    }
+                                    if dreams.candidate(&id).is_none() {
+                                        continue;
+                                    }
+                                    let tasks = dreams.start(&id)
+                                        .with_context(|| format!("{id}: checkpoint dream phase"))?;
+                                    schedule.pause(&id);
+                                    diagnostics.dream_started(&id);
+                                    let agents = self.agents.clone();
+                                    let cancel = stop.child_token();
+                                    dream_workers.spawn(async move {
+                                        let result = run_dreams(&agents, &project, tasks, &cancel).await;
+                                        (id, result)
+                                    });
+                                }
                                 for id in released { schedule.wake(&id); }
                                 for id in state.pending.keys().filter(|id| pass.contains_key(*id)) {
                                     schedule.wake(id);
@@ -296,9 +362,18 @@ impl Engine {
                         let id = assignment.project_id.clone();
                         let failed = result.is_err();
                         state.finish(assignment, result)?;
+                        if state.pending.contains_key(&id) {
+                            dreams.record_story_work(&id)
+                                .with_context(|| format!("{id}: record story activity for dreams"))?;
+                        }
                         diagnostics.worker_finished(&id, state.pending.get(&id).map(|c| c.report.outcome), failed);
                         schedule.wake(&id);
                         coalesce_until = Instant::now() + Duration::from_millis(100);
+                    }
+                    outcome = dream_workers.join_next(), if !dream_workers.is_empty() => {
+                        let (id, result) = outcome.context("dream worker disappeared")??;
+                        diagnostics.dream_finished(&id, result?);
+                        schedule.resume(&id);
                     }
                     observation = poll_results.recv(), if !polls.is_empty() => {
                         if let Some((id, observation)) = observation {
@@ -329,6 +404,9 @@ impl Engine {
         stop.cancel();
         while let Some(outcome) = workers.join_next().await {
             record_shutdown(outcome.map(|(_, report)| report.map(|_| ())), &mut result);
+        }
+        while let Some(outcome) = dream_workers.join_next().await {
+            record_shutdown(outcome.map(|(_, result)| result.map(|_| ())), &mut result);
         }
         while let Some(outcome) = coordinator.join_next().await {
             record_shutdown(outcome.map(|update| update.map(|_| ())), &mut result);
@@ -376,7 +454,7 @@ impl Engine {
             .retain(|_, c| !update.acknowledged.contains(&c.id));
         for assignment in update.assignments {
             ensure!(
-                !state.snapshot().busy(&assignment.project_id),
+                !state.busy(&assignment.project_id),
                 "attempted overlapping project work"
             );
             let project = self
@@ -407,6 +485,41 @@ impl Engine {
         }
         Ok(())
     }
+}
+
+async fn run_dreams(
+    agents: &AgentRunner,
+    project: &crate::config::Project,
+    tasks: Vec<Dream>,
+    cancel: &CancellationToken,
+) -> Result<bool> {
+    tracing::info!(project=%project.id, dreams=tasks.len(), "dream phase started");
+    let mut completed = true;
+    for dream in tasks {
+        if cancel.is_cancelled() {
+            completed = false;
+            break;
+        }
+        tracing::info!(project=%project.id, dream=%dream.name, "dispatching dream worker");
+        match agents.dream(project, &dream, cancel).await {
+            Ok(report) => {
+                completed &= report.outcome == Outcome::Completed;
+                tracing::info!(project=%project.id, dream=%dream.name, outcome=?report.outcome, summary=%report.summary, tests=?report.tests, commit=?report.commit, "dream finished");
+            }
+            Err(error) => {
+                if error
+                    .downcast_ref::<process::UnconfirmedTermination>()
+                    .is_some()
+                {
+                    return Err(error);
+                }
+                completed = false;
+                tracing::warn!(project=%project.id, dream=%dream.name, error=%format!("{error:#}"), "dream worker failed");
+            }
+        }
+    }
+    tracing::info!(project=%project.id, completed, "dream phase finished");
+    Ok(completed)
 }
 
 fn record_shutdown(outcome: Result<Result<()>, tokio::task::JoinError>, result: &mut Result<()>) {

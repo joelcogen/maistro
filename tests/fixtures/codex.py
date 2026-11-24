@@ -32,14 +32,15 @@ if args == ['auth', 'status']:
 model = args[args.index('--model' if claude else '-m') + 1]
 prompt = sys.stdin.read()
 coordinator = '\nPROJECTS=' in prompt
+dream = '\nDREAM=' in prompt
 defaults = ['haiku', 'opus'] if claude else ['gpt-6-luna', 'gpt-6-astra']
 models = json.loads((ROOT / 'models.json').read_text()) if (ROOT / 'models.json').exists() else defaults
 efforts = json.loads((ROOT / 'efforts.json').read_text()) if (ROOT / 'efforts.json').exists() else [None, None]
 expected_model = models[0 if coordinator else 1]
 effort = efforts[0 if coordinator else 1]
 if not coordinator and (ROOT / 'project-settings.json').exists():
-    assignment = json.loads(prompt.split('\nASSIGNMENT=')[1].splitlines()[0])
-    expected_model, effort = json.loads((ROOT / 'project-settings.json').read_text())[assignment['project_id']]
+    project = json.loads(prompt.split('\nPROJECT=')[1].splitlines()[0])['id'] if dream else json.loads(prompt.split('\nASSIGNMENT=')[1].splitlines()[0])['project_id']
+    expected_model, effort = json.loads((ROOT / 'project-settings.json').read_text())[project]
 assert model == expected_model
 if claude:
     assert args.count('--effort') == (0 if effort is None else 1)
@@ -169,7 +170,7 @@ if coordinator:
         busy.update(c['story']['project_id'] for c in snapshot['pending'])
         for project in projects:
             story = board[project['id']]
-            if project['id'] in busy or story['status'] not in ('Ready', 'In Progress') or (ROOT / 'archived').exists():
+            if project['id'] in busy or story['status'] not in ('Ready', 'In Progress') or (ROOT / 'archived').exists() or (ROOT / ('hold-story-' + project['id'])).exists():
                 continue
             result['assignments'].append(dict(project_id=project['id'], story_id=story['id'],
                                              title='Fixture story', story_url='https://appflowy.example/story', context='Complete fixture requirements',
@@ -181,24 +182,33 @@ if coordinator:
         (ROOT / 'board.json').write_text(json.dumps(board))
     if (ROOT / 'luna-incomplete').exists():
         result['retry_projects'] = [p['id'] for p in projects]
+    if (ROOT / 'missing-observations').exists():
+        result['observations'] = []
     if (ROOT / 'delivery-incomplete').exists():
         result['acknowledged'] = []
-    event('coordinator_read')
+    event('coordinator_read', observations=result['observations'])
     while (ROOT / 'luna-hold').exists():
         time.sleep(0.05)
     time.sleep(0.1)
     finish(result)
 else:
+    dream_project = json.loads(prompt.split('\nPROJECT=')[1].splitlines()[0]) if dream else None
+    dream_source = dream_project['mcp_server'] if dream else None
     if claude:
         assert '--dangerously-skip-permissions' in args
         assert '--setting-sources' not in args
-        assert set(connections) == {'utility'}
+        assert set(connections) == ({'utility', dream_source} if dream else {'utility'})
     else:
         assert '--ignore-user-config' not in args
         assert args[args.index('--sandbox') + 1] == 'danger-full-access'
         user_config = (ROOT / 'codex-home/config.toml').read_text()
         for server in ('appflowy', 'shortcut', 'shortcut_team'):
-            assert (f'mcp_servers.{server}.enabled=false' in args) == (f'[mcp_servers.{server}]' in user_config)
+            assert (f'mcp_servers.{server}.enabled=false' in args) == (server != dream_source and f'[mcp_servers.{server}]' in user_config)
+        if dream:
+            prefix = f'mcp_servers.{dream_source}'
+            assert f'{prefix}.enabled=true' in args
+            assert f'{prefix}.required=false' in args
+            assert any(arg.startswith(f'{prefix}.enabled_tools=') for arg in args)
         assert 'shell_environment_policy.ignore_default_excludes=true' in args
         assert 'shell_environment_policy.exclude=[]' in args
         assert 'shell_environment_policy.include_only=[]' in args
@@ -210,8 +220,51 @@ else:
         input='protocol=https\nhost=github.com\n\n', text=True, capture_output=True)
     assert credentials.returncode == 0
     assert f'password={token}' in credentials.stdout
+    def git(*command):
+        return subprocess.check_output(['git', *command], text=True, stderr=subprocess.PIPE).strip()
+
+    git_config = json.loads(prompt.split('\nGIT=', 1)[1].splitlines()[0])
+    if dream:
+        instructions = json.loads(prompt.split('\nDREAM=', 1)[1].splitlines()[0])
+        project = dream_project['id']
+        assert Path.cwd() == ROOT / project
+        assert 'Do not open a PR.' in prompt
+        event('dream_start', project=project, name=instructions['name'], model=model)
+        while (ROOT / ('hold-dream-' + project)).exists():
+            time.sleep(0.05)
+        branch, base, remote = (git_config[key] for key in ('branch', 'base_branch', 'remote'))
+        git('fetch', remote)
+        local_branch = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}']).returncode == 0
+        remote_branch = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/remotes/{remote}/{branch}']).returncode == 0
+        branch_start = f'{remote}/{branch}' if remote_branch else f'{remote}/{base}'
+        git('switch', branch) if local_branch else git('switch', '-c', branch, branch_start)
+        lease = []
+        if git_config['mode'] == 'pr':
+            assert branch == 'dreams' and branch != base
+            old = git('rev-parse', branch_start)
+            git('rebase', f'{remote}/{base}')
+            if remote_branch:
+                lease = [f'--force-with-lease=refs/heads/{branch}:{old}']
+        else:
+            assert branch == base
+            git('merge', '--ff-only', branch_start)
+        commit = None
+        content = instructions['instructions'].strip()
+        if content != 'no changes':
+            if 'after first' in content:
+                assert Path('01-first.txt').is_file()
+            path = Path(instructions['name']).with_suffix('.txt')
+            path.write_text(content + '\n')
+            assert path.read_text() == content + '\n'
+            git('add', str(path))
+            git('commit', '-m', f"Dream: {instructions['name']}")
+            git('push', *lease, remote, branch)
+            commit = git('rev-parse', 'HEAD')
+        event('dream_finish', project=project, name=instructions['name'])
+        finish(dict(outcome='completed', summary='Dream checked', tests=['fixture verified dream output'], commit=commit))
+        sys.exit(0)
+
     assignment = json.loads(prompt.split('\nASSIGNMENT=', 1)[1].splitlines()[0])
-    git_config = json.loads(prompt.split('\nGIT=', 1)[1].split('\nASSIGNMENT=', 1)[0])
     project = assignment['project_id']
     assert Path.cwd() == ROOT / project
     event('worker_start', model=model, effort=effort, provider='claude' if claude else 'codex', project=project, recovery=assignment['recovery'], git=git_config)
@@ -229,8 +282,6 @@ else:
                    if json.loads(l)['kind'] == 'worker_start'}) < 2:
             assert time.monotonic() < deadline, 'project workers did not run concurrently'
             time.sleep(0.05)
-    def git(*command):
-        return subprocess.check_output(['git', *command], text=True, stderr=subprocess.PIPE).strip()
     branch = git_config['story_branch'] if git_config['mode'] == 'pr' else git_config['base_branch']
     existing = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}']).returncode == 0
     git('checkout', branch) if existing else git('checkout', '-b', branch, git_config['base_branch'])

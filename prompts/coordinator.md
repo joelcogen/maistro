@@ -252,7 +252,7 @@ if you acknowledge its result in this pass. The next pass will pick up new work.
 Return retry_projects for every incomplete coordination operation: failed/partial
 reads (including active-status checks), ambiguous boards, claims, result writes or
 read-backs. These retry without another board change. Dependency waits and no
-eligible work are not retries; display observations do not control scheduling.
+eligible story work are not retries. Board counts cannot authorize story assignments.
 
 Return only the structured result, with brief actionable notes; empty arrays are
 valid when idle. Claim success only when tool results and required read-backs
@@ -278,7 +278,8 @@ Do not adjust the returned counts yourself or read the board again for this fiel
 Select the concise reason enum that best explains this pass
 (no_eligible_work, dependencies, occupied, read_failed, ambiguous_board,
 incomplete_read, claim_failed, requirements_blocked, update_failed, work_selected).
-These observations are display-only and must never replace fresh reads or claims.
+Rust also uses complete observations from a fresh pass to verify an empty Ready
+and In Progress queue for daily dreams. Never report zero for unread states.
 For assignments, include story_url from an actual AppFlowy story link already
 available in the read results, otherwise null. Never invent a link or fetch one
 solely for display. Do not put credentials, raw tool errors or prompts in display

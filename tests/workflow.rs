@@ -110,6 +110,7 @@ impl Fixture {
                 poll_interval_seconds: 1,
                 coordinator_timeout_seconds: 10,
                 worker_timeout_seconds: 15,
+                ..Default::default()
             },
             projects,
         };
@@ -265,6 +266,151 @@ impl Fixture {
             panic!("engine failed: {e:#}; events: {:?}", self.events());
         }
     }
+}
+
+fn write_dream(project: &Project, name: &str, instructions: &str) {
+    let dir = project.repo.join("dreams");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join(name), instructions).unwrap();
+}
+
+#[tokio::test]
+async fn daily_dreams_require_complete_empty_queues_and_push_changes_in_order() {
+    for claude in [false, true] {
+        let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
+        if claude {
+            f.claude();
+        }
+        f.config.orchestrator.dream_time = "00:00".into();
+        let pr = &f.config.projects[1].repo;
+        git(pr, &["switch", "-c", "dreams"]);
+        fs::write(pr.join("old-dream.txt"), "existing dream work").unwrap();
+        git(pr, &["add", "old-dream.txt"]);
+        git(pr, &["commit", "-m", "An earlier dream"]);
+        git(pr, &["push", "origin", "dreams"]);
+        git(pr, &["switch", "main"]);
+        fs::write(pr.join("updated-base.txt"), "updated base").unwrap();
+        git(pr, &["add", "updated-base.txt"]);
+        git(pr, &["commit", "-m", "Update base"]);
+        git(pr, &["push", "origin", "main"]);
+        for project in &f.config.projects {
+            write_dream(project, "02-second.md", "run after first");
+            write_dream(project, "01-first.md", "run first");
+            write_dream(project, "03-noop.md", "no changes");
+            f.touch(&format!("hold-story-{}", project.id));
+        }
+        f.status("p1", "In Progress");
+        let (stop, job) = f.start();
+        let read_count = |id: &str, state: &str| {
+            f.events().iter().any(|e| {
+                e["observations"].as_array().is_some_and(|observations| {
+                    observations
+                        .iter()
+                        .any(|o| o["project_id"] == id && o["counts"][state] == 1)
+                })
+            })
+        };
+        assert!(
+            f.wait(|| read_count("p0", "ready") && read_count("p1", "in_progress"))
+                .await
+        );
+        f.touch("missing-observations");
+        f.status("p0", "Backlog");
+        f.status("p1", "Review");
+        assert!(
+            f.wait(|| f
+                .events()
+                .iter()
+                .filter(|e| e["observations"] == json!([]))
+                .count()
+                >= 2)
+                .await
+        );
+        assert!(!f.events().iter().any(|e| e["kind"] == "dream_start"));
+        fs::remove_file(f.temp.path().join("missing-observations")).unwrap();
+
+        assert!(
+            f.wait(|| f
+                .events()
+                .iter()
+                .filter(|e| e["kind"] == "dream_finish")
+                .count()
+                == 6)
+                .await
+        );
+        for (i, project) in f.config.projects.iter().enumerate() {
+            let names: Vec<_> = f
+                .events()
+                .into_iter()
+                .filter(|e| e["kind"] == "dream_start" && e["project"] == project.id)
+                .map(|e| e["name"].as_str().unwrap().to_owned())
+                .collect();
+            assert_eq!(names, ["01-first.md", "02-second.md", "03-noop.md"]);
+            let remote = f.temp.path().join(format!("remote{i}.git"));
+            let branch = if project.mode == Mode::Master {
+                "main"
+            } else {
+                "dreams"
+            };
+            assert_eq!(
+                git(&remote, &["show", &format!("{branch}:01-first.txt")]),
+                "run first"
+            );
+            assert_eq!(
+                git(&remote, &["show", &format!("{branch}:02-second.txt")]),
+                "run after first"
+            );
+            assert_eq!(
+                git(&remote, &["log", "-2", "--format=%s", branch]),
+                "Dream: 02-second.md\nDream: 01-first.md"
+            );
+            if project.mode == Mode::Pr {
+                git(&remote, &["merge-base", "--is-ancestor", "main", branch]);
+                assert_eq!(
+                    git(&remote, &["show", "dreams:old-dream.txt"]),
+                    "existing dream work"
+                );
+            }
+        }
+        f.stop(stop, job).await;
+    }
+}
+
+#[tokio::test]
+async fn dream_phase_holds_its_projects_worker_slot_until_it_finishes() {
+    let mut f = Fixture::new(&[Mode::Master, Mode::Master]);
+    f.config.orchestrator.dream_time = "00:00".into();
+    write_dream(&f.config.projects[0], "01.md", "no changes");
+    f.status("p0", "Backlog");
+    f.touch("hold-dream-p0");
+
+    let (stop, job) = f.start();
+    assert!(
+        f.wait(|| f.events().iter().any(|e| e["kind"] == "dream_start"))
+            .await
+    );
+    f.status("p0", "Ready");
+    assert!(f.wait(|| f.board()["p1"]["status"] == "Done").await);
+    assert_eq!(f.board()["p0"]["status"], "Ready");
+    assert!(
+        !f.events()
+            .iter()
+            .any(|e| e["kind"] == "worker_start" && e["project"] == "p0")
+    );
+
+    fs::remove_file(f.temp.path().join("hold-dream-p0")).unwrap();
+    assert!(f.wait(|| f.board()["p0"]["status"] == "Done").await);
+    f.stop(stop, job).await;
+    let events = f.events();
+    let dream = events
+        .iter()
+        .position(|e| e["kind"] == "dream_finish")
+        .unwrap();
+    let story = events
+        .iter()
+        .position(|e| e["kind"] == "worker_start" && e["project"] == "p0")
+        .unwrap();
+    assert!(dream < story);
 }
 
 #[tokio::test]

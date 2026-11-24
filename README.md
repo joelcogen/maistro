@@ -22,6 +22,35 @@ See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
 `base_branch` can be `main`, `master`, or another branch. You handle CI, PR merging
 and moving reviewed stories to Done.
 
+## Dreams
+
+Put UTF-8 Markdown instructions in `dreams/` at the root of a project's checkout.
+Maistro runs the `.md` files in alphabetical filename order, one worker invocation
+per file. Use prefixes such as `01-` and `02-` to set the order.
+
+An enabled project can start one dream phase per local calendar day, from
+`orchestrator.dream_time` onward. The default is `03:00`. A phase requires both
+an empty Ready and In Progress queue and either story work since the last phase
+or a new or edited dream file. A project with work queued can become eligible
+later that day. The first set of dream files counts as new.
+
+```toml
+[orchestrator]
+dream_time = "03:00" # HH:MM in the daemon's local timezone
+```
+
+A dream that changes the repository tests, commits, and pushes its changes. Master
+projects push to their configured base branch. PR projects use a dedicated
+`dreams` branch, rebased onto the updated base as needed, with no PR created by
+Maistro. Review and integrate that branch when appropriate.
+
+Examples of dreams:
+
+- Prune tests that no longer guard behavior. [Test pruning example](examples/dreams/prune_tests.md)
+- Verify documentation style and consistency. [Documentation example](examples/dreams/documentation_style.md)
+- Release a nightly build.
+- Prepare new stories in Backlog for tomorrow's run.
+
 ## Install and configure
 
 Requires Linux, Git, Rust 1.89+, and an authenticated Codex or Claude Code CLI with
@@ -249,7 +278,7 @@ child processes before restarting.
 
 Private event/stderr logs live in `~/.local/state/maistro/logs` by default and may
 contain story, code and tool content. Use them for diagnostics and clean up old
-logs as needed. `runtime_dir` holds logs, OS locks and transient invocation files;
+logs as needed. `runtime_dir` holds logs, OS locks, dream checkpoints and transient invocation files;
 it must be outside managed repositories. Normal completion deletes result/schema
 files. Crash leftovers can be removed while the service is stopped. Recovery uses
 the story source and Git repository.

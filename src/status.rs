@@ -408,6 +408,18 @@ impl Status {
             "Working on assigned story"
         };
     }
+    pub fn dream_started(&mut self, id: &str) {
+        let worker = &mut self.project(id).worker;
+        worker.start("active");
+        worker.latest_event = "Running daily dreams";
+        worker.last_error = None;
+    }
+    pub fn dream_finished(&mut self, id: &str, completed: bool) {
+        let worker = &mut self.project(id).worker;
+        worker.finish("idle", "Daily dream phase finished");
+        worker.last_error =
+            (!completed).then_some("A dream was blocked or failed; see private daemon logs");
+    }
     pub fn worker_finished(&mut self, id: &str, outcome: Option<Outcome>, failed: bool) {
         if outcome.is_some() {
             self.project(id).last_outcome = outcome;

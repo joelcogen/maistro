@@ -39,6 +39,7 @@ pub struct Orchestrator {
     pub poll_interval_seconds: u64,
     pub worker_timeout_seconds: u64,
     pub coordinator_timeout_seconds: u64,
+    pub dream_time: String,
     pub runtime_dir: PathBuf,
 }
 impl Default for Orchestrator {
@@ -47,6 +48,7 @@ impl Default for Orchestrator {
             poll_interval_seconds: 30,
             worker_timeout_seconds: 3600,
             coordinator_timeout_seconds: 300,
+            dream_time: "03:00".into(),
             runtime_dir: "~/.local/state/maistro".into(),
         }
     }
@@ -366,6 +368,7 @@ impl Config {
     }
     pub fn validate(&self) -> Result<()> {
         self.agents.validate_efforts()?;
+        crate::dream::parse_time(&self.orchestrator.dream_time)?;
         ensure!(
             self.status.port > 0,
             "status.port must be between 1 and 65535"

@@ -1,5 +1,6 @@
 use crate::{
     config::{Config, Mode, Project, Provider},
+    dream::{Dream, DreamReport},
     github,
     model::{self, Assignment, Coordination, Outcome, Report, Snapshot},
     process,
@@ -9,6 +10,22 @@ use serde_json::{Value, json};
 use std::time::Duration;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+#[derive(Clone, Copy)]
+pub(crate) enum Invocation<'a> {
+    Coordinator(&'a [&'a Project]),
+    Story(&'a Project),
+    Dream(&'a Project),
+}
+
+impl<'a> Invocation<'a> {
+    pub fn project(self) -> Option<&'a Project> {
+        match self {
+            Self::Coordinator(_) => None,
+            Self::Story(project) | Self::Dream(project) => Some(project),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AgentRunner {
@@ -102,8 +119,7 @@ impl AgentRunner {
 
     async fn invoke(
         &self,
-        project: Option<&Project>,
-        coordinator_projects: &[&Project],
+        invocation: Invocation<'_>,
         prompt: &str,
         schema: Value,
         cancel: &CancellationToken,
@@ -113,16 +129,9 @@ impl AgentRunner {
             p.validate_worker_settings(&self.config.agents)?;
         }
         if self.config.agents.provider == Provider::Claude {
-            return crate::claude::invoke(
-                &self.config,
-                project,
-                coordinator_projects,
-                prompt,
-                schema,
-                cancel,
-            )
-            .await;
+            return crate::claude::invoke(&self.config, invocation, prompt, schema, cancel).await;
         }
+        let project = invocation.project();
         let runtime = &self.config.orchestrator.runtime_dir;
         let log_dir = runtime.join("logs");
         std::fs::create_dir_all(&log_dir)?;
@@ -197,7 +206,7 @@ impl AgentRunner {
                 "-c",
                 "shell_environment_policy.include_only=[]",
             ]);
-            // The coordinator owns all configured story sources, including other projects' servers.
+            // Story workers have no source connection. Dreams may use their own project's source.
             let mut servers = std::collections::BTreeSet::from([
                 self.config.agents.mcp_server.as_str(),
                 "shortcut",
@@ -208,6 +217,31 @@ impl AgentRunner {
                     .iter()
                     .map(|p| p.mcp_server(&self.config.agents)),
             );
+            if let Invocation::Dream(project) = invocation {
+                let name = project.mcp_server(&self.config.agents);
+                servers.remove(name);
+                // Inherit transport and authentication from the user config.
+                let (reads, writes) = dream_source_tools(project);
+                let tools = json!(reads.iter().chain(writes).collect::<Vec<_>>());
+                for setting in [
+                    "enabled=true",
+                    "required=false",
+                    "disabled_tools=[]",
+                    &format!("enabled_tools={tools}"),
+                ] {
+                    cmd.args(["-c", &format!("mcp_servers.{name}.{setting}")]);
+                }
+                for tool in writes
+                    .iter()
+                    .copied()
+                    .chain((!project.is_shortcut()).then_some("appflowy_database"))
+                {
+                    cmd.args([
+                        "-c",
+                        &format!("mcp_servers.{name}.tools.{tool}.approval_mode=\"approve\""),
+                    ]);
+                }
+            }
             // An absent server must not become an incomplete entry containing only
             // enabled=false: Codex still deserializes its transport configuration.
             let user_config: toml::Value = toml::from_str(&std::fs::read_to_string(
@@ -222,7 +256,7 @@ impl AgentRunner {
             for server in servers {
                 cmd.args(["-c", &format!("mcp_servers.{server}.enabled=false")]);
             }
-        } else {
+        } else if let Invocation::Coordinator(coordinator_projects) = invocation {
             cmd.env_remove("GH_TOKEN")
                 .env_remove("GITHUB_TOKEN")
                 .env_remove("MAISTRO_GITHUB_TOKEN");
@@ -423,8 +457,7 @@ impl AgentRunner {
         }
         let mut result: Coordination = serde_json::from_value(
             self.invoke(
-                None,
-                &projects,
+                Invocation::Coordinator(&projects),
                 &prompt,
                 model::coordination_schema(),
                 cancel,
@@ -450,10 +483,92 @@ impl AgentRunner {
         project.validate_worker_settings(&self.config.agents)?;
         let prompt = worker_prompt(project, assignment)?;
         let report: Report = serde_json::from_value(
-            self.invoke(Some(project), &[], &prompt, model::report_schema(), cancel)
-                .await?,
+            self.invoke(
+                Invocation::Story(project),
+                &prompt,
+                model::report_schema(),
+                cancel,
+            )
+            .await?,
         )?;
         report.validate(assignment.effective_mode(project.mode))?;
+        Ok(report)
+    }
+
+    pub(crate) async fn dream(
+        &self,
+        project: &Project,
+        dream: &Dream,
+        cancel: &CancellationToken,
+    ) -> Result<DreamReport> {
+        let branch = match project.mode {
+            Mode::Master => &project.base_branch,
+            Mode::Pr => {
+                ensure!(
+                    project.base_branch != "dreams",
+                    "the dreams branch must be distinct from the base branch in PR mode"
+                );
+                "dreams"
+            }
+        };
+        let custom = repository_prompt(project, "maistro-worker.md")?;
+        let git = json!({
+            "mode": project.mode, "base_branch": project.base_branch, "remote": project.remote,
+            "branch": branch
+        });
+        let mut source = serde_json::to_value(project)?;
+        source["mcp_server"] = json!(project.mcp_server(&self.config.agents));
+        source["source"] = json!(project.source_name());
+        let input = json!({"name": dream.name, "instructions": dream.instructions});
+        let prompt = format!(
+            "{}\n\nREPOSITORY={}\nGIT={git}\nPROJECT={source}\nDREAM={input}\n\nPROJECT INSTRUCTIONS:\n{custom}",
+            include_str!("../prompts/dream.md"),
+            project.repo.display()
+        );
+        let report: DreamReport = serde_json::from_value(
+            self.invoke(
+                Invocation::Dream(project),
+                &prompt,
+                model::dream_report_schema(),
+                cancel,
+            )
+            .await?,
+        )?;
+        ensure!(
+            !report.summary.trim().is_empty(),
+            "dream worker returned no summary"
+        );
+        if let Some(commit) = &report.commit {
+            ensure!(
+                matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit()),
+                "dream worker must report a full commit SHA"
+            );
+            ensure!(
+                !report.tests.is_empty(),
+                "dream commit has no testing evidence"
+            );
+            let reference = format!("refs/heads/{branch}");
+            let mut cmd = Command::new("git");
+            cmd.current_dir(&project.repo)
+                .env("GIT_TERMINAL_PROMPT", "0")
+                .args([
+                    "ls-remote",
+                    "--exit-code",
+                    "--refs",
+                    "--",
+                    &project.remote,
+                    &reference,
+                ]);
+            github::configure_worker(
+                &mut cmd,
+                &github::read_token(&self.config.agents.github_token_file)?,
+            )?;
+            let remote = process::run(cmd, "", Duration::from_secs(30), cancel, None).await?;
+            ensure!(
+                remote.code == 0 && remote.stdout.trim() == format!("{commit}\t{reference}"),
+                "could not confirm dream commit at the configured remote branch {branch}"
+            );
+        }
         Ok(report)
     }
 }
@@ -580,4 +695,24 @@ pub(crate) fn source_tools(
         &["appflowy_rows", "appflowy_update"]
     };
     (reads, writes)
+}
+
+fn dream_source_tools(project: &Project) -> (&'static [&'static str], &'static [&'static str]) {
+    if project.is_shortcut() {
+        (
+            &[
+                "list_workflows",
+                "get_workflow",
+                "list_workflow_states",
+                "list_workflow_stories",
+                "list_stories",
+                "search_stories",
+                "get_story",
+                "get_doc",
+            ],
+            &["create_story"],
+        )
+    } else {
+        (&["appflowy_fetch", "appflowy_database"], &["appflowy_rows"])
+    }
 }

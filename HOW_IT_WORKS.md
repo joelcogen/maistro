@@ -67,7 +67,8 @@ Claude runs use `--print --output-format stream-json --json-schema` with session
 persistence disabled. The coordinator loads only selected source connections and
 permits their listed read/status/comment tools. Workers inherit normal Claude
 settings and development tools with noninteractive full access. Their strict MCP
-configuration includes only non-source connections from `claude_mcp_config`.
+configuration includes non-source connections from `claude_mcp_config` and
+adds the selected project source for dream workers.
 Repository/plugin MCP entries are excluded. Both roles disable hooks and Agent/Task
 spawning. Both providers share GitHub authentication, timeouts, process-group
 cancellation, structured-result validation, Git delivery and recovery rules.
@@ -78,9 +79,9 @@ The coordinator uses the MCP servers named by projects in its pass. It writes
 AppFlowy results with `appflowy_rows(command=update_cells)` and `appflowy_update(command=append_comment)`, and Shortcut results
 with `update_story` and `create_story_comment`. With Codex, workers use normal
 Codex configuration, tools, environment and network, plus the GitHub token, full
-filesystem access and noninteractive permissions. Story-source MCP access belongs
-to the coordinator. Maistro disables hooks and agent spawning in both roles;
-prompts direct work scope and Git behavior.
+filesystem access and noninteractive permissions. The coordinator handles story
+assignments and results through the source connections. Maistro disables hooks
+and agent spawning in both roles. Prompts direct work scope and Git behavior.
 
 ## Status page and counts
 
@@ -111,8 +112,33 @@ uncertain claim adjustments mark known totals stale. Other status writes may
 lag until the next complete read. Overview counts sum known observations,
 including stale ones. Missing projects, including disabled projects, make the
 total partial; compact warnings identify partial or stale totals. Both views use
-the same six count tiles, arranged in three columns on phones. Treat these counts
-as observations; the coordinator authorizes work from fresh source reads.
+the same six count tiles, arranged in three columns on phones. The coordinator
+authorizes stories from fresh source reads.
+
+## Daily dream phases
+
+Maistro checks `dreams/*.md` in the project's checkout after the configured
+local time. It compares filenames and Markdown contents with the manifest from
+the last started phase. Story worker activity also makes a project eligible,
+including work that ended with a blocked result. The coordinator checks the
+configured Ready and In Progress states using a complete fresh board read.
+An active story, an unrecorded result, or a story assignment takes precedence.
+Incomplete reads retry through the usual coordination schedule.
+
+The phase holds the project's worker slot until all of its dreams finish. Polling
+continues. Maistro handles newly queued stories in a fresh coordinator pass after
+it releases that slot, and other projects can keep working throughout the phase.
+Each dream uses the same provider, model, effort, timeout, and Git credentials
+as a story worker. A dream may use its own configured source to read the
+project's board or workflow and create Backlog stories if its instructions call
+for it. Results and blockers go to private logs.
+
+Before starting a phase, Maistro atomically checkpoints the local date and
+input manifest under `runtime_dir/dreams/`. A restart that day skips the phase
+even if it was interrupted. Git changes from a completed dream are delivered
+individually, and Maistro checks the reported commit against the configured
+remote branch. Changes made to dream files during a phase can make the project
+eligible the following day.
 
 ## Shortcut API polling
 

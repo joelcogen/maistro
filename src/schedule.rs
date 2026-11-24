@@ -10,6 +10,7 @@ pub struct Project {
     internal: bool,
     retry_at: Instant,
     periodic: Option<(Duration, Instant)>,
+    paused: bool,
 }
 impl Project {
     pub fn dirty(&self) -> bool {
@@ -33,6 +34,7 @@ impl Schedule {
                             internal: false,
                             retry_at: Instant::now(),
                             periodic: None,
+                            paused: false,
                         },
                     )
                 })
@@ -57,12 +59,26 @@ impl Schedule {
         p.generation += 1;
         p.internal = true;
     }
+    pub fn pause(&mut self, id: &str) {
+        self.projects.get_mut(id).unwrap().paused = true;
+    }
+    pub fn is_paused(&self, id: &str) -> bool {
+        self.projects[id].paused
+    }
+    pub fn resume(&mut self, id: &str) {
+        self.projects.get_mut(id).unwrap().paused = false;
+        self.wake(id);
+    }
+    pub fn is_current(&self, id: &str, generation: u64) -> bool {
+        self.projects[id].generation == generation
+    }
     pub fn ready(&self) -> BTreeMap<String, u64> {
         self.projects
             .iter()
             .filter(|(_, p)| {
-                ((p.dirty() && (p.baseline.is_some() || p.internal))
-                    || p.periodic.is_some_and(|(_, due)| due <= Instant::now()))
+                !p.paused
+                    && ((p.dirty() && (p.baseline.is_some() || p.internal))
+                        || p.periodic.is_some_and(|(_, due)| due <= Instant::now()))
                     && p.retry_at <= Instant::now()
             })
             .map(|(id, p)| (id.clone(), p.generation))
@@ -71,6 +87,7 @@ impl Schedule {
     pub fn deadline(&self) -> Option<Instant> {
         self.projects
             .values()
+            .filter(|p| !p.paused)
             .filter_map(|p| {
                 if p.dirty() && (p.baseline.is_some() || p.internal) {
                     Some(p.retry_at)
