@@ -121,16 +121,17 @@ file separately.
 
 ### Custom agent prompts
 
-Add either or both optional UTF-8 files at the root of a project's configured
-repository (`repo`):
+Copy either or both examples to the root of a project's configured repository
+(`repo`), keeping the filenames. Edit the UTF-8 Markdown to fit the project.
+Maistro appends each file to its corresponding agent prompt.
 
-- `maistro-coordinator.md`: story selection or requirements gathering instructions
-  appended to the coordinator prompt.
-- `maistro-worker.md`: testing commands and coding conventions appended to the
-  worker prompt. Start with [the worker example](examples/project-prompt.md).
+- [maistro-coordinator.md](examples/maistro-coordinator.md) shows how to gather
+  project-specific requirements for the worker's assignment.
+- [maistro-worker.md](examples/maistro-worker.md) shows how to specify local
+  checks and repository conventions.
 
 To migrate, remove the obsolete `prompt_file` TOML key and move its contents to
-`maistro-worker.md` in the repository root. Prompt examples live in this repository.
+`maistro-worker.md` in the repository root.
 Other relative configuration paths resolve from the TOML file's directory;
 `~/` expands from HOME. Restart the service to apply TOML changes.
 
