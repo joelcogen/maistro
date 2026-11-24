@@ -52,7 +52,7 @@ Examples of dreams:
 
 - Prune tests that no longer guard behavior. [Test pruning example](examples/dreams/prune_tests.md)
 - Verify documentation style and consistency. [Documentation example](examples/dreams/documentation_style.md)
-- Deploy a nightly build. [Maistro deployment example](examples/dreams/deploy.md)
+- Install Maistro and schedule a user service restart. [Maistro deployment example](examples/dreams/deploy.md)
 - Prepare new stories in Backlog for tomorrow's run.
 
 To enable the three examples in a Maistro checkout, create these links. Git
