@@ -26,7 +26,9 @@ and moving reviewed stories to Done.
 
 Put UTF-8 Markdown instructions in `dreams/` at the root of a project's checkout.
 Maistro runs the `.md` files in alphabetical filename order, one worker invocation
-per file. Use prefixes such as `01-` and `02-` to set the order.
+per file. For symlinks to regular files, Maistro uses the link name for ordering
+and reads the target for instructions. Use prefixes such as `01-` and `02-` to set
+the order.
 
 An enabled project can start one dream phase per local calendar day, from
 `orchestrator.dream_time` onward. The default is `03:00`. A phase requires both
@@ -50,8 +52,18 @@ Examples of dreams:
 
 - Prune tests that no longer guard behavior. [Test pruning example](examples/dreams/prune_tests.md)
 - Verify documentation style and consistency. [Documentation example](examples/dreams/documentation_style.md)
-- Release a nightly build.
+- Deploy a nightly build. [Maistro deployment example](examples/dreams/deploy.md)
 - Prepare new stories in Backlog for tomorrow's run.
+
+To enable the three examples in a Maistro checkout, create these links. Git
+ignores the local `dreams/` directory.
+
+```sh
+mkdir -p dreams
+ln -s ../examples/dreams/prune_tests.md dreams/01-prune-tests.md
+ln -s ../examples/dreams/documentation_style.md dreams/02-documentation-style.md
+ln -s ../examples/dreams/deploy.md dreams/03-deploy.md
+```
 
 ## Install and configure
 

@@ -57,14 +57,17 @@ impl Manifest {
         }
         for entry in fs::read_dir(&dir)? {
             let entry = entry?;
-            if entry.path().extension().is_some_and(|ext| ext == "md")
-                && entry.file_type()?.is_file()
-            {
+            let path = entry.path();
+            if path.extension().is_none_or(|ext| ext != "md") {
+                continue;
+            }
+            let file_type = entry.file_type()?;
+            if file_type.is_file() || (file_type.is_symlink() && path.is_file()) {
                 let name = entry.file_name().into_string().map_err(|_| {
                     anyhow::anyhow!("dream filename in {} must be UTF-8", dir.display())
                 })?;
-                let instructions = fs::read_to_string(entry.path())
-                    .with_context(|| format!("read {}", entry.path().display()))?;
+                let instructions = fs::read_to_string(&path)
+                    .with_context(|| format!("read {}", path.display()))?;
                 files.push(Dream { name, instructions });
             }
         }
@@ -278,9 +281,15 @@ mod tests {
         config.projects[0].repo = dir.path().join("repo");
         let project = &config.projects[0];
         let files = project.repo.join("dreams");
+        let examples = project.repo.join("examples");
         fs::create_dir_all(&files).unwrap();
+        fs::create_dir_all(&examples).unwrap();
+        let example = examples.join("first.md");
+        fs::write(&example, "first").unwrap();
         fs::write(files.join("02.md"), "second").unwrap();
-        fs::write(files.join("01.md"), "first").unwrap();
+        std::os::unix::fs::symlink("../examples/first.md", files.join("01.md")).unwrap();
+        std::os::unix::fs::symlink("../examples/missing.md", files.join("missing.md")).unwrap();
+        std::os::unix::fs::symlink("../examples", files.join("directory.md")).unwrap();
         fs::write(files.join("ignored.txt"), "not Markdown").unwrap();
 
         let day = NaiveDate::from_ymd_opt(2026, 11, 23).unwrap();
@@ -297,6 +306,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["01.md", "02.md"]
         );
+        assert_eq!(tasks[0].instructions, "first");
 
         let mut dreams = Dreams::new(&config).unwrap();
         assert!(!dreams.refresh(project, Some(day)).unwrap());
@@ -309,7 +319,7 @@ mod tests {
         assert!(!dreams.refresh(project, Some(later)).unwrap());
         fs::remove_file(files.join("02.md")).unwrap();
         assert!(!dreams.refresh(project, Some(later)).unwrap());
-        fs::write(files.join("01.md"), "edited first").unwrap();
+        fs::write(example, "edited first").unwrap();
         assert!(!dreams.refresh(project, Some(tomorrow)).unwrap());
         assert!(dreams.refresh(project, Some(later)).unwrap());
         assert_eq!(

@@ -1,6 +1,7 @@
 /target/
 /.runtime/
 /config.toml
+/dreams/
 *.db
 *.db-shm
 *.db-wal
