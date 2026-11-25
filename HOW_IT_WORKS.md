@@ -4,28 +4,23 @@ See [README.md](README.md) for setup and run instructions.
 
 ## Project modes and delivery
 
-A story in a `master` project can request PR delivery in its body or human
-comments: “Open a PR for this story” or “Deliver this story as a PR on branch
-`feature/new-export`.” A request to implement on a named feature/story branch also
-implies PR delivery. PR projects can request custom branches too. Custom names
-must be valid Git branch names distinct from `base_branch`.
+A story in a `master` project can request PR delivery in its body or a human
+comment. For example, write “Open a PR for this story” or “Implement this on
+branch `feature/new-export`.” PR projects can request custom branches too.
+Custom names must be valid Git branch names distinct from `base_branch`.
 
 PR mode defaults to the stable branch `maistro/<project>/<story-id>`. Both modes
 use `AppFlowy story: <story-id>` or `Shortcut story: <numeric-id>` commit/PR
 markers to recover interrupted work. The repository, remote and PR target come
 from project configuration.
 
-PR overrides finish in Review with a PR link and require `gh` and token permission
-to create PRs. Delivery overrides require an explicit request; ordinary mentions
-of PRs or branches in product requirements keep the project default. The
-coordinator selects the effective mode before dispatch, and that mode stays fixed
-through result delivery.
-
-Each pending result supplies the coordinator with the exact configured destination
-status: completed master work goes directly to Done, completed PR work to Review,
-and blocked work to Blocked. A PR mention or link does not change that destination.
-Human status changes are preserved; result comments and status updates are read
-back before delivery is acknowledged.
+PR overrides need `gh` and a token that can create PRs. PR or branch mentions in
+requirements keep the project default unless they explicitly request a different
+delivery mode or branch. The coordinator fixes the mode before assigning the
+story and uses the configured [success status for that mode](README.md#project-modes).
+A blocked result goes to Blocked. The coordinator preserves human status changes,
+uses completion markers to avoid duplicate comments, and reads back its comments
+and status updates before acknowledging delivery.
 
 ## GitHub authentication
 
@@ -39,49 +34,44 @@ authentication.
 
 ## Custom agent prompts
 
-Maistro discovers these files automatically for both providers. Each applies to
-its agent; coordinator additions are labeled by project and included for enabled
-projects selected in that pass. Workers also read `AGENTS.md`.
-
-Files are read for each coordinator pass or worker assignment, so changes take
-effect on the next invocation. Only nonempty files add instructions; read errors
-other than missing files fail the invocation with the project and path. Keep
-secrets out of prompts.
+Maistro reads [custom agent prompts](README.md#custom-agent-prompts) for each
+coordinator pass or worker assignment, so edits take effect on the next
+invocation. The coordinator sees instructions labeled by project for the enabled
+projects in its pass. Workers also read `AGENTS.md`. Missing or empty prompt
+files add no instructions. Other read errors stop the invocation and report the
+project and path. Keep secrets out of prompts.
 
 ## Configured effort
 
-Worker model and effort resolve independently from `projects[].worker` and
-`projects[].worker_effort`, then global `agents.worker` and
-`agents.worker_effort`. Omitting both model settings keeps the existing provider
-worker model default. Omitting effort at both levels sends no effort override.
-Workers keep their normal inherited configuration; coordinators retain their existing isolated settings behavior and
-provider/model defaults. For explicit Claude effort, Maistro removes the inherited
-`CLAUDE_CODE_EFFORT_LEVEL` environment override for that invocation so the CLI flag
-can take effect. When effort is omitted, that environment variable is preserved.
-Agent-start logs and the dashboard show **configured effort**, or
-`inherited/default` when omitted, without claiming the effective runtime effort.
+Agent-start logs and the dashboard show the effort selected from
+[Maistro's configuration](README.md#global-provider-models-and-effort), or
+`inherited/default` when both levels leave it to the CLI. When Maistro passes
+`--effort` to Claude Code, it removes `CLAUDE_CODE_EFFORT_LEVEL` from that
+invocation's environment so the flag takes effect. Otherwise it leaves the
+environment variable in place.
 
 ## Agent execution
 
+Both providers share GitHub authentication, timeouts, process-group
+cancellation, structured-result validation, and Git delivery and recovery rules.
+Maistro disables hooks and agent spawning in both roles.
+
 Claude runs use `--print --output-format stream-json --json-schema` with session
-persistence disabled. The coordinator loads only selected source connections and
-permits their listed read/status/comment tools. Workers inherit normal Claude
-settings and development tools with noninteractive full access. Their strict MCP
-configuration includes non-source connections from `claude_mcp_config` and
-adds the selected project source for dream workers.
-Repository/plugin MCP entries are excluded. Both roles disable hooks and Agent/Task
-spawning. Both providers share GitHub authentication, timeouts, process-group
-cancellation, structured-result validation, Git delivery and recovery rules.
+persistence disabled. Claude workers inherit normal Claude settings and
+development tools with noninteractive full access. Their strict MCP
+configuration loads non-source connections from `claude_mcp_config` and adds the
+selected project source for dream workers. Repository and plugin MCP entries are
+excluded. Codex workers use their normal tools, configuration, environment, and
+network with noninteractive permissions and full filesystem access.
 
 ## Coordinator and worker access
 
-The coordinator uses the MCP servers named by projects in its pass. It writes
-AppFlowy results with `appflowy_rows(command=update_cells)` and `appflowy_update(command=append_comment)`, and Shortcut results
-with `update_story` and `create_story_comment`. With Codex, workers use normal
-Codex configuration, tools, environment and network, plus the GitHub token, full
-filesystem access and noninteractive permissions. The coordinator handles story
-assignments and results through the source connections. Maistro disables hooks
-and agent spawning in both roles. Prompts direct work scope and Git behavior.
+The coordinator loads the source connections named by projects in its pass and
+allows their listed read, status, and comment tools. It writes AppFlowy results
+with `appflowy_rows(command=update_cells)` and
+`appflowy_update(command=append_comment)`, and Shortcut results with
+`update_story` and `create_story_comment`. Prompts specify which commands are
+allowed within those tools and set the scope of the work.
 
 ## Status page and counts
 
@@ -117,13 +107,16 @@ authorizes stories from fresh source reads.
 
 ## Daily dream phases
 
-Maistro checks `dreams/*.md` in the project's checkout after the configured
-local time. It compares filenames and Markdown contents with the manifest from
-the last started phase. Story worker activity also makes a project eligible,
-including work that ended with a blocked result. The coordinator checks the
-configured Ready and In Progress states using a complete fresh board read.
-An active story, an unrecorded result, or a story assignment takes precedence.
-Incomplete reads retry through the usual coordination schedule.
+An enabled project can start one dream phase per local calendar day, from the
+[configured time](README.md#dreams) onward. The project needs at least one dream
+file and either story worker activity since the last phase or a new or edited
+dream file. Blocked story work counts. Maistro compares filenames and contents
+with the last phase, so the first set of files counts as new.
+
+The coordinator needs a complete, fresh read that shows no Ready or In Progress
+stories. Active work, pending results, and new assignments take precedence. A
+project with work queued can become eligible later that day. Incomplete reads
+retry on the usual coordination schedule.
 
 The phase holds the project's worker slot until all of its dreams finish. Polling
 continues. Maistro handles newly queued stories in a fresh coordinator pass after
@@ -133,16 +126,21 @@ as a story worker. A dream may use its own configured source to read the
 project's board or workflow and create Backlog stories if its instructions call
 for it. Results and blockers go to private logs.
 
-Before starting a phase, Maistro atomically checkpoints the local date and
-input manifest under `runtime_dir/dreams/`. A restart that day skips the phase
-even if it was interrupted. Git changes from a completed dream are delivered
-individually, and Maistro checks the reported commit against the configured
-remote branch. After all dreams succeed in PR mode and at least one pushed a
-commit, the daemon checks for an open `dreams` PR against the configured base
-on the GitHub push remote. If none is open and `dreams` is ahead of the base,
-the daemon opens one with the configured worker token. It holds the worker slot
-until that step finishes. Changes made to dream files during a phase can make
-the project eligible the following day.
+Before starting a phase, Maistro saves the local date and input manifest
+atomically in `runtime_dir/dreams/`. A restart that day skips the phase even if it
+was interrupted. Changes to dream files during a phase can make the project
+eligible the following day.
+
+Each dream tests, commits, and pushes any repository changes. Master projects
+push to their configured base branch. PR projects use a dedicated `dreams`
+branch and rebase it onto the updated base as needed. Maistro checks each
+reported commit against the configured remote branch.
+
+After all dreams succeed in PR mode and at least one pushes a commit, Maistro
+uses the configured worker token to look for an open PR from `dreams` to the
+configured base on the GitHub push remote. It reuses that PR or opens one if
+`dreams` is ahead of the base. The worker slot stays occupied until publication
+finishes. Maistro logs the PR URL or any publication error privately.
 
 ## Shortcut API polling
 
@@ -183,10 +181,16 @@ archiving or moving a story can trigger cancellation checks. As with AppFlowy,
 the coordinator verifies the current story before acting; cancellation checks
 pause while the source is unavailable.
 
+Without API polling, the coordinator reads Shortcut through the configured MCP
+connection at each polling interval, including while idle. If the connection
+has no workflow-scoped listing, the coordinator may read the workspace and
+filter the results to the configured workflow. Both setups use the story's
+numeric public ID to identify it across restarts.
+
 ## Story behavior and recovery
 
-Use Backlog, Ready, In Progress, Review, Done, Blocked, and Cancelled, or map their
-exact labels in `[projects.statuses]`. For boards using `In progress`, set
+Map any custom status labels in `[projects.statuses]` using their exact spelling
+and case. For example, if your board uses `In progress`, set
 `in_progress = "In progress"`.
 
 - Ready authorizes new work. The coordinator honors dependencies and priority and
@@ -249,8 +253,9 @@ Before each AppFlowy coordination pass, Rust resolves the configured board using
 its MCP connection and supplies `appflowy_board` with workspace, database and view
 IDs. Resolution failures exclude that project from the pass and schedule a retry.
 The coordinator must include the supplied workspace ID on every scoped call.
-Codex explicitly approves the compact database tool, including its read commands;
-command restrictions on its schema mutations remain coordinator instructions.
+Codex approves the compact database tool so the coordinator can run its read
+commands. The coordinator's prompt restricts schema changes because approval
+applies to the whole tool.
 
 The poller uses AppFlowy MCP's compact API with typed `request` arguments.
 Board metadata uses a folder fetch scoped to the view ID, avoiding the page

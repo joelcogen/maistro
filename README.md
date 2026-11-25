@@ -1,14 +1,9 @@
 # Maistro
 
-Maistro turns AppFlowy and Shortcut stories into tested, committed code. One
-coordinator selects stories and records results; one coding worker per project
-implements, tests, fixes failures, commits and pushes. Projects run in parallel,
-with one active story per project. Each project's board or workflow holds its
-story state.
-
-Choose Codex or Claude Code and configure the coordinator and worker models
-globally. The default is Codex with `gpt-6-luna` for coordination and
-`gpt-6-astra` for implementation.
+Maistro turns AppFlowy and Shortcut stories into tested, committed code. A
+coordinator picks stories and records results on the board or workflow. A Codex
+or Claude Code worker implements, tests, commits, and pushes each change.
+Projects run in parallel, with one active story per project.
 
 See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
 
@@ -19,8 +14,9 @@ See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
 | `pr` | Create/reuse a story branch, implement, test, commit, push, and open/update a PR against `base_branch`. | Review, with PR link |
 | `master` | Implement and test directly on `base_branch`, then commit and push it. | Done, with commit reference |
 
-`base_branch` can be `main`, `master`, or another branch. You handle CI, PR merging
-and moving reviewed stories to Done.
+`base_branch` can be `main`, `master`, or another branch. You handle CI, merge PRs,
+and move reviewed stories to Done. To request PR delivery for an individual story,
+see [delivery overrides](HOW_IT_WORKS.md#project-modes-and-delivery).
 
 ## Dreams
 
@@ -30,33 +26,20 @@ per file. For symlinks to regular files, Maistro uses the link name for ordering
 and reads the target for instructions. Use prefixes such as `01-` and `02-` to set
 the order.
 
-An enabled project can start one dream phase per local calendar day, from
-`orchestrator.dream_time` onward. The default is `03:00`. A phase requires both
-an empty Ready and In Progress queue and either story work since the last phase
-or a new or edited dream file. A project with work queued can become eligible
-later that day. The first set of dream files counts as new.
+Dreams can start at `03:00` in the daemon's local timezone by default. Set
+`orchestrator.dream_time` to change the time. See
+[daily dream phases](HOW_IT_WORKS.md#daily-dream-phases) for when Maistro runs
+dreams and how it delivers their changes.
 
 ```toml
 [orchestrator]
 dream_time = "03:00" # HH:MM in the daemon's local timezone
 ```
 
-A dream that changes the repository tests, commits, and pushes its changes. Master
-projects push to their configured base branch. PR projects use a dedicated
-`dreams` branch, rebased onto the updated base as needed. After a successful phase
-that pushed a commit, Maistro opens a PR from `dreams` to the configured base if
-the branch is ahead, or reuses the open PR for those branches. The PR URL and
-any publication errors appear in the private daemon logs.
-
-Examples of dreams:
-
-- Prune tests that no longer guard behavior. [Test pruning example](examples/dreams/prune_tests.md)
-- Verify documentation style and consistency. [Documentation example](examples/dreams/documentation_style.md)
-- Install Maistro and schedule a user service restart. [Maistro deployment example](examples/dreams/deploy.md)
-- Prepare new stories in Backlog for tomorrow's run.
-
-To enable the three examples in a Maistro checkout, create these links. Git
-ignores the local `dreams/` directory.
+To enable the [test pruning](examples/dreams/prune_tests.md),
+[documentation review](examples/dreams/documentation_style.md), and
+[deployment](examples/dreams/deploy.md) examples in a Maistro checkout, create
+these links. Git ignores the local `dreams/` directory.
 
 ```sh
 mkdir -p dreams
@@ -89,30 +72,33 @@ locks each repository for the daemon's lifetime. Reserve these checkouts for
 Maistro and preserve interrupted work when restarting.
 
 For a new AppFlowy board, copy the [create-board prompt](prompts/create-board.md)
-into a chat with an AppFlowy-connected model. It asks for the parent page, creates
-a child board with seven workflow statuses and colors, and returns its reference
-and status mapping. The prompt uses `In progress`, so set
-`in_progress = "In progress"` in that project's `[projects.statuses]` table.
+into a chat with an AppFlowy-connected model. Give it the parent page when asked.
+Use the new board's URL or unique name in your project configuration. The prompt
+creates the seven default statuses, including `In Progress`.
+
+Use `projects.mcp_server` to select a named source connection. The default is
+`shortcut` for Shortcut and `agents.mcp_server` (normally `appflowy`) for AppFlowy.
+Configure the entry in `agents.codex_home/config.toml` for Codex or in the
+top-level `mcpServers` object for Claude Code. You can mix sources in one daemon.
+Use a separate server name for each source type and one project per board or
+workflow.
 
 ### AppFlowy MCP connection
 
-The AppFlowy poller uses `projects.mcp_server` (default `agents.mcp_server`) from
-the selected provider's configuration. Codex supports stdio `command`, `args`,
-`cwd`, `env` and inherited environment, or streamable HTTP `url`, `http_headers`,
-`env_http_headers` and `bearer_token_env_var`. Claude transport keys are described
-[below](#global-provider-models-and-effort). Rust polling uses the MCP SDK directly.
-
 Use AppFlowy MCP's default compact profile (`APPFLOWY_TOOL_PROFILE=compact`).
-Required read tools are `appflowy_fetch`, `appflowy_database`, and `appflowy_rows`;
-coordination also needs `appflowy_update`. Legacy-only servers are rejected during
-connection with a profile diagnostic. Rust polling uses only read commands.
-Coordinator tool allowlists operate at tool-name granularity: compact tools also
-expose other mutation commands, which coordinator instructions prohibit. Codex
-explicitly approves `appflowy_database` as well as row/comment tools because even
-its list/fields commands otherwise require approval. Rust supplies resolved board
-identities to the coordinator, which must include workspace IDs on scoped calls.
-Use stdio or streamable HTTP with explicit headers/token for polling authentication.
-Connection/authentication errors are reported and retried at the polling interval.
+Polling needs `appflowy_fetch`, `appflowy_database`, and `appflowy_rows`.
+The coordinator also needs `appflowy_update` to post results.
+
+Use stdio or streamable HTTP. For HTTP polling, configure authentication in the
+MCP entry because the poller connects directly.
+
+| Provider | Stdio keys | HTTP keys |
+| --- | --- | --- |
+| Codex | `command`, `args`, `cwd`, `env` | `url`, `http_headers`, `env_http_headers`, `bearer_token_env_var` |
+| Claude Code | `command`, `args`, `env` | `"type": "http"`, `url`, `headers` |
+
+Codex stdio inherits the process environment. Maistro expands `${VAR}` and
+`${VAR:-default}` in Claude MCP settings.
 
 ### GitHub token
 
@@ -163,12 +149,11 @@ worker = "gpt-6-astra" # Implementation workers
 # worker_effort = "high"
 ```
 
-Model IDs and aliases pass unchanged to the selected CLI, which checks availability
-on invocation. Omitted models use provider defaults: `gpt-6-luna` / `gpt-6-astra`
-for Codex, `haiku` / `opus` for Claude. When switching providers, remove explicit
-models or replace them with supported ones. Model names must contain text;
-known model IDs from the other provider are rejected. Custom CLI aliases remain
-supported; the CLI checks their availability. The provider is global.
+Codex defaults to `gpt-6-luna` for coordination and `gpt-6-astra` for workers.
+Claude Code defaults to `haiku` and `opus`, respectively. Maistro rejects empty
+model names and known IDs from the other provider. The selected CLI checks model
+and alias availability. When switching providers, remove explicit models or
+replace them with supported ones.
 
 Optional `coordinator_effort` (coordinator) and `worker_effort` (all workers)
 accept these exact lowercase values:
@@ -186,12 +171,10 @@ guarantee every model supports every level. See the
 and [Claude effort documentation](https://code.claude.com/docs/en/model-config#adjust-effort-level).
 Claude's `ultracode` mode is not an effort level supported by Maistro.
 
-Each `[[projects]]` entry can set `worker` and `worker_effort`.
-Each field independently takes precedence over `[agents].worker` and
-`[agents].worker_effort`. If both levels omit the model, the existing provider
-worker default above applies. If both omit effort, no effort override is sent.
-Coordinator settings are unaffected. Project effort uses the same validation
-and supported values as global effort; errors identify the project and field.
+Set `worker` or `worker_effort` in `[[projects]]` to override that worker setting
+for one project. Omit either field to inherit its value from `[agents]`. If
+you omit it in both places, Maistro uses the provider's default worker model or
+leaves effort to the CLI. Project effort accepts the same values as global effort.
 
 ```toml
 [[projects]]
@@ -242,14 +225,8 @@ claude mcp add --scope user --transport http shortcut https://mcp.shortcut.com/m
 Complete OAuth authorization in Claude before unattended use. Maistro reads only
 the top-level `mcpServers` object in `~/.claude.json`.
 `agents.claude_mcp_config` selects an alternative JSON file with the same format;
-Claude's login home stays separate. Project `mcp_server` selects a named entry.
-Keep credentials in their private configuration files.
-
-AppFlowy Rust polling accepts Claude stdio (`command`, `args`, `env`) and HTTP
-(`"type": "http"`, `url`, `headers`) connections. It expands `${VAR}` and
-`${VAR:-default}` substitutions. HTTP AppFlowy polling requires explicit headers;
-stdio is also supported. Shortcut uses read-only API polling when configured;
-Claude's OAuth connection remains responsible for individual story reads and writes.
+Claude's login home stays separate. Keep credentials in their private
+configuration files.
 
 See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference),
 [structured output guide](https://code.claude.com/docs/en/headless), and
@@ -352,12 +329,9 @@ one workspace may share a token file. Token files are reopened each read cycle,
 so replacing the token does not require a daemon restart. `maistro validate`
 checks the local file and token format; actual authorization is checked on reads.
 
-Keep the CLI's Shortcut OAuth login configured for the **same
-workspace**; the read-only API token does not replace write authentication.
-
-Without the two API settings, existing CLI/MCP-only projects retain periodic
-coordinator reads, including while idle. That compatibility mode may need to
-enumerate the entire workspace if the MCP lacks workflow-scoped listing.
+Keep the CLI's Shortcut OAuth login configured for the same workspace. Maistro
+uses OAuth for story details and writes. To see how polling works with or without
+an API token, see [Shortcut scheduling](HOW_IT_WORKS.md#shortcut-scheduling).
 
 ```toml
 [[projects]]
@@ -383,12 +357,8 @@ blocked = "Blocked"
 cancelled = "Cancelled"
 ```
 
-Create or map each enabled workflow state using its exact name. These are
-workflow states, separate from Shortcut's state categories and dependency
-`blocked` flag. Configure workflow definitions in Shortcut. Claim, cancellation,
-recovery, dependency, PR override and result-delivery rules apply to both sources.
-Numeric public story IDs remain stable across restarts; completion comments use
-idempotency markers and read-back checks.
+Use the exact names from the Shortcut workflow's state list in
+`[projects.statuses]`.
 
 Configure and authorize the hosted Shortcut MCP in your selected CLI using
 [Shortcut's MCP setup](https://www.shortcut.com/help/integrations/mcp-server/).
@@ -396,13 +366,6 @@ The endpoint is `https://mcp.shortcut.com/mcp` and uses OAuth. For Codex, use
 Maistro's `agents.codex_home`; for Claude, use a user-scoped entry. Maistro uses
 the server's configured name and the CLI's login. Complete authorization before
 starting the service; remote access is checked during operation.
-
-`projects.mcp_server` selects a connection for either source. Defaults are
-`shortcut` for Shortcut and `agents.mcp_server` (normally `appflowy`) for AppFlowy.
-Configure entries in `agents.codex_home/config.toml` for Codex, or the top-level
-`mcpServers` in `agents.claude_mcp_config` for Claude. Projects can mix sources in
-one process. Configure servers for the sources you use, with a separate server
-name for each source type and a single project per board/workflow.
 
 Optional states can be explicitly disabled with TOML booleans:
 
