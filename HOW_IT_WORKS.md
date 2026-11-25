@@ -124,8 +124,8 @@ stories. Active work, pending results, and new assignments take precedence. A
 project with work queued can become eligible later that day. Incomplete reads
 retry on the usual coordination schedule.
 
-The dashboard's **Dream now** button requests a phase for one project over a
-local POST. The request skips the configured start time and uses a new
+The dashboard's **Dream now** button requests a phase for one project via
+`POST /api/dream`. The request skips the configured start time and uses a new
 coordination pass to check the project's board. The daily limit and input
 requirements apply. A rejected request leaves no pending manual phase.
 

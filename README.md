@@ -312,6 +312,7 @@ and OS error. Port binding happens at startup; `validate` checks configuration.
 Workers show **Dreaming** while they run a dream phase. Use **Dream now** on an
 enabled project's card to request a phase without waiting for the schedule. Maistro
 checks the board and reports whether the phase started or why it was rejected.
+**Dream now** also works when the dashboard is served through a private reverse proxy.
 The usual [dream conditions](HOW_IT_WORKS.md#daily-dream-phases) still apply.
 
 The dashboard uses a dark blue palette. Cargo embeds the precompiled CSS and

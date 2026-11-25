@@ -8,7 +8,7 @@ use axum::{
     Json, Router,
     body::{Body, Bytes},
     extract::{DefaultBodyLimit, State, rejection::JsonRejection},
-    http::{HeaderMap, Method, StatusCode, Uri, header},
+    http::{Method, StatusCode, Uri},
     response::Response,
     routing::post,
 };
@@ -499,7 +499,6 @@ pub(crate) struct DreamRequest {
 #[derive(Clone)]
 struct DreamApi {
     requests: mpsc::Sender<DreamRequest>,
-    port: u16,
     stop: CancellationToken,
 }
 
@@ -522,7 +521,6 @@ pub(crate) async fn serve(
 ) -> Result<()> {
     let dream = post(dream_request).with_state(DreamApi {
         requests,
-        port: listener.local_addr()?.port(),
         stop: stop.clone(),
     });
     let app = Router::new()
@@ -537,30 +535,8 @@ pub(crate) async fn serve(
 
 async fn dream_request(
     State(api): State<DreamApi>,
-    headers: HeaderMap,
     input: Result<Json<DreamInput>, JsonRejection>,
 ) -> Response {
-    let port_suffix = if api.port == 80 {
-        String::new()
-    } else {
-        format!(":{}", api.port)
-    };
-    let local = headers
-        .get(header::HOST)
-        .and_then(|host| host.to_str().ok())
-        .is_some_and(|host| {
-            // Require a loopback Host to prevent DNS rebinding, and a matching browser Origin.
-            (host == format!("127.0.0.1{port_suffix}") || host == format!("localhost{port_suffix}"))
-                && headers
-                    .get(header::ORIGIN)
-                    .is_none_or(|origin| *origin == format!("http://{host}"))
-        });
-    if !local {
-        return dream_response(
-            StatusCode::FORBIDDEN,
-            "Dream requests must come from the local dashboard.",
-        );
-    }
     let Json(input) = match input {
         Ok(input) => input,
         Err(error) => return dream_response(error.status(), "Send a JSON body with a project_id."),
@@ -707,6 +683,7 @@ fn status_response(method: Method, code: StatusCode, content_type: &str, body: B
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::header;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn config() -> Config {
@@ -1231,13 +1208,6 @@ mod tests {
             client.get(&endpoint).send().await.unwrap().status(),
             StatusCode::METHOD_NOT_ALLOWED
         );
-        for (name, value) in [
-            (header::HOST, format!("untrusted.test:{}", address.port())),
-            (header::ORIGIN, "http://untrusted.test".into()),
-        ] {
-            let response = post().header(name, value).send().await.unwrap();
-            assert_eq!(response.status(), StatusCode::FORBIDDEN);
-        }
         assert_eq!(
             client.post(&endpoint).send().await.unwrap().status(),
             StatusCode::UNSUPPORTED_MEDIA_TYPE
@@ -1247,17 +1217,34 @@ mod tests {
             Err(mpsc::error::TryRecvError::Empty)
         ));
 
-        let (response, ()) = tokio::join!(
-            post()
-                .header(header::ORIGIN, format!("http://{address}"))
-                .send(),
-            async {
-                let request = queued.recv().await.unwrap();
-                assert_eq!(request.project_id, "a");
-                assert!(request.reply.send(Ok(())).is_ok());
-            }
-        );
-        assert_eq!(response.unwrap().status(), StatusCode::ACCEPTED);
+        for (host, origin) in [
+            (address.to_string(), format!("http://{address}")),
+            (
+                "maistro.tailnet.example".into(),
+                "https://maistro.tailnet.example".into(),
+            ),
+            (
+                address.to_string(),
+                "https://maistro.tailnet.example".into(),
+            ),
+        ] {
+            tokio::join!(
+                async {
+                    let response = post()
+                        .header(header::HOST, &host)
+                        .header(header::ORIGIN, &origin)
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), StatusCode::ACCEPTED, "{host} {origin}");
+                },
+                async {
+                    let request = queued.recv().await.unwrap();
+                    assert_eq!(request.project_id, "a");
+                    assert!(request.reply.send(Ok(())).is_ok());
+                }
+            );
+        }
         stop.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(2), job)
             .await
