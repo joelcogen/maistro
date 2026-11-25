@@ -18,6 +18,8 @@ enum Action {
     Run,
     /// Check configuration, token file, repositories, selected agent login and MCP; no model calls.
     Validate,
+    #[command(hide = true)]
+    NeedsGithubToken,
 }
 fn default_config() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config/maistro/config.toml")
@@ -35,9 +37,10 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .with_writer(std::io::stderr)
         .init();
-    let engine = Engine::new(Config::load(&cli.config)?);
+    let load_engine = || Config::load(&cli.config).map(Engine::new);
     match cli.command {
         Action::Validate => {
+            let engine = load_engine()?;
             engine.validate().await?;
             engine.validate_appflowy_tools().await?;
             println!(
@@ -45,6 +48,7 @@ async fn main() -> Result<()> {
             );
         }
         Action::Run => {
+            let engine = load_engine()?;
             let shutdown = CancellationToken::new();
             let token = shutdown.clone();
             let mut term =
@@ -56,6 +60,11 @@ async fn main() -> Result<()> {
             let result = engine.run(shutdown).await;
             signal.abort();
             result?;
+        }
+        Action::NeedsGithubToken => {
+            // The installer only needs delivery settings, before paths and tools are ready.
+            let config: Config = toml::from_str(&std::fs::read_to_string(&cli.config)?)?;
+            println!("{}", config.requires_github_token());
         }
     }
     Ok(())

@@ -34,7 +34,7 @@ provider = "codex" # "codex" or "claude" (Claude Code CLI)
 # claude = "/home/you/.local/bin/claude"
 # claude_mcp_config = "~/.claude.json" # JSON with top-level mcpServers; user scope
 mcp_server = "appflowy"
-# Private file created by install.sh; loaded for each worker, never added to prompts.
+# Private file created by install.sh for projects with a named remote.
 # github_token_file = "~/.config/maistro/github-token"
 
 [[projects]]
@@ -51,9 +51,9 @@ appflowy_page = "Example Backlog"
 # Optional per-project MCP server name (also supported for AppFlowy):
 # mcp_server = "shortcut" # Default: shortcut for Shortcut, agents.mcp_server otherwise.
 # Authorize Shortcut MCP in the selected CLI before starting; see README.md.
-mode = "pr" # "pr": push a story branch and open a PR; "master": commit/push base_branch
+mode = "pr" # "pr": push a story branch and open a PR. "master": deliver on base_branch.
 base_branch = "main" # May be main, master, or another branch.
-remote = "origin"
+remote = "origin" # Default. Set false in master mode to commit locally without a remote.
 enabled = true
 # Optional overrides of agents.worker and agents.worker_effort, independently.
 # Omit both levels for the provider model default and inherited/default effort.

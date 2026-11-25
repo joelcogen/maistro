@@ -52,8 +52,10 @@ if claude:
 else:
     overrides = [args[i + 1] for i, arg in enumerate(args) if arg == '-c' and args[i + 1].startswith('model_reasoning_effort=')]
     assert overrides == ([] if effort is None else [f'model_reasoning_effort="{effort}"'])
-token = (ROOT / 'github-token').read_text().strip()
-assert token not in prompt and not any(token in arg for arg in args)
+token_path = ROOT / 'github-token'
+token = token_path.read_text().strip() if token_path.exists() else None
+if token:
+    assert token not in prompt and not any(token in arg for arg in args)
 if claude:
     assert '--print' in args and '--no-session-persistence' in args
     assert args[args.index('--output-format') + 1] == 'stream-json'
@@ -95,7 +97,7 @@ signal.signal(signal.SIGTERM, stopped)
 print(json.dumps({'type': 'thread.started', 'thread_id': str(os.getpid())}), flush=True)
 (ROOT / ('coordinator-prompt.txt' if coordinator else Path.cwd().name + '-worker-prompt.txt')).write_text(prompt)
 if coordinator:
-    assert 'GH_TOKEN' not in os.environ and 'GITHUB_TOKEN' not in os.environ
+    assert all(name not in os.environ for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'MAISTRO_GITHUB_TOKEN'))
     if claude:
         assert args[args.index('--setting-sources') + 1] == ''
         assert args[args.index('--tools') + 1] == ''
@@ -212,16 +214,21 @@ else:
         assert 'shell_environment_policy.exclude=[]' in args
         assert 'shell_environment_policy.include_only=[]' in args
     assert os.environ['GIT_TERMINAL_PROMPT'] == '0'
-    assert os.environ['GH_TOKEN'] == token and os.environ['GITHUB_TOKEN'] == token
-    # Exercise Git's actual credential lookup without a network request.
-    credentials = subprocess.run(['git', 'credential', 'fill'],
-        input='protocol=https\nhost=github.com\n\n', text=True, capture_output=True)
-    assert credentials.returncode == 0
-    assert f'password={token}' in credentials.stdout
+    git_config = json.loads(prompt.split('\nGIT=', 1)[1].splitlines()[0])
+    local = git_config['remote'] is False
+    if local:
+        assert all(name not in os.environ for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'MAISTRO_GITHUB_TOKEN'))
+    else:
+        assert token and os.environ['GH_TOKEN'] == os.environ['GITHUB_TOKEN'] == token
+        # Exercise Git's actual credential lookup without a network request.
+        credentials = subprocess.run(['git', 'credential', 'fill'],
+            input='protocol=https\nhost=github.com\n\n', text=True, capture_output=True)
+        assert credentials.returncode == 0
+        assert f'password={token}' in credentials.stdout
+
     def git(*command):
         return subprocess.check_output(['git', *command], text=True, stderr=subprocess.PIPE).strip()
 
-    git_config = json.loads(prompt.split('\nGIT=', 1)[1].splitlines()[0])
     if dream:
         instructions = json.loads(prompt.split('\nDREAM=', 1)[1].splitlines()[0])
         project = dream_project['id']
@@ -230,21 +237,26 @@ else:
         while (ROOT / ('hold-dream-' + project)).exists():
             time.sleep(0.05)
         branch, base, remote = (git_config[key] for key in ('branch', 'base_branch', 'remote'))
-        git('fetch', remote)
-        local_branch = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}']).returncode == 0
-        remote_branch = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/remotes/{remote}/{branch}']).returncode == 0
-        branch_start = f'{remote}/{branch}' if remote_branch else f'{remote}/{base}'
-        git('switch', branch) if local_branch else git('switch', '-c', branch, branch_start)
         lease = []
-        if git_config['mode'] == 'pr':
-            assert branch == 'dreams' and branch != base
-            old = git('rev-parse', branch_start)
-            git('rebase', f'{remote}/{base}')
-            if remote_branch:
-                lease = [f'--force-with-lease=refs/heads/{branch}:{old}']
-        else:
+        if local:
             assert branch == base
-            git('merge', '--ff-only', branch_start)
+            assert dream_project['remote'] is False
+            git('switch', branch)
+        else:
+            git('fetch', remote)
+            local_branch = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}']).returncode == 0
+            remote_branch = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/remotes/{remote}/{branch}']).returncode == 0
+            branch_start = f'{remote}/{branch}' if remote_branch else f'{remote}/{base}'
+            git('switch', branch) if local_branch else git('switch', '-c', branch, branch_start)
+            if git_config['mode'] == 'pr':
+                assert branch == 'dreams' and branch != base
+                old = git('rev-parse', branch_start)
+                git('rebase', f'{remote}/{base}')
+                if remote_branch:
+                    lease = [f'--force-with-lease=refs/heads/{branch}:{old}']
+            else:
+                assert branch == base
+                git('merge', '--ff-only', branch_start)
         commit = None
         content = instructions['instructions'].strip()
         if content != 'no changes':
@@ -255,7 +267,8 @@ else:
             assert path.read_text() == content + '\n'
             git('add', str(path))
             git('commit', '-m', f"Dream: {instructions['name']}")
-            git('push', *lease, remote, branch)
+            if not local:
+                git('push', *lease, remote, branch)
             commit = git('rev-parse', 'HEAD')
         event('dream_finish', project=project, name=instructions['name'])
         finish(dict(outcome='completed', summary='Dream checked', tests=['fixture verified dream output'], commit=commit))
@@ -265,7 +278,9 @@ else:
     project = assignment['project_id']
     assert Path.cwd() == ROOT / project
     event('worker_start', model=model, effort=effort, provider='claude' if claude else 'codex', project=project, recovery=assignment['recovery'], git=git_config)
-    if git_config['mode'] == 'pr':
+    if local:
+        assert 'LOCAL MASTER MODE:' in prompt and 'PR MODE:' not in prompt
+    elif git_config['mode'] == 'pr':
         assert 'PR MODE:' in prompt and 'MASTER MODE:' not in prompt
     else:
         assert 'MASTER MODE:' in prompt and 'PR MODE:' not in prompt
@@ -282,14 +297,22 @@ else:
     branch = git_config['story_branch'] if git_config['mode'] == 'pr' else git_config['base_branch']
     existing = subprocess.run(['git', 'show-ref', '--verify', '--quiet', f'refs/heads/{branch}']).returncode == 0
     git('checkout', branch) if existing else git('checkout', '-b', branch, git_config['base_branch'])
-    if git_config['story_marker'] not in git('log', '-1', '--format=%B'):
+    marker = git_config['story_marker']
+    if local:
+        sha = git('log', '-1', '--format=%H', '--fixed-strings', f'--grep={marker}', branch)
+    else:
+        sha = git('rev-parse', 'HEAD') if marker in git('log', '-1', '--format=%B') else ''
+    if not sha:
         Path('result.txt').write_text('implemented\n')
         # A real test is performed by the worker, not by the daemon.
         subprocess.check_call([sys.executable, '-c', "assert open('result.txt').read() == 'implemented\\n'"])
         git('add', 'result.txt')
-        git('commit', '--allow-empty', '-m', git_config['story_marker'])
-    git('push', git_config['remote'], branch)
-    sha = git('rev-parse', 'HEAD')
+        git('commit', '--allow-empty', '-m', marker)
+        sha = git('rev-parse', 'HEAD')
+    if not local:
+        git('push', git_config['remote'], branch)
+    if (ROOT / 'reported-commit').exists():
+        sha = (ROOT / 'reported-commit').read_text().strip()
     result = dict(outcome='completed', summary='Implemented fixture', tests=['python assertion passed'],
                   commit=sha, pr_url=f'https://example.test/pull/{project}' if git_config['mode'] == 'pr' else None)
     if (ROOT / 'missing-pr-url').exists():

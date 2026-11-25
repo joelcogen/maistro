@@ -171,8 +171,17 @@ impl Engine {
                 seen.insert(std::fs::canonicalize(common)?),
                 "projects cannot share a Git repository, including linked worktrees"
             );
-            git_output(&p.repo, &["check-ref-format", "--branch", &p.base_branch]).await?;
-            git_output(&p.repo, &["remote", "get-url", &p.remote]).await?;
+            if let Some(remote) = &p.remote {
+                git_output(&p.repo, &["check-ref-format", "--branch", &p.base_branch]).await?;
+                git_output(&p.repo, &["remote", "get-url", remote]).await?;
+            } else {
+                let reference = format!("refs/heads/{}", p.base_branch);
+                git_output(&p.repo, &["show-ref", "--verify", &reference])
+                    .await
+                    .with_context(|| {
+                        format!("{}: local base branch {} must exist", p.id, p.base_branch)
+                    })?;
+            }
         }
         Ok(())
     }
@@ -554,7 +563,7 @@ async fn run_dreams(
 ) -> Result<bool> {
     tracing::info!(project=%project.id, dreams=tasks.len(), "dream phase started");
     let mut completed = true;
-    let mut pushed = false;
+    let mut committed = false;
     for dream in tasks {
         if cancel.is_cancelled() {
             completed = false;
@@ -564,7 +573,7 @@ async fn run_dreams(
         match agents.dream(project, &dream, cancel).await {
             Ok(report) => {
                 completed &= report.outcome == Outcome::Completed;
-                pushed |= report.commit.is_some();
+                committed |= report.commit.is_some();
                 tracing::info!(project=%project.id, dream=%dream.name, outcome=?report.outcome, summary=%report.summary, tests=?report.tests, commit=?report.commit, "dream finished");
             }
             Err(error) => {
@@ -579,7 +588,7 @@ async fn run_dreams(
             }
         }
     }
-    if completed && pushed && project.mode == Mode::Pr && !cancel.is_cancelled() {
+    if completed && committed && project.mode == Mode::Pr && !cancel.is_cancelled() {
         match github::publish_dream_pr(project, token_file, cancel).await {
             Ok(Some(url)) => tracing::info!(project=%project.id, %url, "dream pull request ready"),
             Ok(None) => (),

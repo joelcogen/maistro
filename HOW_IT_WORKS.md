@@ -14,23 +14,29 @@ use `AppFlowy story: <story-id>` or `Shortcut story: <numeric-id>` commit/PR
 markers to recover interrupted work. The repository, remote and PR target come
 from project configuration.
 
-PR overrides need `gh` and a token that can create PRs. PR or branch mentions in
-requirements keep the project default unless they explicitly request a different
-delivery mode or branch. The coordinator fixes the mode before assigning the
-story and uses the configured [success status for that mode](README.md#project-modes).
+PR overrides need a named remote, `gh` and a token that can create PRs. A PR
+override on a local-only project moves the story to Blocked with an explanation.
+For local delivery, the worker checks the configured base branch for the story's
+commit marker during recovery. Maistro verifies the reported SHA is reachable
+from that local branch before recording success.
+
+PR or branch mentions in requirements keep the project default unless they
+explicitly request a different delivery mode or branch. The coordinator fixes
+the mode before assigning the story and uses its configured success status.
+[Project modes](README.md#project-modes)
 A blocked result goes to Blocked. The coordinator preserves human status changes,
 uses completion markers to avoid duplicate comments, and reads back its comments
 and status updates before acknowledging delivery.
 
 ## GitHub authentication
 
-Each worker reads the file on assignment and receives `GH_TOKEN` and `GITHUB_TOKEN`,
-so rotation applies to the next worker in foreground and service runs. Token
-injection is scoped to workers. Process-scoped Git settings authenticate
+Workers for projects with a named remote read the token file on assignment and
+receive `GH_TOKEN` and `GITHUB_TOKEN`, so rotation applies to the next worker in
+foreground and service runs. Process-scoped Git settings authenticate
 `https://github.com/` and translate standard `git@github.com:` and
 `ssh://git@github.com/` remotes to HTTPS. Saved remotes and global Git settings stay
 intact. `gh` authenticates through `GH_TOKEN`. Other Git hosts use their existing
-authentication.
+authentication. Workers for local-only projects run without GitHub credentials.
 
 ## Custom agent prompts
 
@@ -136,10 +142,12 @@ atomically in `runtime_dir/dreams/`. A restart that day skips the phase even if 
 was interrupted. Changes to dream files during a phase can make the project
 eligible the following day.
 
-Each dream tests, commits, and pushes any repository changes. Master projects
-push to their configured base branch. PR projects use a dedicated `dreams`
-branch and rebase it onto the updated base as needed. Maistro checks each
-reported commit against the configured remote branch.
+Each dream tests and commits any repository changes. Local-only projects commit
+on their local base branch. Master projects with a named remote push to their
+configured base branch. PR projects use a dedicated `dreams` branch and rebase
+it onto the updated base as needed. Maistro verifies each reported commit on the
+configured delivery branch. Dreams that require no changes can complete without
+a commit.
 
 After all dreams succeed in PR mode and at least one pushes a commit, Maistro
 uses the configured worker token to look for an open PR from `dreams` to the

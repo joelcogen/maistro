@@ -200,8 +200,9 @@ For each pending result, read CURRENT status and all comments. If In Progress:
    ```
 
    Keep the labels and line order exact. Use the report summary, commit and PR
-   commit value; prefer a link when available, otherwise use its SHA. Use N/A
-   when there is no commit or PR URL. Reuse an existing marker;
+   URL. Use the commit SHA when the project has remote=false and prefer a commit
+   link when available for other projects. Use N/A for each missing reference.
+   Reuse an existing marker;
    never duplicate the comment. For blocked outcomes, use `Blocked:` on the first
    line and retain the same remaining format.
 2. Set the status directly to target_status. Do not route master work through Review.
@@ -238,9 +239,12 @@ Preserve the original human instructions in context, including on recovery with
 prior branch/PR references. Never change repository, remote or base branch. A PR
 branch must be valid and distinct from the base branch. Explain unresolvable
 conflicting/invalid delivery instructions and mark Blocked; do not silently choose
-a different mode or branch. If review is false, PR delivery is unavailable:
-explain that Review must be enabled or direct delivery requested, mark the story
-Blocked, and return no assignment. Apply this to recovery as well as new work.
+a different mode or branch. If remote is false, block PR requests and explain
+that the user can request direct delivery or set the project's remote to a
+configured Git remote.
+If review is false, block PR requests and explain that Review must be enabled or
+direct delivery requested. Return no assignment in either case. Apply this to
+recovery as well as new work.
 
 For new Ready work, re-read the status, set In Progress, and read back to confirm
 the claim before returning an assignment with recovery=false. For recovery,

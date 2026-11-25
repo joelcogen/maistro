@@ -215,8 +215,8 @@ pub struct Project {
     pub mcp_server: Option<String>,
     pub mode: Mode,
     pub base_branch: String,
-    #[serde(default = "origin")]
-    pub remote: String,
+    #[serde(default = "origin", with = "optional_name")]
+    pub remote: Option<String>,
     #[serde(default = "yes")]
     pub enabled: bool,
     #[serde(default)]
@@ -274,8 +274,8 @@ impl Project {
     }
 }
 
-fn origin() -> String {
-    "origin".into()
+fn origin() -> Option<String> {
+    Some("origin".into())
 }
 fn yes() -> bool {
     true
@@ -287,30 +287,28 @@ pub struct Statuses {
     pub backlog: String,
     pub ready: String,
     pub in_progress: String,
-    #[serde(with = "optional_status")]
+    #[serde(with = "optional_name")]
     pub review: Option<String>,
     pub done: String,
     pub blocked: String,
-    #[serde(with = "optional_status")]
+    #[serde(with = "optional_name")]
     pub cancelled: Option<String>,
 }
-// Omission uses Statuses::default; only an explicit false disables a state.
-mod optional_status {
+// Only an explicit false disables a named setting.
+mod optional_name {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Value {
-            Label(String),
+            Name(String),
             Disabled(bool),
         }
         match Value::deserialize(d)? {
-            Value::Label(label) => Ok(Some(label)),
+            Value::Name(name) => Ok(Some(name)),
             Value::Disabled(false) => Ok(None),
-            Value::Disabled(true) => {
-                Err(serde::de::Error::custom("status must be a label or false"))
-            }
+            Value::Disabled(true) => Err(serde::de::Error::custom("expected a string or false")),
         }
     }
 
@@ -335,6 +333,12 @@ impl Default for Statuses {
     }
 }
 impl Config {
+    pub fn requires_github_token(&self) -> bool {
+        self.projects
+            .iter()
+            .any(|p| p.enabled && p.remote.is_some())
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         let path = path.canonicalize().context("open configuration file")?;
         let mut config: Self = toml::from_str(&std::fs::read_to_string(&path)?)
@@ -451,9 +455,15 @@ impl Config {
             ensure!(
                 !p.base_branch.trim().is_empty()
                     && !p.base_branch.starts_with('-')
-                    && !p.remote.trim().is_empty()
-                    && !p.remote.starts_with('-'),
+                    && p.remote
+                        .as_deref()
+                        .is_none_or(|remote| !remote.trim().is_empty() && !remote.starts_with('-')),
                 "invalid base branch or remote"
+            );
+            ensure!(
+                p.mode == Mode::Master || p.remote.is_some(),
+                "{}: remote = false requires mode = \"master\"",
+                p.id
             );
             ensure!(
                 p.shortcut_workspace.is_some() == p.shortcut_token_file.is_some(),

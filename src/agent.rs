@@ -92,7 +92,9 @@ impl AgentRunner {
         for p in &self.config.projects {
             p.validate_worker_settings(&self.config.agents)?;
         }
-        github::read_token(&self.config.agents.github_token_file)?;
+        if self.config.requires_github_token() {
+            github::read_token(&self.config.agents.github_token_file)?;
+        }
         if self.config.agents.provider == Provider::Claude {
             return crate::claude::validate(&self.config).await;
         }
@@ -188,11 +190,8 @@ impl AgentRunner {
         if let Some(effort) = effort {
             cmd.args(["-c", &format!("model_reasoning_effort=\"{effort}\"")]);
         }
+        github::configure_agent(&mut cmd, project, &self.config.agents.github_token_file)?;
         if project.is_some() {
-            github::configure_worker(
-                &mut cmd,
-                &github::read_token(&self.config.agents.github_token_file)?,
-            )?;
             // Inherit normal configuration, tools, PATH and credentials. No outer sandbox.
             cmd.args([
                 "--sandbox",
@@ -257,9 +256,6 @@ impl AgentRunner {
                 cmd.args(["-c", &format!("mcp_servers.{server}.enabled=false")]);
             }
         } else if let Invocation::Coordinator(coordinator_projects) = invocation {
-            cmd.env_remove("GH_TOKEN")
-                .env_remove("GITHUB_TOKEN")
-                .env_remove("MAISTRO_GITHUB_TOKEN");
             cmd.args(["--ignore-user-config", "--sandbox", "read-only"]);
             for setting in [
                 "features.shell_tool=false",
@@ -492,6 +488,13 @@ impl AgentRunner {
             .await?,
         )?;
         report.validate(assignment.effective_mode(project.mode))?;
+        if project.remote.is_none() && report.outcome == Outcome::Completed {
+            let commit = report
+                .commit
+                .as_deref()
+                .context("missing local story commit")?;
+            verify_local_commit(project, commit, cancel).await?;
+        }
         Ok(report)
     }
 
@@ -513,7 +516,7 @@ impl AgentRunner {
         };
         let custom = repository_prompt(project, "maistro-worker.md")?;
         let git = json!({
-            "mode": project.mode, "base_branch": project.base_branch, "remote": project.remote,
+            "mode": project.mode, "base_branch": project.base_branch, "remote": git_remote(project),
             "branch": branch
         });
         let mut source = serde_json::to_value(project)?;
@@ -539,38 +542,73 @@ impl AgentRunner {
             "dream worker returned no summary"
         );
         if let Some(commit) = &report.commit {
-            ensure!(
-                matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit()),
-                "dream worker must report a full commit SHA"
-            );
+            validate_commit_sha(commit)?;
             ensure!(
                 !report.tests.is_empty(),
                 "dream commit has no testing evidence"
             );
-            let reference = format!("refs/heads/{branch}");
-            let mut cmd = Command::new("git");
-            cmd.current_dir(&project.repo)
-                .env("GIT_TERMINAL_PROMPT", "0")
-                .args([
-                    "ls-remote",
-                    "--exit-code",
-                    "--refs",
-                    "--",
-                    &project.remote,
-                    &reference,
-                ]);
-            github::configure_worker(
-                &mut cmd,
-                &github::read_token(&self.config.agents.github_token_file)?,
-            )?;
-            let remote = process::run(cmd, "", Duration::from_secs(30), cancel, None).await?;
-            ensure!(
-                remote.code == 0 && remote.stdout.trim() == format!("{commit}\t{reference}"),
-                "could not confirm dream commit at the configured remote branch {branch}"
-            );
+            if let Some(remote) = &project.remote {
+                let reference = format!("refs/heads/{branch}");
+                let mut cmd = Command::new("git");
+                cmd.current_dir(&project.repo)
+                    .env("GIT_TERMINAL_PROMPT", "0")
+                    .args([
+                        "ls-remote",
+                        "--exit-code",
+                        "--refs",
+                        "--",
+                        remote,
+                        &reference,
+                    ]);
+                github::configure_worker(
+                    &mut cmd,
+                    &github::read_token(&self.config.agents.github_token_file)?,
+                )?;
+                let result = process::run(cmd, "", Duration::from_secs(30), cancel, None).await?;
+                ensure!(
+                    result.code == 0 && result.stdout.trim() == format!("{commit}\t{reference}"),
+                    "could not confirm dream commit at the configured remote branch {branch}"
+                );
+            } else {
+                verify_local_commit(project, commit, cancel).await?;
+            }
         }
         Ok(report)
     }
+}
+
+fn git_remote(project: &Project) -> Value {
+    match &project.remote {
+        Some(remote) => json!(remote),
+        None => json!(false),
+    }
+}
+
+fn validate_commit_sha(commit: &str) -> Result<()> {
+    ensure!(
+        matches!(commit.len(), 40 | 64) && commit.bytes().all(|b| b.is_ascii_hexdigit()),
+        "worker must report a full commit SHA"
+    );
+    Ok(())
+}
+
+async fn verify_local_commit(
+    project: &Project,
+    commit: &str,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    validate_commit_sha(commit)?;
+    let reference = format!("refs/heads/{}", project.base_branch);
+    let mut cmd = Command::new("git");
+    cmd.current_dir(&project.repo)
+        .args(["merge-base", commit, &reference]);
+    let result = process::run(cmd, "", Duration::from_secs(30), cancel, None).await?;
+    ensure!(
+        result.code == 0 && result.stdout.trim() == commit,
+        "could not confirm commit {commit} on the configured local base branch {}",
+        project.base_branch
+    );
+    Ok(())
 }
 
 fn repository_prompt(project: &Project, filename: &str) -> Result<String> {
@@ -585,6 +623,10 @@ fn repository_prompt(project: &Project, filename: &str) -> Result<String> {
 
 pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<String> {
     let mode = assignment.effective_mode(project.mode);
+    ensure!(
+        mode != Mode::Pr || project.remote.is_some(),
+        "PR delivery requires a named remote. Request direct delivery or set the project's remote to a configured Git remote"
+    );
     ensure!(
         mode != Mode::Pr || project.statuses.review.is_some(),
         "PR delivery is unavailable because review is disabled; enable review or request direct delivery"
@@ -611,19 +653,30 @@ pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<Strin
     };
     let custom = repository_prompt(project, "maistro-worker.md")?;
     let git = json!({
-        "mode":mode, "base_branch":project.base_branch, "remote":project.remote,
+        "mode":mode, "base_branch":project.base_branch, "remote":git_remote(project),
         "story_branch": branch,
         "story_marker":format!("{} story: {}", project.source_name(), assignment.story_id)
     });
     let mut prompt = format!(
         "{}\n\nREPOSITORY={}\nGIT={}\nASSIGNMENT={}\n",
-        include_str!("../prompts/worker.md").replace(
-            "{{GIT_MODE_INSTRUCTIONS}}",
-            match mode {
-                Mode::Pr => include_str!("../prompts/worker-pr.md"),
-                Mode::Master => include_str!("../prompts/worker-master.md"),
-            }
-        ),
+        include_str!("../prompts/worker.md")
+            .replace(
+                "{{GIT_REMOTE_INSTRUCTIONS}}",
+                if project.remote.is_some() {
+                    include_str!("../prompts/worker-remote.md")
+                } else {
+                    ""
+                }
+            )
+            .replace(
+                "{{GIT_MODE_INSTRUCTIONS}}",
+                match mode {
+                    Mode::Pr => include_str!("../prompts/worker-pr.md"),
+                    Mode::Master if project.remote.is_none() =>
+                        include_str!("../prompts/worker-local.md"),
+                    Mode::Master => include_str!("../prompts/worker-master.md"),
+                }
+            ),
         project.repo.display(),
         git,
         serde_json::to_string(assignment)?

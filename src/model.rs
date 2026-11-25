@@ -81,7 +81,7 @@ impl Report {
         if self.outcome == Outcome::Completed {
             ensure!(
                 self.commit.as_ref().is_some_and(|s| !s.trim().is_empty()),
-                "completed report has no pushed commit"
+                "completed report has no commit SHA"
             );
             ensure!(
                 !self.tests.is_empty(),

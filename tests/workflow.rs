@@ -87,7 +87,7 @@ impl Fixture {
                 mcp_server: None,
                 mode: *mode,
                 base_branch: "main".into(),
-                remote: "origin".into(),
+                remote: Some("origin".into()),
                 enabled: true,
                 statuses: Statuses::default(),
             });
@@ -115,6 +115,14 @@ impl Fixture {
             projects,
         };
         Self { temp, config }
+    }
+    fn local(&mut self, index: usize) {
+        let project = &mut self.config.projects[index];
+        git(&project.repo, &["remote", "remove", "origin"]);
+        git(&project.repo, &["branch", "-m", "local/trunk"]);
+        git(&project.repo, &["switch", "-c", "other"]);
+        project.remote = None;
+        project.base_branch = "local/trunk".into();
     }
     fn shortcut(&mut self, index: usize, server: &str) {
         let project = &mut self.config.projects[index];
@@ -272,6 +280,216 @@ fn write_dream(project: &Project, name: &str, instructions: &str) {
     let dir = project.repo.join("dreams");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join(name), instructions).unwrap();
+}
+
+#[test]
+fn cli_validates_local_branches_and_named_remotes_and_reports_token_requirements() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.local(0);
+    let root = f.temp.path();
+    let config = root.join("config.toml");
+    let base = "[orchestrator]\nruntime_dir='runtime'\n\
+                [agents]\ncodex='./fake-codex'\ncodex_home='codex-home'\ngithub_token_file='github-token'\n\
+                [[projects]]\nid='p0'\nrepo='p0'\nappflowy_page='board-0'\nmode='master'\nbase_branch='local/trunk'\n";
+    let run = |command| {
+        Command::new(env!("CARGO_BIN_EXE_maistro"))
+            .arg("--config")
+            .arg(&config)
+            .arg(command)
+            .output()
+            .unwrap()
+    };
+    let validate = |error: Option<&str>| {
+        let result = run("validate");
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert_eq!(result.status.success(), error.is_none(), "{stderr}");
+        if let Some(error) = error {
+            assert!(stderr.contains(error), "{stderr}");
+        }
+    };
+    let token = &f.config.agents.github_token_file;
+    let saved = fs::read(token).unwrap();
+    fs::remove_file(token).unwrap();
+    fs::write(&config, format!("{base}remote=false\n")).unwrap();
+    assert_eq!(run("needs-github-token").stdout, b"false\n");
+    validate(None);
+    fs::write(
+        &config,
+        format!("{}remote=false\n", base.replace("local/trunk", "missing")),
+    )
+    .unwrap();
+    validate(Some("local base branch missing must exist"));
+
+    fs::write(&config, base).unwrap();
+    assert_eq!(run("needs-github-token").stdout, b"true\n");
+    validate(Some("read GitHub token"));
+    fs::write(token, saved).unwrap();
+    fs::set_permissions(token, fs::Permissions::from_mode(0o600)).unwrap();
+    validate(Some("No such remote 'origin'"));
+
+    let repo = &f.config.projects[0].repo;
+    let remote = root.join("remote0.git");
+    git(
+        repo,
+        &["remote", "add", "upstream", remote.to_str().unwrap()],
+    );
+    fs::write(&config, format!("{base}remote='upstream'\n")).unwrap();
+    validate(None);
+    git(repo, &["remote", "rename", "upstream", "origin"]);
+    fs::write(&config, base).unwrap();
+    validate(None);
+}
+
+#[tokio::test]
+async fn local_stories_commit_and_recover_on_the_configured_base_without_a_token() {
+    for claude in [false, true] {
+        let mut f = Fixture::new(&[Mode::Master, Mode::Pr]);
+        if claude {
+            f.claude();
+        }
+        f.local(0);
+        f.config.projects[1].enabled = false;
+        fs::remove_file(&f.config.agents.github_token_file).unwrap();
+        f.touch("outage");
+        let (stop, job) = f.start();
+        let pending = f
+            .wait(|| f.events().iter().any(|e| e["kind"] == "outage"))
+            .await;
+        f.stop(stop, job).await;
+        assert!(pending, "events: {:?}", f.events());
+
+        let repo = &f.config.projects[0].repo;
+        let branch = "refs/heads/local/trunk";
+        let story_commit = git(repo, &["rev-parse", branch]);
+        assert_eq!(
+            git(repo, &["log", "-1", "--format=%B", branch]),
+            "AppFlowy story: story-0"
+        );
+        assert_eq!(git(repo, &["remote"]), "");
+        assert_eq!(
+            git(repo, &["log", "-1", "--format=%s", "refs/heads/other"]),
+            "initial"
+        );
+        git(
+            repo,
+            &["commit", "--allow-empty", "-m", "A later local commit"],
+        );
+        let tip = git(repo, &["rev-parse", branch]);
+        fs::remove_file(f.temp.path().join("outage")).unwrap();
+
+        let (stop, job) = f.start();
+        let done = f.wait(|| f.board()["p0"]["status"] == "Done").await;
+        f.stop(stop, job).await;
+        assert!(done, "events: {:?}", f.events());
+        assert_eq!(git(repo, &["rev-parse", branch]), tip);
+        assert_eq!(f.board()["p0"]["result"]["commit"], story_commit);
+        assert!(f.board()["p0"]["result"]["pr_url"].is_null());
+        assert!(
+            f.events()
+                .iter()
+                .any(|e| e["kind"] == "worker_start" && e["recovery"] == true)
+        );
+    }
+}
+
+#[tokio::test]
+async fn local_stories_block_pr_requests_and_commits_on_other_branches() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.local(0);
+    fs::remove_file(&f.config.agents.github_token_file).unwrap();
+    let repo = &f.config.projects[0].repo;
+    git(
+        repo,
+        &["commit", "--allow-empty", "-m", "Other branch only"],
+    );
+    fs::write(
+        f.temp.path().join("reported-commit"),
+        git(repo, &["rev-parse", "HEAD"]),
+    )
+    .unwrap();
+    let (stop, job) = f.start();
+    let blocked = f.wait(|| f.board()["p0"]["status"] == "Blocked").await;
+    f.stop(stop, job).await;
+    assert!(blocked, "events: {:?}", f.events());
+    assert!(
+        f.board()["p0"]["result"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("could not confirm commit")
+    );
+
+    let mut board = f.board();
+    board["p0"]["status"] = json!("Ready");
+    board["p0"]["pr"] = json!({"branch": null});
+    fs::write(
+        f.temp.path().join("board.json"),
+        serde_json::to_vec(&board).unwrap(),
+    )
+    .unwrap();
+    let (stop, job) = f.start();
+    let blocked = f.wait(|| f.board()["p0"]["status"] == "Blocked").await;
+    f.stop(stop, job).await;
+    assert!(blocked, "events: {:?}", f.events());
+    assert!(
+        f.board()["p0"]["result"]["summary"]
+            .as_str()
+            .unwrap()
+            .contains("Request direct delivery or set the project's remote")
+    );
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn local_dreams_complete_with_and_without_a_commit_without_a_token() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.local(0);
+    fs::remove_file(&f.config.agents.github_token_file).unwrap();
+    f.config.orchestrator.dream_time = "00:00".into();
+    f.enable_status();
+    f.status("p0", "Backlog");
+    write_dream(&f.config.projects[0], "01-first.md", "run first");
+    write_dream(&f.config.projects[0], "02-noop.md", "no changes");
+    let (stop, job) = f.start();
+    let finished = f
+        .wait(|| {
+            f.events()
+                .iter()
+                .filter(|e| e["kind"] == "dream_finish")
+                .count()
+                == 2
+        })
+        .await;
+    assert!(finished, "events: {:?}", f.events());
+    let status = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let status = f.status_snapshot().await;
+            if status["projects"][0]["worker"]["state"] != "dreaming" {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.stop(stop, job).await;
+    assert_eq!(status["projects"][0]["worker"]["state"], "idle");
+    assert_eq!(status["projects"][0]["worker"]["last_error"], Value::Null);
+    let repo = &f.config.projects[0].repo;
+    assert_eq!(
+        git(repo, &["log", "--format=%s", "refs/heads/local/trunk"]),
+        "Dream: 01-first.md\ninitial"
+    );
+    assert_eq!(
+        git(repo, &["show", "refs/heads/local/trunk:01-first.txt"]),
+        "run first"
+    );
+    assert_eq!(git(repo, &["remote"]), "");
 }
 
 #[tokio::test]

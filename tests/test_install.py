@@ -31,7 +31,15 @@ set -eu
 test "$*" = 'build --release --locked'
 [ "${FAIL_BUILD:-0}" = 0 ] || exit 21
 mkdir -p target/release
-printf '#!/bin/sh\\nexit 0\\n' > target/release/maistro
+cat > target/release/maistro <<'EOF'
+#!/bin/sh
+set -eu
+test "$#" -eq 3
+test "$1" = --config
+test "$3" = needs-github-token
+test -f "$2"
+printf '%s\\n' "${MOCK_NEEDS_GITHUB_TOKEN:-true}"
+EOF
 ''')
         cargo.chmod(0o755)
         systemctl = self.tools / 'systemctl'
@@ -82,6 +90,23 @@ printf '#!/bin/sh\\nexit 0\\n' > target/release/maistro
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Token required', result.stderr)
         self.assertFalse((self.config / 'github-token').exists())
+
+    def test_local_only_install_needs_no_token(self):
+        self.config.mkdir(parents=True)
+        config = """[[projects]]
+id = "local"
+repo = "/path/to/repo"
+appflowy_page = "Board"
+base_branch = "main"
+mode = "master"
+remote = false
+"""
+        (self.config / 'config.toml').write_text(config)
+        result = self.install(MAISTRO_GITHUB_TOKEN='', MOCK_NEEDS_GITHUB_TOKEN='false')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.config / 'config.toml').read_text(), config)
+        self.assertFalse((self.config / 'github-token').exists())
+        self.assertIn('GitHub token setup skipped', result.stdout)
 
     def test_invalid_token_does_not_replace_existing_secret_or_execute_input(self):
         self.assertEqual(self.install().returncode, 0)

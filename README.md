@@ -2,7 +2,7 @@
 
 Maistro turns AppFlowy and Shortcut stories into tested, committed code. A
 coordinator picks stories and records results on the board or workflow. A Codex
-or Claude Code worker implements, tests, commits, and pushes each change.
+or Claude Code worker implements, tests, and delivers each change.
 Projects run in parallel, with one active story per project.
 
 See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
@@ -12,11 +12,24 @@ See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
 | Mode | Worker responsibility | Successful story status |
 | --- | --- | --- |
 | `pr` | Create/reuse a story branch, implement, test, commit, push, and open/update a PR against `base_branch`. | Review, with PR link |
-| `master` | Implement and test directly on `base_branch`, then commit and push it. | Done, with commit reference |
+| `master` | Implement, test, and commit directly on `base_branch`. Push when a remote is configured. | Done, with commit SHA or link |
 
 `base_branch` can be `main`, `master`, or another branch. You handle CI, merge PRs,
 and move reviewed stories to Done. To request PR delivery for an individual story,
 see [delivery overrides](HOW_IT_WORKS.md#project-modes-and-delivery).
+
+Projects use `origin` by default. Set `remote` to a string to select another
+named remote. For local-only story and dream delivery, set the following in
+the project and make sure its configured `base_branch` already exists locally.
+
+```toml
+mode = "master"
+remote = false
+```
+
+Maistro tests and commits changes on the local base branch without fetching or
+pushing. Completed stories move to Done with the commit SHA. A PR request on a
+local-only project moves the story to Blocked.
 
 ## Dreams
 
@@ -102,7 +115,12 @@ Codex stdio inherits the process environment. Maistro expands `${VAR}` and
 
 ### GitHub token
 
-During installation, create a [fine-grained GitHub personal access token](https://github.com/settings/personal-access-tokens/new)
+Only enabled projects with a named remote require a GitHub token. For a
+token-free installation, create `~/.config/maistro/config.toml` before running
+`./install.sh` and set `remote = false` and `mode = "master"` on every enabled
+project.
+
+For remote-backed projects, create a [fine-grained GitHub personal access token](https://github.com/settings/personal-access-tokens/new)
 for the appropriate resource owner and **only the repositories Maistro manages**.
 Grant **Contents: Read and write** for pushes, **Workflows: Read and write** for
 workflow edits, and **Pull requests: Read and write** for PR mode. Set an expiration
@@ -246,10 +264,12 @@ journalctl --user -u maistro -f
 
 Use `systemctl --user enable maistro` to start with the user service manager.
 Configure user lingering for operation after logout. `validate` checks local
-configuration, repository identities/remotes, the selected CLI login, the private
-token file and enabled projects' MCP configuration. For AppFlowy it also connects
-and checks compact tool availability without reading boards. Remote authentication, board
-access and push permissions are checked during operation.
+configuration, repository identities, configured remotes or local base branches,
+the selected CLI login and enabled projects' MCP configuration. It checks the
+private GitHub token file when an enabled project uses a named remote. For
+AppFlowy it also checks compact tool availability without reading boards.
+Remote authentication, board access and push permissions are checked during
+operation.
 
 The service runs as your user with `~/.local/bin` and `~/.cargo/bin` in PATH. It
 optionally reads `~/.config/maistro/environment` in systemd environment-file syntax.

@@ -209,11 +209,8 @@ pub(crate) async fn invoke(
             .args(["--effort", effort]);
     }
     let mut connections = Map::new();
+    github::configure_agent(&mut cmd, project, &config.agents.github_token_file)?;
     if project.is_some() {
-        github::configure_worker(
-            &mut cmd,
-            &github::read_token(&config.agents.github_token_file)?,
-        )?;
         cmd.arg("--dangerously-skip-permissions");
         // Keep other user-scoped MCP tools, but never expose any story sources.
         connections = servers(config)?;
@@ -229,9 +226,6 @@ pub(crate) async fn invoke(
             );
         }
     } else if let Invocation::Coordinator(coordinator_projects) = invocation {
-        cmd.env_remove("GH_TOKEN")
-            .env_remove("GITHUB_TOKEN")
-            .env_remove("MAISTRO_GITHUB_TOKEN");
         cmd.args([
             "--setting-sources",
             "",

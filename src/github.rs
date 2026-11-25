@@ -71,22 +71,35 @@ pub fn configure_worker(cmd: &mut Command, token: &str) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn configure_agent(
+    cmd: &mut Command,
+    project: Option<&Project>,
+    token_file: &Path,
+) -> Result<()> {
+    if project.is_some_and(|p| p.remote.is_some()) {
+        configure_worker(cmd, &read_token(token_file)?)?;
+    } else {
+        cmd.env_remove("GH_TOKEN")
+            .env_remove("GITHUB_TOKEN")
+            .env_remove("MAISTRO_GITHUB_TOKEN");
+    }
+    Ok(())
+}
+
 pub(crate) async fn publish_dream_pr(
     project: &Project,
     token_file: &Path,
     cancel: &CancellationToken,
 ) -> Result<Option<String>> {
+    let remote = project
+        .remote
+        .as_deref()
+        .context("dream pull requests require a named remote")?;
     let token = read_token(token_file)?;
     let timeout = Duration::from_secs(30);
     let mut git = Command::new("git");
-    git.current_dir(&project.repo).args([
-        "remote",
-        "get-url",
-        "--push",
-        "--all",
-        "--",
-        &project.remote,
-    ]);
+    git.current_dir(&project.repo)
+        .args(["remote", "get-url", "--push", "--all", "--", remote]);
     configure_worker(&mut git, &token)?;
     let remote = process::run(git, "", timeout, cancel, None).await?;
     ensure!(
