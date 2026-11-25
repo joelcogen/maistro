@@ -434,7 +434,7 @@ pub(crate) async fn board_context(
     result
 }
 
-/// Each project polls independently, including while the single coordinator runs.
+/// Each MCP project polls independently, including while the single coordinator runs.
 /// A failed scan never emits a replacement fingerprint.
 pub async fn run(
     config: toml::Value,
@@ -449,9 +449,20 @@ pub async fn run(
         let observation = tokio::select! {
             _ = stop.cancelled() => break,
             result = tokio::time::timeout(timeout, async {
-                if client.is_none() { client = Some(Client::connect(&config).await?); }
-                client.as_ref().unwrap().observe(&project).await
-            }) => result.context("AppFlowy board poll timed out").and_then(|r| r),
+                if client.is_none() {
+                    client = Some(if project.is_vaultite() {
+                        Client::connect_vaultite(&config).await?
+                    } else {
+                        Client::connect(&config).await?
+                    });
+                }
+                let client = client.as_ref().unwrap();
+                if project.is_vaultite() {
+                    crate::vaultite::observe(client, &project).await
+                } else {
+                    client.observe(&project).await
+                }
+            }) => result.with_context(|| format!("{} board poll timed out", project.source_name())).and_then(|r| r),
         };
         let failed = observation.is_err();
         tokio::select! {

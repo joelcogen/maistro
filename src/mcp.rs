@@ -1,9 +1,9 @@
-//! Read-only MCP transport. Reuses the selected CLI's configured connection without invoking a model.
+//! MCP transport using the selected CLI's connection without invoking a model.
 use anyhow::{Context, Result, bail, ensure};
 use process_wrap::tokio::{CommandWrap, ProcessGroup};
 use rmcp::{
     ServiceExt,
-    model::CallToolRequestParams,
+    model::{CallToolRequestParams, CallToolResult},
     service::{RoleClient, RunningService},
     transport::{
         StreamableHttpClientTransport, TokioChildProcess,
@@ -17,6 +17,31 @@ use tokio::process::Command;
 pub struct Client(RunningService<RoleClient, ()>);
 impl Client {
     pub async fn connect(config: &toml::Value) -> Result<Self> {
+        Self::connect_source(
+            config,
+            "AppFlowy",
+            &["appflowy_fetch", "appflowy_database", "appflowy_rows"],
+            "select APPFLOWY_TOOL_PROFILE=compact and reconnect",
+        )
+        .await
+    }
+
+    pub async fn connect_vaultite(config: &toml::Value) -> Result<Self> {
+        Self::connect_source(
+            config,
+            "Vaultite",
+            &["query", "read", "edit_file"],
+            "configure local vau mcp with database views enabled",
+        )
+        .await
+    }
+
+    async fn connect_source(
+        config: &toml::Value,
+        source: &str,
+        required_tools: &[&str],
+        guidance: &str,
+    ) -> Result<Self> {
         let service = if let Some(command) = config.get("command").and_then(toml::Value::as_str) {
             let mut cmd = Command::new(command);
             if let Some(args) = config.get("args").and_then(toml::Value::as_array) {
@@ -27,7 +52,7 @@ impl Client {
             if let Some(cwd) = config.get("cwd").and_then(toml::Value::as_str) {
                 cmd.current_dir(cwd);
             }
-            // AppFlowy needs its own environment/auth, never the worker's GitHub token.
+            // Story sources use their own authentication.
             cmd.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
             if let Some(env) = config.get("env").and_then(toml::Value::as_table) {
                 for (k, v) in env {
@@ -39,9 +64,9 @@ impl Client {
             let (transport, _) = TokioChildProcess::builder(command)
                 .stderr(Stdio::null())
                 .spawn()
-                .context("could not start AppFlowy MCP command")?;
+                .with_context(|| format!("could not start {source} MCP command"))?;
             ().serve(transport).await.map_err(|_| {
-                anyhow::anyhow!("AppFlowy MCP initialization failed; check configured command/auth")
+                anyhow::anyhow!("{source} MCP initialization failed; check configured command/auth")
             })?
         } else if let Some(url) = config.get("url").and_then(toml::Value::as_str) {
             let mut headers = HashMap::new();
@@ -74,24 +99,24 @@ impl Client {
                 .redirect(reqwest::redirect::Policy::none())
                 .build()?;
             ().serve(StreamableHttpClientTransport::with_client(client, transport_config)).await
-                .map_err(|_| anyhow::anyhow!("AppFlowy HTTP MCP initialization failed; check URL/auth (CLI OAuth credentials are not shared; use stdio or configured headers/token)"))?
+                .map_err(|_| anyhow::anyhow!("{source} HTTP MCP initialization failed; check URL/auth (CLI OAuth credentials are not shared; use stdio or configured headers/token)"))?
         } else {
-            bail!("AppFlowy MCP requires command or streamable HTTP url");
+            bail!("{source} MCP requires command or streamable HTTP url");
         };
         let client = Self(service);
         let check = async {
             let tools = client.0.list_all_tools().await?;
-            for name in ["appflowy_fetch", "appflowy_database", "appflowy_rows"] {
+            for &name in required_tools {
                 ensure!(
                     tools.iter().any(|t| t.name == name),
-                    "AppFlowy compact API tool {name} missing; select APPFLOWY_TOOL_PROFILE=compact and reconnect"
+                    "{source} MCP tool {name} missing; {guidance}"
                 );
             }
             Ok::<_, anyhow::Error>(())
         };
         if let Err(error) = tokio::time::timeout(Duration::from_secs(60), check)
             .await
-            .context("AppFlowy tool discovery timed out")
+            .with_context(|| format!("{source} tool discovery timed out"))
             .and_then(|r| r)
         {
             client.close().await;
@@ -100,21 +125,9 @@ impl Client {
         Ok(client)
     }
     pub async fn call(&self, name: &'static str, arguments: Value) -> Result<Value> {
-        let result = tokio::time::timeout(
-            Duration::from_secs(60),
-            self.0.call_tool(
-                CallToolRequestParams::new(name)
-                    .with_arguments(json!({"request": arguments}).as_object().unwrap().clone()),
-            ),
-        )
-        .await
-        .context("AppFlowy MCP read timed out")?
-        .map_err(|_| anyhow::anyhow!("AppFlowy MCP {name} request failed"))?;
-        // Do not log remote error text: it can contain private content or credentials.
-        ensure!(
-            result.is_error != Some(true),
-            "AppFlowy MCP {name} returned an error"
-        );
+        let result = self
+            .request("AppFlowy", name, json!({"request": arguments}))
+            .await?;
         if let Some(mut data) = result.structured_content {
             // FastMCP wraps non-object return values in {"result": ...}.
             if data
@@ -125,25 +138,51 @@ impl Client {
             }
             return Ok(data);
         }
-        let texts: Vec<_> = result
-            .content
-            .iter()
-            .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
-            .collect();
-        ensure!(
-            texts.len() == result.content.len(),
-            "AppFlowy MCP {name} returned unexpected content"
-        );
-        ensure!(
-            texts.len() == 1,
-            "AppFlowy MCP {name} returned unexpected content"
-        );
-        serde_json::from_str(texts[0])
+        serde_json::from_str(tool_text(&result, "AppFlowy", name)?)
             .with_context(|| format!("AppFlowy MCP {name} returned invalid JSON"))
+    }
+
+    pub async fn vaultite(&self, name: &'static str, arguments: Value) -> Result<String> {
+        let result = self.request("Vaultite", name, arguments).await?;
+        Ok(tool_text(&result, "Vaultite", name)?.to_owned())
+    }
+
+    async fn request(
+        &self,
+        source: &str,
+        name: &'static str,
+        arguments: Value,
+    ) -> Result<CallToolResult> {
+        let result = tokio::time::timeout(
+            Duration::from_secs(60),
+            self.0.call_tool(
+                CallToolRequestParams::new(name)
+                    .with_arguments(arguments.as_object().unwrap().clone()),
+            ),
+        )
+        .await
+        .with_context(|| format!("{source} MCP {name} timed out"))?
+        .map_err(|_| anyhow::anyhow!("{source} MCP {name} request failed"))?;
+        // Do not log remote error text: it can contain private content or credentials.
+        ensure!(
+            result.is_error != Some(true),
+            "{source} MCP {name} returned an error"
+        );
+        Ok(result)
     }
     pub async fn close(mut self) {
         let _ = tokio::time::timeout(Duration::from_secs(8), self.0.close()).await;
     }
+}
+
+fn tool_text<'a>(result: &'a CallToolResult, source: &str, name: &str) -> Result<&'a str> {
+    let [content] = result.content.as_slice() else {
+        bail!("{source} MCP {name} returned unexpected content");
+    };
+    content
+        .as_text()
+        .map(|block| block.text.as_str())
+        .with_context(|| format!("{source} MCP {name} returned unexpected content"))
 }
 
 #[cfg(test)]

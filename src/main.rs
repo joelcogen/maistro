@@ -5,7 +5,10 @@ use std::path::PathBuf;
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
-#[command(version, about = "AppFlowy coordinator and per-project coding workers")]
+#[command(
+    version,
+    about = "Coding orchestration for AppFlowy, Shortcut, and Vaultite"
+)]
 struct Cli {
     #[arg(short, long, global=true, default_value_os_t=default_config())]
     config: PathBuf,
@@ -42,9 +45,9 @@ async fn main() -> Result<()> {
         Action::Validate => {
             let engine = load_engine()?;
             engine.validate().await?;
-            engine.validate_appflowy_tools().await?;
+            engine.validate_source_tools().await?;
             println!(
-                "Configuration, configured private token files, repositories, selected agent login and source MCP settings and AppFlowy compact tool availability are valid. Board access, token permissions and model calls were not tested."
+                "Configuration, private token files, repositories, agent login, source MCP settings, and local board tool availability are valid. Board access, token permissions, and model calls were not tested."
             );
         }
         Action::Run => {

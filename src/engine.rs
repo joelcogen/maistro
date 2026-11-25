@@ -130,7 +130,7 @@ impl Engine {
         }
     }
     /// Check the remote tool manifest without reading or mutating boards.
-    pub async fn validate_appflowy_tools(&self) -> Result<()> {
+    pub async fn validate_source_tools(&self) -> Result<()> {
         let mut checked = HashSet::new();
         for project in self
             .config
@@ -140,7 +140,12 @@ impl Engine {
         {
             if checked.insert(project.mcp_server(&self.config.agents)) {
                 let config = self.agents.mcp_config(project)?;
-                crate::mcp::Client::connect(&config).await?.close().await;
+                let client = if project.is_vaultite() {
+                    crate::mcp::Client::connect_vaultite(&config).await?
+                } else {
+                    crate::mcp::Client::connect(&config).await?
+                };
+                client.close().await;
             }
         }
         Ok(())

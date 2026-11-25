@@ -211,7 +211,9 @@ pub struct Project {
     pub shortcut_workspace: Option<String>,
     #[serde(skip_serializing)]
     pub shortcut_token_file: Option<PathBuf>,
-    /// Selected provider MCP server name; defaults to shortcut or agents.mcp_server.
+    /// Exact vault-relative path to a Vaultite .base with a same-named story folder.
+    pub vaultite_base: Option<String>,
+    /// Selected provider MCP server name; defaults to the story source's connection.
     pub mcp_server: Option<String>,
     pub mode: Mode,
     pub base_branch: String,
@@ -251,9 +253,17 @@ impl Project {
             || self.shortcut_workflow.is_some()
             || self.shortcut_workflow_id.is_some()
     }
+    pub fn is_vaultite(&self) -> bool {
+        self.vaultite_base.is_some()
+    }
+    pub fn is_appflowy(&self) -> bool {
+        !self.is_shortcut() && !self.is_vaultite()
+    }
     pub fn source_name(&self) -> &'static str {
         if self.is_shortcut() {
             "Shortcut"
+        } else if self.is_vaultite() {
+            "Vaultite"
         } else {
             "AppFlowy"
         }
@@ -262,6 +272,8 @@ impl Project {
         self.mcp_server.as_deref().unwrap_or_else(|| {
             if self.is_shortcut() {
                 "shortcut"
+            } else if self.is_vaultite() {
+                "vaultite"
             } else {
                 &agents.mcp_server
             }
@@ -407,6 +419,7 @@ impl Config {
         let mut ids = HashSet::new();
         let mut repos = HashSet::new();
         let mut servers = std::collections::HashMap::new();
+        let mut vaultite_bases = HashSet::new();
         for p in &self.projects {
             p.validate_worker_settings(&self.agents)?;
             ensure!(
@@ -430,12 +443,13 @@ impl Config {
                     p.shortcut_url.is_some(),
                     p.shortcut_workflow.is_some(),
                     p.shortcut_workflow_id.is_some(),
+                    p.vaultite_base.is_some(),
                 ]
                 .into_iter()
                 .filter(|present| *present)
                 .count()
                     == 1,
-                "{}: specify exactly one appflowy_url, appflowy_page, shortcut_url, shortcut_workflow or shortcut_workflow_id",
+                "{}: specify exactly one appflowy_url, appflowy_page, shortcut_url, shortcut_workflow, shortcut_workflow_id or vaultite_base",
                 p.id
             );
             ensure!(
@@ -502,11 +516,36 @@ impl Config {
             }
             let server = p.mcp_server(&self.agents);
             ensure!(identifier(server), "{}: invalid MCP server name", p.id);
-            if let Some(previous) = servers.insert(server, p.is_shortcut()) {
+            if let Some(previous) = servers.insert(server, p.source_name()) {
                 ensure!(
-                    previous == p.is_shortcut(),
-                    "MCP server {server} cannot serve both AppFlowy and Shortcut"
+                    previous == p.source_name(),
+                    "MCP server {server} cannot serve both {previous} and {}",
+                    p.source_name()
                 );
+            }
+            if let Some(path) = &p.vaultite_base {
+                ensure!(
+                    path.ends_with(".base")
+                        && path.trim() == path
+                        && !path.contains(['\\', ':'])
+                        && !path.chars().any(char::is_control)
+                        && path
+                            .split('/')
+                            .all(|part| !part.is_empty() && !part.starts_with('.')),
+                    "{}: vaultite_base must be a vault-relative .base path",
+                    p.id
+                );
+                let folder = Path::new(path.strip_suffix(".base").unwrap());
+                ensure!(
+                    vaultite_bases.iter().all(
+                        |(other_server, other_folder): &(&str, &Path)| server != *other_server
+                            || !folder.starts_with(other_folder)
+                                && !other_folder.starts_with(folder)
+                    ),
+                    "{}: Vaultite Base story folders must not overlap on the same MCP server",
+                    p.id
+                );
+                vaultite_bases.insert((server, folder));
             }
             if let Some(url) = &p.shortcut_url {
                 let url = reqwest::Url::parse(url).context("invalid shortcut_url")?;

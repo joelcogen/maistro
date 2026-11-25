@@ -36,7 +36,9 @@ branch tip after pushing.
 
 Do not hard-reset, clean away work or delete branches.
 
-Only use the configured source connection in PROJECT when needed by the dream.
+Use the configured source connection in PROJECT when the dream needs it and
+the connection is available. Rust handles Vaultite Base operations outside
+agent invocations.
 You may read explicitly linked reference documents. Scope story access to the
 configured project board or workflow. Resolve it and its exact Backlog state
 before creating a story. If the dream calls for new Backlog stories, check

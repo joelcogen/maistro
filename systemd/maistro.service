@@ -1,5 +1,5 @@
 [Unit]
-Description=Maistro AppFlowy coordinator and project workers
+Description=Maistro story coordinator and coding workers
 After=network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=300

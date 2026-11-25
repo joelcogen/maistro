@@ -124,6 +124,14 @@ impl Snapshot {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultiteBlocker {
+    pub project_id: String,
+    pub story_id: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Coordination {
@@ -136,6 +144,9 @@ pub struct Coordination {
     /// Fresh board observations. A daily dream phase requires a complete empty queue.
     #[serde(default)]
     pub observations: Vec<crate::status::BoardRead>,
+    /// Requests for Rust to record a pre-dispatch requirements blocker.
+    #[serde(default)]
+    pub vaultite_blockers: Vec<VaultiteBlocker>,
 }
 impl Coordination {
     pub fn validate(&self, projects: &[String], snapshot: &Snapshot) -> Result<()> {
@@ -166,6 +177,18 @@ impl Coordination {
                     && !a.context.trim().is_empty()
                     && a.context.len() <= 500_000,
                 "invalid or incomplete assignment"
+            );
+        }
+        for blocker in &self.vaultite_blockers {
+            ensure!(
+                projects.contains(&blocker.project_id)
+                    && !snapshot.busy(&blocker.project_id)
+                    && !retrying.contains(&blocker.project_id)
+                    && assigned.insert(&blocker.project_id)
+                    && identifier(&blocker.story_id)
+                    && !blocker.reason.trim().is_empty()
+                    && blocker.reason.len() <= 4_000,
+                "invalid or conflicting Vaultite blocker"
             );
         }
         for s in &self.cancel {
@@ -201,6 +224,9 @@ pub fn coordination_schema() -> Value {
         }))},
         "cancel":{"type":"array","items":object(json!({"project_id":{"type":"string"},"story_id":{"type":"string"}}))},
         "acknowledged":strings(), "notes":strings(), "retry_projects":strings(),
+        "vaultite_blockers":{"type":"array","items":object(json!({
+            "project_id":{"type":"string"}, "story_id":{"type":"string"}, "reason":{"type":"string"}
+        }))},
         "observations":{"type":"array","items":object(json!({
             "project_id":{"type":"string"},
             "counted_assignment":{"anyOf":[object(json!({

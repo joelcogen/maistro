@@ -72,7 +72,7 @@ install -m644 systemd/maistro.service "$HOME/.config/systemd/user/maistro.servic
 printf 'Installed. Edit %s using config.example.toml as the reference.\n' "$config_file"
 printf '%s\n' \
     'Existing configuration was preserved; legacy pipeline settings require migration.' \
-    'Use your normal Codex login and AppFlowy MCP. Install gh for PR creation.' \
+    'Set up your agent login and the MCP connection for each source. Install gh for PR creation.' \
     'Workers with a named remote use the saved GitHub token for Git and gh.' \
     'Validate: maistro --config ~/.config/maistro/config.toml validate' \
     'Reload service definition: systemctl --user daemon-reload' \

@@ -2,7 +2,7 @@
 use crate::{
     agent::{Invocation, source_tools},
     config::{Config, Project},
-    github, process,
+    github, process, vaultite,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Map, Value, json};
@@ -51,15 +51,18 @@ pub(crate) fn poll_config(config: &Config, project: &Project) -> Result<toml::Va
             object.get("url").and_then(Value::as_str).is_some(),
             "Claude HTTP MCP requires url"
         ),
-        _ => anyhow::bail!(
-            "AppFlowy polling supports only stdio or streamable HTTP Claude MCP servers"
-        ),
+        _ => anyhow::bail!("polling supports only stdio or streamable HTTP Claude MCP servers"),
     }
     object.remove("type");
     if let Some(headers) = object.remove("headers") {
         object.insert("http_headers".into(), headers);
     }
-    toml::Value::try_from(value).context("invalid Claude MCP transport configuration")
+    let connection =
+        toml::Value::try_from(value).context("invalid Claude MCP transport configuration")?;
+    if project.is_vaultite() {
+        vaultite::validate_connection(&connection)?;
+    }
+    Ok(connection)
 }
 
 fn expand_env(value: &mut Value) -> Result<()> {
@@ -216,10 +219,13 @@ pub(crate) async fn invoke(
         connections = servers(config)?;
         connections.remove(&config.agents.mcp_server);
         connections.remove("shortcut");
+        connections.remove("vaultite");
         for p in &config.projects {
             connections.remove(p.mcp_server(&config.agents));
         }
-        if let Invocation::Dream(project) = invocation {
+        if let Invocation::Dream(project) = invocation
+            && !project.is_vaultite()
+        {
             connections.insert(
                 project.mcp_server(&config.agents).into(),
                 server(config, project)?,
@@ -235,7 +241,7 @@ pub(crate) async fn invoke(
             "dontAsk",
         ]);
         let mut allowed = vec![];
-        for p in coordinator_projects {
+        for p in coordinator_projects.iter().filter(|p| !p.is_vaultite()) {
             let name = p.mcp_server(&config.agents);
             connections.insert(name.into(), server(config, p)?);
             let (reads, writes) = source_tools(p);
@@ -246,7 +252,9 @@ pub(crate) async fn invoke(
                     .map(|tool| format!("mcp__{name}__{tool}")),
             );
         }
-        cmd.arg("--allowedTools").arg(allowed.join(","));
+        if !allowed.is_empty() {
+            cmd.arg("--allowedTools").arg(allowed.join(","));
+        }
     }
     // Credentials in MCP entries must never appear in process arguments.
     let mcp_path = temporary.path().join("mcp.json");

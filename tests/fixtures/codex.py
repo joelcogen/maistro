@@ -113,9 +113,12 @@ if coordinator:
     projects = json.loads(prompt.split('\nPROJECTS=', 1)[1].split('\nSNAPSHOT=', 1)[0])
     configured = {arg.split('=', 1)[0].split('.', 1)[1] for arg in args
                   if arg.startswith('mcp_servers.') and '={' in arg}
-    assert (set(connections) if claude else configured) == {p['mcp_server'] for p in projects}
+    assert (set(connections) if claude else configured) == {p['mcp_server'] for p in projects if p['source'] != 'Vaultite'}
     for project in projects:
         source = project['source']
+        if source == 'Vaultite':
+            assert 'vaultite_base_snapshot' in project
+            continue
         setting = (args[args.index('--allowedTools') + 1] if claude else
                    next(arg for arg in args if arg.startswith(f"mcp_servers.{project['mcp_server']}={{")))
         if claude:
@@ -142,8 +145,10 @@ if coordinator:
     with (ROOT / 'board.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         board = json.loads((ROOT / 'board.json').read_text())
-        result = dict(assignments=[], cancel=[], acknowledged=[], notes=[], observations=[], retry_projects=[])
+        result = dict(assignments=[], cancel=[], acknowledged=[], notes=[], observations=[], retry_projects=[], vaultite_blockers=[])
         for project in projects:
+            if project['source'] == 'Vaultite':
+                continue
             counts = dict(ready=0, in_progress=0, blocked=0, review=0, backlog=0, done=0)
             key = board[project['id']]['status'].lower().replace(' ', '_')
             if key in counts:
@@ -170,6 +175,21 @@ if coordinator:
         busy = {a['project_id'] for a in snapshot['active']}
         busy.update(c['story']['project_id'] for c in snapshot['pending'])
         for project in projects:
+            if project['source'] == 'Vaultite':
+                statuses = project['statuses']
+                stories = project['vaultite_base_snapshot']['stories']
+                story = next((s for s in stories if s['status'] == statuses['in_progress']), None)
+                if story is None:
+                    story = next((s for s in stories if s['status'] == statuses['ready']), None)
+                if story is not None:
+                    if (ROOT / 'vaultite-requirements-blocker').exists():
+                        result['vaultite_blockers'].append(dict(project_id=project['id'], story_id=story['id'],
+                                                              reason='Please specify the CSV delimiter.'))
+                    else:
+                        result['assignments'].append(dict(project_id=project['id'], story_id=story['id'],
+                            title=story['title'], story_url=None, context=story['context'], pr=None,
+                            recovery=story['status'] == statuses['in_progress']))
+                continue
             story = board[project['id']]
             if project['id'] in busy or story['status'] not in ('Ready', 'In Progress') or (ROOT / 'archived').exists() or (ROOT / ('hold-story-' + project['id'])).exists():
                 continue
@@ -203,7 +223,7 @@ else:
         assert '--ignore-user-config' not in args
         assert args[args.index('--sandbox') + 1] == 'danger-full-access'
         user_config = (ROOT / 'codex-home/config.toml').read_text()
-        for server in ('appflowy', 'shortcut', 'shortcut_team'):
+        for server in ('appflowy', 'shortcut', 'shortcut_team', 'vaultite'):
             assert (f'mcp_servers.{server}.enabled=false' in args) == (server != dream_source and f'[mcp_servers.{server}]' in user_config)
         if dream:
             prefix = f'mcp_servers.{dream_source}'

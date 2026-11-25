@@ -1,9 +1,9 @@
 # Maistro
 
-Maistro turns AppFlowy and Shortcut stories into tested, committed code. A
-coordinator picks stories and records results on the board or workflow. A Codex
-or Claude Code worker implements, tests, and delivers each change.
-Projects run in parallel, with one active story per project.
+Maistro turns stories into tested, committed code using Codex or Claude Code.
+Each project takes stories from AppFlowy, Shortcut, or Vaultite. A coordinator
+selects work and records results at the source. Projects run in parallel, with
+one active story per project.
 
 See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
 
@@ -77,41 +77,11 @@ configuration while preserving an existing `config.toml`. Edit
 `~/.config/maistro/config.toml` using [config.example.toml](config.example.toml),
 then start the service as described below.
 
-Each project needs a stable ID, a dedicated local Git checkout, exactly one
-`appflowy_page`, `appflowy_url`, `shortcut_workflow`, `shortcut_workflow_id`, or
-`shortcut_url`, a `mode`, and a `base_branch`.
+Each project needs a stable ID, a dedicated local Git checkout, one
+[story source](#story-sources), a `mode`, and a `base_branch`.
 Each repository and its linked worktrees must belong to a single project. Maistro
 locks each repository for the daemon's lifetime. Reserve these checkouts for
 Maistro and preserve interrupted work when restarting.
-
-For a new AppFlowy board, copy the [create-board prompt](prompts/create-board.md)
-into a chat with an AppFlowy-connected model. Give it the parent page when asked.
-Use the new board's URL or unique name in your project configuration. The prompt
-creates the seven default statuses, including `In Progress`.
-
-Use `projects.mcp_server` to select a named source connection. The default is
-`shortcut` for Shortcut and `agents.mcp_server` (normally `appflowy`) for AppFlowy.
-Configure the entry in `agents.codex_home/config.toml` for Codex or in the
-top-level `mcpServers` object for Claude Code. You can mix sources in one daemon.
-Use a separate server name for each source type and one project per board or
-workflow.
-
-### AppFlowy MCP connection
-
-Use AppFlowy MCP's default compact profile (`APPFLOWY_TOOL_PROFILE=compact`).
-Polling needs `appflowy_fetch`, `appflowy_database`, and `appflowy_rows`.
-The coordinator also needs `appflowy_update` to post results.
-
-Use stdio or streamable HTTP. For HTTP polling, configure authentication in the
-MCP entry because the poller connects directly.
-
-| Provider | Stdio keys | HTTP keys |
-| --- | --- | --- |
-| Codex | `command`, `args`, `cwd`, `env` | `url`, `http_headers`, `env_http_headers`, `bearer_token_env_var` |
-| Claude Code | `command`, `args`, `env` | `"type": "http"`, `url`, `headers` |
-
-Codex stdio inherits the process environment. Maistro expands `${VAR}` and
-`${VAR:-default}` in Claude MCP settings.
 
 ### GitHub token
 
@@ -250,76 +220,46 @@ See the [Claude CLI reference](https://code.claude.com/docs/en/cli-reference),
 [structured output guide](https://code.claude.com/docs/en/headless), and
 [MCP configuration guide](https://code.claude.com/docs/en/mcp).
 
-## Start, stop and logs
+## Story sources
 
-```sh
-maistro --config ~/.config/maistro/config.toml validate
-systemctl --user daemon-reload
-systemctl --user start maistro
-systemctl --user stop maistro
-systemctl --user restart maistro
-systemctl --user status maistro
-journalctl --user -u maistro -f
-```
+Choose exactly one selector per project. You can mix sources in one daemon.
 
-Use `systemctl --user enable maistro` to start with the user service manager.
-Configure user lingering for operation after logout. `validate` checks local
-configuration, repository identities, configured remotes or local base branches,
-the selected CLI login and enabled projects' MCP configuration. It checks the
-private GitHub token file when an enabled project uses a named remote. For
-AppFlowy it also checks compact tool availability without reading boards.
-Remote authentication, board access and push permissions are checked during
-operation.
+| Source | Project selector | Default MCP entry |
+| --- | --- | --- |
+| [AppFlowy](#appflowy-projects) | `appflowy_page` or `appflowy_url` | `agents.mcp_server` (normally `appflowy`) |
+| [Shortcut](#shortcut-projects) | `shortcut_workflow`, `shortcut_workflow_id`, or `shortcut_url` | `shortcut` |
+| [Vaultite](#vaultite-projects) | `vaultite_base` | `vaultite` |
 
-The service runs as your user with `~/.local/bin` and `~/.cargo/bin` in PATH. It
-optionally reads `~/.config/maistro/environment` in systemd environment-file syntax.
-Configure a user service environment/drop-in for tools installed elsewhere or SSH
-agent access; interactive shell startup files apply only to your shell. Maistro
-reads the GitHub token file directly.
+Set `projects.mcp_server` to use another named entry. Configure the entry in
+`agents.codex_home/config.toml` for Codex or in the top-level `mcpServers` object
+of `agents.claude_mcp_config` for Claude Code. Use separate entries for different
+source types and dedicate each board or workflow to one project.
 
-For foreground diagnostics:
+### AppFlowy projects
 
-```sh
-maistro --config ~/.config/maistro/config.toml run
-```
+Use the board URL as `appflowy_url` or its unique name as `appflowy_page`. To
+create a board with Maistro's default states, paste the [AppFlowy board
+prompt](prompts/create-board-appflowy.md) into a chat with AppFlowy tools and
+supply the parent page when asked.
 
-SIGINT/SIGTERM stops the coordinator and worker process groups. Use systemd for
-unattended operation: `KillMode=control-group` also cleans up descendants after a
-daemon crash. After SIGKILL of a foreground daemon, check and stop surviving
-child processes before restarting.
+#### AppFlowy MCP connection
 
-Private event/stderr logs live in `~/.local/state/maistro/logs` by default and may
-contain story, code and tool content. Use them for diagnostics and clean up old
-logs as needed. `runtime_dir` holds logs, OS locks, dream checkpoints and transient invocation files;
-it must be outside managed repositories. Normal completion deletes result/schema
-files. Crash leftovers can be removed while the service is stopped. Recovery uses
-the story source and Git repository.
+Use AppFlowy MCP's default compact profile (`APPFLOWY_TOOL_PROFILE=compact`).
+Polling needs `appflowy_fetch`, `appflowy_database`, and `appflowy_rows`.
+The coordinator also needs `appflowy_update` to post results.
 
-## Dashboard
+Use stdio or streamable HTTP. For HTTP polling, configure authentication in the
+MCP entry because the poller connects directly.
 
-Enable the server in `~/.config/maistro/config.toml`, then restart Maistro:
+| Provider | Stdio keys | HTTP keys |
+| --- | --- | --- |
+| Codex | `command`, `args`, `cwd`, `env` | `url`, `http_headers`, `env_http_headers`, `bearer_token_env_var` |
+| Claude Code | `command`, `args`, `env` | `"type": "http"`, `url`, `headers` |
 
-```toml
-[status]
-enabled = true
-port = 8044
-```
+Codex stdio inherits the process environment. Maistro expands `${VAR}` and
+`${VAR:-default}` in Claude MCP settings.
 
-Open `http://127.0.0.1:8044/`. The server binds only to **127.0.0.1**. It starts
-disabled and defaults to port 8044. A bind failure stops startup with the address
-and OS error. Port binding happens at startup; `validate` checks configuration.
-
-Workers show **Dreaming** while they run a dream phase. Use **Dream now** on an
-enabled project's card to request a phase without waiting for the schedule. Maistro
-checks the board and reports whether the phase started or why it was rejected.
-**Dream now** also works when the dashboard is served through a private reverse proxy.
-The usual [dream conditions](HOW_IT_WORKS.md#daily-dream-phases) still apply.
-
-The dashboard uses a dark blue palette. Cargo embeds the precompiled CSS and
-MIT license from `src/vendor/tabler-1.7.5` in the Maistro executable.
-[Tabler 1.7.5 package](https://www.npmjs.com/package/@tabler/core/v/1.7.5)
-
-## Shortcut projects
+### Shortcut projects
 
 Select one workflow with `shortcut_workflow` (exact, case-sensitive name),
 `shortcut_workflow_id` (positive integer), or an existing `shortcut_url` workflow
@@ -327,7 +267,7 @@ link. Set exactly one selector; combining selectors is rejected even if they ref
 to the same workflow. Names must be unique in the configured MCP connection's
 workspace; use an ID when names are ambiguous. Numeric-looking names remain names.
 
-### Read-only API polling (recommended)
+#### Read-only API polling (recommended)
 
 Create a **v4 API token** in Shortcut's
 [Settings → API tokens](https://app.shortcut.com/settings/account/api-tokens).
@@ -393,7 +333,78 @@ Maistro's `agents.codex_home`; for Claude, use a user-scoped entry. Maistro uses
 the server's configured name and the CLI's login. Complete authorization before
 starting the service; remote access is checked during operation.
 
-Optional states can be explicitly disabled with TOML booleans:
+### Vaultite projects
+
+Enable Vaultite database views and set up the local `vau` command. Verify
+that `vau query` sees the intended vault from the same account that runs
+Maistro. If the local server needs an explicit address, set `VAULTITE_URL` in the
+MCP entry's environment or Maistro's user-service environment. Vaultite must be
+running while Maistro polls.
+
+For Codex, add this entry to `agents.codex_home/config.toml`.
+
+```toml
+[mcp_servers.vaultite]
+command = "vau"
+args = ["mcp"]
+```
+
+For Claude Code, add this entry to the `mcpServers` object in
+`agents.claude_mcp_config`.
+
+```json
+{
+  "mcpServers": {
+    "vaultite": { "type": "stdio", "command": "vau", "args": ["mcp"] }
+  }
+}
+```
+
+Use an absolute path to the `vau` executable if it is outside the service's PATH.
+Set `vaultite_base` to a vault-relative `.base` path, such as
+`"Projects/Service/Stories.base"`. Create a same-named story folder alongside
+the Base, `Projects/Service/Stories` in this example, and filter the story views
+with `file.inFolder("Projects/Service/Stories")`. Use the [Vaultite Base setup prompt](prompts/create-base-vaultite.md)
+to create a Base with the default workflow. The board view groups notes by
+`note.status`. Its `groupOrder` keeps empty lanes visible. Match custom status
+labels with `[projects.statuses]`.
+
+#### Vaultite story template
+
+From the Base's Backlog lane, create a note and use **Insert template** to add the
+story outline. The **Story template** view links to the shared template. Give the
+note a descriptive filename and move it to Ready when it is authorized for work.
+Vaultite assigns typed notes an `id`. Keep that ID when moving or renaming a story.
+
+A story is a regular `type: note` with a `status` property and a Markdown body:
+
+```markdown
+---
+type: note
+kind: note
+status: Backlog
+---
+
+## Description
+
+Quote cells containing commas or double quotes.
+
+## Acceptance criteria
+
+The exported CSV opens in a spreadsheet with the correct cell values.
+
+## Comments
+```
+
+Maistro uses `story_order` when present to preserve the Base's story order and
+appends dated results and blockers under Comments. Use a story's ID to reference
+a dependency in the same Base.
+
+### Status labels
+
+The default labels are Backlog, Ready, In Progress, Review, Done, Blocked, and
+Cancelled. Map custom labels with their exact spelling in `[projects.statuses]`.
+You can disable optional states with TOML booleans.
 
 ```toml
 [projects.statuses]
@@ -405,8 +416,76 @@ Omitted entries retain their default labels. Only Review and Cancelled can be
 disabled; enabled labels must remain distinct and nonempty. Review can only be
 disabled in master mode. A story requesting PR delivery while Review is disabled
 is marked Blocked with an explanation, including during recovery. Shortcut
-archiving still cancels active work regardless of the Cancelled setting. These
-optional settings also apply to AppFlowy.
+and Vaultite archiving still revoke active work when Cancelled is disabled.
+
+## Start, stop and logs
+
+```sh
+maistro --config ~/.config/maistro/config.toml validate
+systemctl --user daemon-reload
+systemctl --user start maistro
+systemctl --user stop maistro
+systemctl --user restart maistro
+systemctl --user status maistro
+journalctl --user -u maistro -f
+```
+
+Use `systemctl --user enable maistro` to start with the user service manager.
+Configure user lingering for operation after logout. `validate` checks local
+configuration, repository identities, configured remotes or local base branches,
+the selected CLI login and enabled projects' MCP configuration. It checks the
+private GitHub token file when an enabled project uses a named remote. It also
+checks the required AppFlowy and Vaultite tools without reading boards.
+Remote authentication, board access and push permissions are checked during
+operation.
+
+The service runs as your user with `~/.local/bin` and `~/.cargo/bin` in PATH. It
+optionally reads `~/.config/maistro/environment` in systemd environment-file syntax.
+Configure a user service environment/drop-in for tools installed elsewhere or SSH
+agent access; interactive shell startup files apply only to your shell. Maistro
+reads the GitHub token file directly.
+
+For foreground diagnostics:
+
+```sh
+maistro --config ~/.config/maistro/config.toml run
+```
+
+SIGINT/SIGTERM stops the coordinator and worker process groups. Use systemd for
+unattended operation: `KillMode=control-group` also cleans up descendants after a
+daemon crash. After SIGKILL of a foreground daemon, check and stop surviving
+child processes before restarting.
+
+Private event/stderr logs live in `~/.local/state/maistro/logs` by default and may
+contain story, code and tool content. Use them for diagnostics and clean up old
+logs as needed. `runtime_dir` holds logs, OS locks, dream checkpoints and transient invocation files;
+it must be outside managed repositories. Normal completion deletes result/schema
+files. Crash leftovers can be removed while the service is stopped. Recovery uses
+the story source and Git repository.
+
+## Dashboard
+
+Enable the server in `~/.config/maistro/config.toml`, then restart Maistro:
+
+```toml
+[status]
+enabled = true
+port = 8044
+```
+
+Open `http://127.0.0.1:8044/`. The server binds only to **127.0.0.1**. It starts
+disabled and defaults to port 8044. A bind failure stops startup with the address
+and OS error. Port binding happens at startup; `validate` checks configuration.
+
+Workers show **Dreaming** while they run a dream phase. Use **Dream now** on an
+enabled project's card to request a phase without waiting for the schedule. Maistro
+checks the board and reports whether the phase started or why it was rejected.
+**Dream now** also works when the dashboard is served through a private reverse proxy.
+The usual [dream conditions](HOW_IT_WORKS.md#daily-dream-phases) still apply.
+
+The dashboard uses a dark blue palette. Cargo embeds the precompiled CSS and
+MIT license from `src/vendor/tabler-1.7.5` in the Maistro executable.
+[Tabler 1.7.5 package](https://www.npmjs.com/package/@tabler/core/v/1.7.5)
 
 ## Migrating the previous version
 
@@ -416,10 +495,10 @@ Rust `test_commands`, GitHub/CI settings and path/sandbox policies. Put testing
 requirements in each repository's `maistro-worker.md`. Set `mode` and `base_branch`
 explicitly; unknown legacy settings produce a migration error.
 
-Reconcile old AppFlowy statuses and preserve unfinished worktrees/branches before
+Reconcile old story statuses and preserve unfinished worktrees and branches before
 starting. Point the project at the checkout containing unfinished work, or bring
 that work into its dedicated checkout. Existing PRs in Review remain yours to
-handle. Manage stories and boards in AppFlowy, configuration in a text editor,
+handle. Manage stories in their configured source, configuration in a text editor,
 and the service through systemd. Rerun the installer to save a fine-grained GitHub
 token in the private file used by workers.
 

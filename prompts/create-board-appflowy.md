@@ -41,8 +41,9 @@ available). Explain that Maistro's project configuration must target this new
 board, not its parent page: use its URL as `appflowy_url`, or its uniquely
 resolvable name as `appflowy_page`, but not both.
 
-Explain how to start: add stories with their complete requirements and
-acceptance criteria, keep drafts in Backlog, and move a story to Ready when it
-is authorized for implementation. Maistro moves successful PR-mode stories to
+Explain how to start. Use the primary text field for a short story title, the
+story body for the description and acceptance criteria, and comments for
+discussion. Keep drafts in Backlog and move a story to Ready when it is
+authorized for implementation. Maistro moves successful PR-mode stories to
 Review and master-mode stories to Done. Do not start Maistro or authorize work
 as part of creating this board.

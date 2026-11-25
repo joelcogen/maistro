@@ -13,3 +13,4 @@ mod poll;
 mod schedule;
 
 mod shortcut;
+mod vaultite;

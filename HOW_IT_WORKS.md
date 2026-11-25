@@ -10,9 +10,9 @@ branch `feature/new-export`.” PR projects can request custom branches too.
 Custom names must be valid Git branch names distinct from `base_branch`.
 
 PR mode defaults to the stable branch `maistro/<project>/<story-id>`. Both modes
-use `AppFlowy story: <story-id>` or `Shortcut story: <numeric-id>` commit/PR
-markers to recover interrupted work. The repository, remote and PR target come
-from project configuration.
+use a `<source> story: <story-id>` marker in commits and PRs to recover
+interrupted work. The source is AppFlowy, Shortcut, or Vaultite. The repository,
+remote and PR target come from project configuration.
 
 PR overrides need a named remote, `gh` and a token that can create PRs. A PR
 override on a local-only project moves the story to Blocked with an explanation.
@@ -72,12 +72,11 @@ network with noninteractive permissions and full filesystem access.
 
 ## Coordinator and worker access
 
-The coordinator loads the source connections named by projects in its pass and
-allows their listed read, status, and comment tools. It writes AppFlowy results
-with `appflowy_rows(command=update_cells)` and
-`appflowy_update(command=append_comment)`, and Shortcut results with
-`update_story` and `create_story_comment`. Prompts specify which commands are
-allowed within those tools and set the scope of the work.
+Each source uses the configured MCP connection. The coordinator uses scoped
+AppFlowy or Shortcut tools for status and comment writes. For Vaultite, Rust
+supplies a Kanban snapshot for story selection and uses the local MCP connection
+to apply and verify updates. Rust keeps the Vaultite connection and its file
+tools outside agent invocations.
 
 ## Status page and counts
 
@@ -220,11 +219,10 @@ and case. For example, if your board uses `In progress`, set
   confirms the source update or observes a user status change. Other projects
   continue. Failed coordination retries after the polling interval.
 
-For AppFlowy, Rust polls enabled boards over each project's MCP connection.
-`orchestrator.poll_interval_seconds` (default 30) sets the delay between completed
-poll attempts per project. After initial observation and coordination, an unchanged
-idle board waits for a change before calling the coordinator again. Changes to any
-story, including Done or Backlog stories and Maistro's own writes, wake coordination.
+Rust polls AppFlowy and Vaultite over MCP and can poll Shortcut through its
+read-only API. `orchestrator.poll_interval_seconds` (default 30) sets the delay
+between completed poll attempts per project. After the first observation, an
+unchanged idle board waits for a change before another coordination pass.
 
 One global coordinator pass combines pending projects while polling and workers
 continue. It acknowledges the observed generation at its start; changes during
@@ -236,10 +234,11 @@ The coordinator reads fresh data, checks active-story statuses, authorizes work,
 writes results and decides cancellation. Cancellation usually takes up to one
 polling interval plus a complete board read and coordinator decision. Busy passes,
 large boards, inconsistent reads, failures and timeouts can extend that delay.
-Pollers run independently across projects. Cancellation detection pauses during an
-AppFlowy outage. A push underway may finish before cancellation is observed.
+Pollers run independently across projects. Cancellation detection pauses while a
+story source is unavailable. A push underway may finish before cancellation is
+observed.
 
-### Polling contract and consistency
+### AppFlowy polling and consistency
 
 Boards resolve by unique view name/ID (`appflowy_page`) or view ID in an AppFlowy
 URL. Use a URL or ID for ambiguous names. Each project keeps a SHA-256 fingerprint,
@@ -289,8 +288,26 @@ defer acceptance until a stable read. Rejections preserve the last valid
 fingerprint and dirty state. Retries wait the configured interval. Polls are
 bounded by `coordinator_timeout_seconds`, with a 60-second limit per MCP read.
 
+### Vaultite polling and consistency
+
+Maistro reads the exact `.base` path through local `vau mcp` and queries its
+same-named folder for story notes. Changes to status or to the body of a Ready
+or In Progress note wake the project. Maistro validates note IDs and complete
+query and file pages. The first In Progress story is the recovery candidate.
+The Base's `story_order`, then path, breaks ties among equally eligible Ready stories.
+Rust handles empty queues,
+active status checks, and completed results without a model call for that project.
+
+Before applying a proposed claim or blocker, Rust rechecks the Base snapshot.
+Result delivery re-reads the note's status and respects human status changes
+or archiving. A guarded edit updates the note's `status` and appends the result
+under `## Comments` together. Rust reads back the note and uses a completion
+marker to deduplicate retries. See the [Vaultite story template](README.md#vaultite-story-template).
+
+### Recovery across sources
+
 Restart clears assignments and pending results from memory. Recovery reconstructs
 work from the source and repository, including crashes between remote operations
 and source updates. Human edits can race with reads and status writes. Use a
-single daemon per board, even across separate clones. Agents verify claims and
-remote outcomes; Rust validates response shape and concurrency.
+single daemon per board, even across separate clones. Maistro verifies claims and
+source updates before dispatching work or releasing a pending result.

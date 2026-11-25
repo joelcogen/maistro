@@ -84,6 +84,7 @@ impl Fixture {
                 shortcut_workflow_id: None,
                 shortcut_workspace: None,
                 shortcut_token_file: None,
+                vaultite_base: None,
                 mcp_server: None,
                 mode: *mode,
                 base_branch: "main".into(),
@@ -145,6 +146,30 @@ impl Fixture {
         )
         .unwrap();
     }
+    fn vaultite(&mut self, index: usize, story: &str) {
+        let project = &mut self.config.projects[index];
+        project.appflowy_page = None;
+        let folder = format!("vault/{}", project.id);
+        let path = format!("{folder}.base");
+        project.vaultite_base = Some(path.clone());
+        let story_folder = self.temp.path().join(&folder);
+        fs::create_dir_all(&story_folder).unwrap();
+        fs::write(
+            self.temp.path().join(path),
+            format!("filters:\n  and:\n    - 'file.inFolder(\"{folder}\")'\nviews:\n  - type: kanban\n    name: Board\n    groupBy: {{property: note.status, direction: ASC}}\n"),
+        ).unwrap();
+        fs::write(story_folder.join("Fix CSV export.md"), story).unwrap();
+        let command = self.temp.path().join("vau");
+        fs::write(&command, include_str!("fixtures/vau.py")).unwrap();
+        fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = self.config.agents.codex_home.join("config.toml");
+        let mut config = fs::read_to_string(&path).unwrap();
+        config.push_str(&format!(
+            "\n[mcp_servers.vaultite]\ncommand='{}'\nargs=['mcp']\n",
+            command.display()
+        ));
+        fs::write(path, config).unwrap();
+    }
     fn claude(&mut self) {
         self.config.agents.provider = maistro::config::Provider::Claude;
         let executable = self.temp.path().join("fake-claude");
@@ -159,6 +184,10 @@ impl Fixture {
             if project.is_shortcut() {
                 connections["mcpServers"][project.mcp_server(&self.config.agents)] =
                     json!({"type":"http", "url":"https://mcp.shortcut.invalid/mcp"});
+            }
+            if project.is_vaultite() {
+                connections["mcpServers"][project.mcp_server(&self.config.agents)] =
+                    json!({"type":"stdio", "command":self.temp.path().join("vau"), "args":["mcp"]});
             }
         }
         fs::write(
@@ -2342,4 +2371,153 @@ async fn unresolved_appflowy_board_is_excluded_from_coordination() {
         f.events().len(),
         "No model call for unresolved boards"
     );
+}
+
+const VAULTITE_STORY: &str = "---\ntype: note\nid: maistro-8f2c\nstatus: Ready\n---\n\n## Description\n\nQuote commas.\n\n## Acceptance criteria\n\nThe export opens in a spreadsheet.\n\n## Comments\n\n- Jo · Include an empty-cell case too.\n";
+
+#[tokio::test]
+async fn vaultite_story_delivery_and_lost_reply_are_verified_with_both_providers() {
+    for (use_claude, mode, expected_status) in
+        [(false, Mode::Master, "Done"), (true, Mode::Pr, "Review")]
+    {
+        let mut f = Fixture::new(&[mode, Mode::Master]);
+        f.vaultite(0, VAULTITE_STORY);
+        if use_claude {
+            f.claude();
+        } else {
+            f.local(0);
+        }
+        f.enable_status();
+        f.touch("vaultite-lose-completion-reply");
+        let engine = Engine::new(f.config.clone());
+        engine.validate_source_tools().await.unwrap();
+        let (stop, job) = f.start();
+
+        let note = f.temp.path().join("vault/p0/Fix CSV export.md");
+        let base = f.temp.path().join("vault/p0.base");
+        let base_text = fs::read_to_string(&base).unwrap();
+        let lost = f.temp.path().join("vaultite-completion-reply-lost");
+        assert!(
+            f.wait(|| lost.exists() && f.board()["p1"]["status"] == "Done")
+                .await
+        );
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while f.status_snapshot().await["projects"][0]["story"].is_object() {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+            }
+        })
+        .await
+        .unwrap();
+        f.stop(stop, job).await;
+
+        let actual = fs::read_to_string(&note).unwrap();
+        assert!(actual.contains(&format!("status: \"{expected_status}\"")));
+        assert!(actual.contains("Quote commas."));
+        assert!(actual.contains("Include an empty-cell case too."));
+        assert!(
+            actual
+                .split_once("## Comments")
+                .unwrap()
+                .1
+                .contains("python assertion passed")
+        );
+        assert_eq!(actual.matches("maistro-completion:").count(), 1);
+        assert_eq!(actual.matches("id: maistro-8f2c").count(), 1);
+        assert_eq!(fs::read_to_string(base).unwrap(), base_text);
+        let worker = f
+            .events()
+            .into_iter()
+            .filter(|event| event["kind"] == "worker_start" && event["project"] == "p0")
+            .collect::<Vec<_>>();
+        assert_eq!(worker.len(), 1);
+        assert_eq!(
+            worker[0]["git"]["story_marker"],
+            "Vaultite story: maistro-8f2c"
+        );
+        let prompt = fs::read_to_string(f.temp.path().join("p0-worker-prompt.txt")).unwrap();
+        assert!(prompt.contains("Quote commas."));
+        assert!(prompt.contains("The export opens in a spreadsheet."));
+        assert!(prompt.contains("Include an empty-cell case too."));
+    }
+}
+
+#[tokio::test]
+async fn vaultite_retries_a_claim_conflict_and_archiving_cancels_the_worker() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    // A long story forces a paged read and a guarded edit of the complete note.
+    let source = format!(
+        "{VAULTITE_STORY}\n{}",
+        "Additional QA notes.\n".repeat(5_000)
+    );
+    f.vaultite(0, &source);
+    f.touch("vaultite-edit-race");
+    f.touch("hang");
+    let (stop, job) = f.start();
+
+    let worker = || {
+        f.events()
+            .iter()
+            .any(|event| event["kind"] == "worker_start")
+    };
+    assert!(f.wait(worker).await, "events: {:?}", f.events());
+    let worker_prompt = fs::read_to_string(f.temp.path().join("p0-worker-prompt.txt")).unwrap();
+    assert!(worker_prompt.contains("Quote commas and preserve empty cells."));
+    let path = f.temp.path().join("vault/p0/Fix CSV export.md");
+    let active = fs::read_to_string(&path).unwrap();
+    assert!(active.contains("status: \"In Progress\""));
+    fs::write(
+        &path,
+        active.replacen("status:", "archived: true\nstatus:", 1),
+    )
+    .unwrap();
+    assert!(
+        f.wait(|| f
+            .events()
+            .iter()
+            .any(|e| e["kind"] == "stopped" && e["model"] == "gpt-6-astra"))
+            .await
+    );
+    f.stop(stop, job).await;
+    let actual = fs::read_to_string(path).unwrap();
+    assert!(actual.contains("archived: true"));
+    assert!(!actual.contains("maistro-completion:"));
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "worker_start")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn vaultite_records_requirements_blockers_before_starting_a_worker() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    let source = format!(
+        "{}\n\n## Source\n\nSource material.\n",
+        VAULTITE_STORY.trim_end()
+    );
+    f.vaultite(0, &source);
+    f.touch("vaultite-requirements-blocker");
+    let (stop, job) = f.start();
+    let path = f.temp.path().join("vault/p0/Fix CSV export.md");
+    assert!(
+        f.wait(|| fs::read_to_string(&path)
+            .unwrap()
+            .contains("Please specify the CSV delimiter."))
+            .await
+    );
+    f.stop(stop, job).await;
+    let actual = fs::read_to_string(path).unwrap();
+    let (story, after) = actual.split_once("## Source").unwrap();
+    assert!(story.contains("status: \"Blocked\""));
+    assert!(
+        story
+            .split_once("## Comments")
+            .unwrap()
+            .1
+            .contains("Please specify the CSV delimiter.")
+    );
+    assert_eq!(after, "\n\nSource material.\n");
+    assert!(!f.events().iter().any(|e| e["kind"] == "worker_start"));
 }

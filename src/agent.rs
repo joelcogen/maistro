@@ -2,8 +2,10 @@ use crate::{
     config::{Config, Mode, Project, Provider},
     dream::{self, Dream, DreamReport},
     github,
-    model::{self, Assignment, Coordination, Outcome, Report, Snapshot},
+    model::{self, Assignment, Completion, Coordination, Outcome, Report, Snapshot},
     process,
+    status::{BoardRead, ReadState, Reason},
+    vaultite,
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
@@ -57,6 +59,10 @@ impl AgentRunner {
             })?
             .clone();
         let table = server.as_table_mut().context("invalid MCP configuration")?;
+        if project.is_vaultite() {
+            vaultite::validate_connection(&server)?;
+            return Ok(server);
+        }
         let (reads, writes) = source_tools(project);
         table.insert(
             "enabled_tools".into(),
@@ -209,6 +215,7 @@ impl AgentRunner {
             let mut servers = std::collections::BTreeSet::from([
                 self.config.agents.mcp_server.as_str(),
                 "shortcut",
+                "vaultite",
             ]);
             servers.extend(
                 self.config
@@ -216,7 +223,9 @@ impl AgentRunner {
                     .iter()
                     .map(|p| p.mcp_server(&self.config.agents)),
             );
-            if let Invocation::Dream(project) = invocation {
+            if let Invocation::Dream(project) = invocation
+                && !project.is_vaultite()
+            {
                 let name = project.mcp_server(&self.config.agents);
                 servers.remove(name);
                 // Inherit transport and authentication from the user config.
@@ -271,7 +280,7 @@ impl AgentRunner {
             // Legacy Shortcut access is a superset of API-backed detail access.
             let mut connection_projects = coordinator_projects.to_vec();
             connection_projects.sort_by_key(|p| p.shortcut_api());
-            for project in connection_projects {
+            for project in connection_projects.into_iter().filter(|p| !p.is_vaultite()) {
                 let server = project.mcp_server(&self.config.agents);
                 if servers.insert(server) {
                     cmd.args([
@@ -330,11 +339,72 @@ impl AgentRunner {
             .collect();
         let mut project_context = Vec::new();
         let mut healthy = Vec::new();
-        let mut failed = Coordination::default();
+        let mut native = Coordination::default();
+        let mut vaultite_bases = Vec::new();
+        let timeout = Duration::from_secs(self.config.orchestrator.coordinator_timeout_seconds);
         for p in projects {
             let mut value = serde_json::to_value(p).expect("serializable project");
             value["mcp_server"] = json!(p.mcp_server(&self.config.agents));
             value["source"] = json!(p.source_name());
+            if p.is_vaultite() {
+                let config = self.mcp_config(p)?;
+                let active = snapshot
+                    .active
+                    .iter()
+                    .find(|story| story.project_id == p.id);
+                let pending = snapshot
+                    .pending
+                    .iter()
+                    .find(|completion| completion.story.project_id == p.id);
+                let board = match vaultite::snapshot(&config, p, timeout, cancel).await {
+                    Ok(board) => board,
+                    Err(error) => {
+                        source_read_failed(&mut native, p, &error);
+                        continue;
+                    }
+                };
+                if let Some(story) = active {
+                    if !board.in_progress(p, &story.story_id) {
+                        native.cancel.push(story.clone());
+                    }
+                    native
+                        .observations
+                        .push(board.observation(p, Reason::Occupied, None));
+                    continue;
+                }
+                if let Some(completion) = pending {
+                    let target = completion_target(p, completion)?;
+                    let reason =
+                        match vaultite::deliver(&config, p, completion, target, timeout, cancel)
+                            .await
+                        {
+                            Ok(()) => {
+                                native.acknowledged.push(completion.id.clone());
+                                Reason::Occupied
+                            }
+                            Err(error) => {
+                                source_retry(&mut native, p, "result delivery", &error);
+                                Reason::UpdateFailed
+                            }
+                        };
+                    native.observations.push(board.observation(p, reason, None));
+                    continue;
+                }
+                if !board.has_work(p) {
+                    native
+                        .observations
+                        .push(board.observation(p, Reason::NoEligibleWork, None));
+                    continue;
+                }
+                match board.coordinator_view(p) {
+                    Ok(snapshot) => value["vaultite_base_snapshot"] = snapshot,
+                    Err(error) => {
+                        source_read_failed(&mut native, p, &error);
+                        continue;
+                    }
+                }
+                vaultite_bases.push((p, config, board));
+            }
             if p.shortcut_api() {
                 match crate::shortcut::board(
                     p,
@@ -345,21 +415,12 @@ impl AgentRunner {
                 {
                     Ok(board) => value["shortcut_api_board"] = board,
                     Err(error) => {
-                        tracing::warn!(project=%p.id, error=%format!("{error:#}"), "Shortcut API board read failed");
-                        failed.retry_projects.push(p.id.clone());
-                        failed.notes.push(format!("{}: Shortcut API board read incomplete; retrying without source writes", p.id));
-                        failed.observations.push(crate::status::BoardRead {
-                            project_id: p.id.clone(),
-                            counts: None,
-                            read: crate::status::ReadState::Failed,
-                            reason: crate::status::Reason::ReadFailed,
-                            counted_assignment: None,
-                        });
+                        source_read_failed(&mut native, p, &error);
                         continue;
                     }
                 }
             }
-            if !p.is_shortcut() {
+            if p.is_appflowy() {
                 let config = self.mcp_config(p)?;
                 match crate::poll::board_context(
                     &config,
@@ -371,19 +432,7 @@ impl AgentRunner {
                 {
                     Ok(board) => value["appflowy_board"] = board,
                     Err(error) => {
-                        tracing::warn!(project=%p.id, error=%format!("{error:#}"), "AppFlowy board resolution failed");
-                        failed.retry_projects.push(p.id.clone());
-                        failed.notes.push(format!(
-                            "{}: AppFlowy board resolution failed; retrying without source writes",
-                            p.id
-                        ));
-                        failed.observations.push(crate::status::BoardRead {
-                            project_id: p.id.clone(),
-                            counts: None,
-                            read: crate::status::ReadState::Failed,
-                            reason: crate::status::Reason::ReadFailed,
-                            counted_assignment: None,
-                        });
+                        source_read_failed(&mut native, p, &error);
                         continue;
                     }
                 }
@@ -393,7 +442,7 @@ impl AgentRunner {
         }
         let projects = healthy;
         if projects.is_empty() {
-            return Ok(failed);
+            return Ok(native);
         }
         // Failed API projects cannot be written, cancelled, assigned, or acknowledged
         // by a coordinator handling other healthy projects.
@@ -421,17 +470,8 @@ impl AgentRunner {
                     .iter()
                     .find(|p| p.id == completion.story.project_id)
                     .context("pending completion has no selected project")?;
-                let target = match (completion.report.outcome, completion.mode) {
-                    (Outcome::Blocked, _) => &project.statuses.blocked,
-                    (Outcome::Completed, Mode::Master) => &project.statuses.done,
-                    (Outcome::Completed, Mode::Pr) => project
-                        .statuses
-                        .review
-                        .as_ref()
-                        .context("PR completion requires an enabled review status")?,
-                };
                 let mut value = serde_json::to_value(completion)?;
-                value["target_status"] = json!(target);
+                value["target_status"] = json!(completion_target(project, completion)?);
                 Ok(value)
             })
             .collect::<Result<_>>()?;
@@ -464,9 +504,22 @@ impl AgentRunner {
             &projects.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
             &snapshot,
         )?;
-        result.retry_projects.extend(failed.retry_projects);
-        result.notes.extend(failed.notes);
-        result.observations.extend(failed.observations);
+        ensure!(
+            result.vaultite_blockers.iter().all(|blocker| {
+                vaultite_bases
+                    .iter()
+                    .any(|(p, _, _)| p.id == blocker.project_id)
+            }),
+            "Vaultite blocker refers to a different source"
+        );
+        for (project, config, board) in vaultite_bases {
+            finish_vaultite_decision(&mut result, project, &config, board, timeout, cancel).await;
+        }
+        result.retry_projects.extend(native.retry_projects);
+        result.notes.extend(native.notes);
+        result.observations.extend(native.observations);
+        result.acknowledged.extend(native.acknowledged);
+        result.cancel.extend(native.cancel);
         Ok(result)
     }
 
@@ -621,7 +674,130 @@ fn repository_prompt(project: &Project, filename: &str) -> Result<String> {
     }
 }
 
-pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<String> {
+fn completion_target<'a>(project: &'a Project, completion: &Completion) -> Result<&'a str> {
+    match (completion.report.outcome, completion.mode) {
+        (Outcome::Blocked, _) => Ok(&project.statuses.blocked),
+        (Outcome::Completed, Mode::Master) => Ok(&project.statuses.done),
+        (Outcome::Completed, Mode::Pr) => project
+            .statuses
+            .review
+            .as_deref()
+            .context("PR completion requires an enabled review status"),
+    }
+}
+
+fn source_retry(
+    result: &mut Coordination,
+    project: &Project,
+    operation: &str,
+    error: &anyhow::Error,
+) {
+    tracing::warn!(project=%project.id, source=project.source_name(), operation, error=%format!("{error:#}"), "story source operation failed");
+    result.retry_projects.push(project.id.clone());
+    result.notes.push(format!(
+        "{}: {} {operation} failed; retrying",
+        project.id,
+        project.source_name()
+    ));
+}
+
+fn source_read_failed(result: &mut Coordination, project: &Project, error: &anyhow::Error) {
+    source_retry(result, project, "board read", error);
+    result.observations.push(BoardRead {
+        project_id: project.id.clone(),
+        counts: None,
+        read: ReadState::Failed,
+        reason: Reason::ReadFailed,
+        counted_assignment: None,
+    });
+}
+
+async fn finish_vaultite_decision(
+    result: &mut Coordination,
+    project: &Project,
+    config: &toml::Value,
+    board: vaultite::Base,
+    timeout: Duration,
+    cancel: &CancellationToken,
+) {
+    let reported_reason = result
+        .observations
+        .iter()
+        .find(|read| read.project_id == project.id)
+        .map_or(Reason::NoEligibleWork, |read| read.reason);
+    result
+        .observations
+        .retain(|read| read.project_id != project.id);
+    let mut assignment = result
+        .assignments
+        .iter()
+        .position(|a| a.project_id == project.id)
+        .map(|index| result.assignments.remove(index));
+    let blocker = result
+        .vaultite_blockers
+        .iter()
+        .find(|blocker| blocker.project_id == project.id);
+    let mut reason = if result.retry_projects.contains(&project.id) {
+        reported_reason
+    } else {
+        Reason::Dependencies
+    };
+    if let Some(blocker) = blocker {
+        match vaultite::decide(
+            config,
+            project,
+            &board,
+            &blocker.story_id,
+            Some(&blocker.reason),
+            timeout,
+            cancel,
+        )
+        .await
+        {
+            Ok(()) => reason = Reason::RequirementsBlocked,
+            Err(error) => {
+                source_retry(result, project, "blocker update", &error);
+                reason = Reason::UpdateFailed;
+            }
+        }
+    } else if let Some(mut selected) = assignment.take() {
+        let outcome = async {
+            board.prepare_assignment(project, &mut selected)?;
+            let invalid_delivery = story_branch(project, &selected)
+                .err()
+                .map(|err| err.to_string());
+            vaultite::decide(
+                config,
+                project,
+                &board,
+                &selected.story_id,
+                invalid_delivery.as_deref(),
+                timeout,
+                cancel,
+            )
+            .await?;
+            Ok::<_, anyhow::Error>(invalid_delivery.is_none())
+        }
+        .await;
+        match outcome {
+            Ok(true) => {
+                reason = Reason::WorkSelected;
+                assignment = Some(selected);
+            }
+            Ok(false) => reason = Reason::RequirementsBlocked,
+            Err(error) => {
+                source_retry(result, project, "story claim", &error);
+                reason = Reason::ClaimFailed;
+            }
+        }
+    }
+    result
+        .observations
+        .push(board.observation(project, reason, assignment.as_ref()));
+    result.assignments.extend(assignment);
+}
+
+fn story_branch(project: &Project, assignment: &Assignment) -> Result<Option<String>> {
     let mode = assignment.effective_mode(project.mode);
     ensure!(
         mode != Mode::Pr || project.remote.is_some(),
@@ -631,7 +807,7 @@ pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<Strin
         mode != Mode::Pr || project.statuses.review.is_some(),
         "PR delivery is unavailable because review is disabled; enable review or request direct delivery"
     );
-    let branch = if mode == Mode::Pr {
+    if mode == Mode::Pr {
         let branch = assignment
             .pr
             .as_ref()
@@ -647,10 +823,15 @@ pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<Strin
             .output()
             .context("validate PR story branch")?;
         ensure!(valid.status.success(), "invalid PR story branch name");
-        Some(branch)
+        Ok(Some(branch))
     } else {
-        None
-    };
+        Ok(None)
+    }
+}
+
+pub fn worker_prompt(project: &Project, assignment: &Assignment) -> Result<String> {
+    let mode = assignment.effective_mode(project.mode);
+    let branch = story_branch(project, assignment)?;
     let custom = repository_prompt(project, "maistro-worker.md")?;
     let git = json!({
         "mode":mode, "base_branch":project.base_branch, "remote":git_remote(project),
