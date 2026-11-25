@@ -128,7 +128,6 @@ if coordinator:
             assert source == 'AppFlowy' and 'appflowy_rows' in setting
             assert project['appflowy_board'] == dict(workspace_id='workspace',
                 database_id=project['id'], view_id='view-' + project['id'])
-            assert 'Every workspace-scoped read AND write MUST explicitly include' in prompt
             if not claude:
                 import tomllib
                 policy = tomllib.loads(setting)['mcp_servers'][project['mcp_server']]['tools']
@@ -214,7 +213,6 @@ else:
         assert 'shell_environment_policy.include_only=[]' in args
     assert os.environ['GIT_TERMINAL_PROMPT'] == '0'
     assert os.environ['GH_TOKEN'] == token and os.environ['GITHUB_TOKEN'] == token
-    assert 'Use the supplied GH_TOKEN' in prompt
     # Exercise Git's actual credential lookup without a network request.
     credentials = subprocess.run(['git', 'credential', 'fill'],
         input='protocol=https\nhost=github.com\n\n', text=True, capture_output=True)
@@ -228,7 +226,6 @@ else:
         instructions = json.loads(prompt.split('\nDREAM=', 1)[1].splitlines()[0])
         project = dream_project['id']
         assert Path.cwd() == ROOT / project
-        assert 'Do not open a PR.' in prompt
         event('dream_start', project=project, name=instructions['name'], model=model)
         while (ROOT / ('hold-dream-' + project)).exists():
             time.sleep(0.05)

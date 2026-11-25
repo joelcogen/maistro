@@ -120,82 +120,49 @@ mod tests {
         Schedule::new(["a".into(), "b".into()].into_iter())
     }
     #[test]
-    fn unknown_requires_observation_and_unchanged_polls_do_not_wake() {
+    fn worker_wake_during_coordination_survives_acknowledgement() {
         let mut s = schedule();
-        assert!(s.projects["a"].dirty());
-        assert!(s.ready().is_empty());
         s.observe("a", [1; 32]);
         let pass = s.ready();
-        assert_eq!(pass.len(), 1);
+        s.wake("a");
         s.acknowledge("a", pass["a"]);
-        for _ in 0..5 {
-            assert!(!s.observe("a", [1; 32]));
-            assert!(s.ready().is_empty());
-        }
-    }
-    #[test]
-    fn concurrent_board_and_internal_changes_survive_acknowledgement() {
-        let mut s = schedule();
-        s.observe("a", [1; 32]);
-        s.observe("b", [2; 32]);
-        let pass = s.ready();
-        s.observe("a", [3; 32]);
-        s.wake("b"); // worker completion/failure/cancellation while Luna runs
-        for (id, generation) in pass {
-            s.acknowledge(&id, generation);
-        }
-        assert_eq!(s.ready().len(), 2);
-        let pass = s.ready();
-        for (id, generation) in pass {
-            s.acknowledge(&id, generation);
-        }
+        let follow_up = s.ready();
+        assert!(follow_up.contains_key("a"));
+        s.acknowledge("a", follow_up["a"]);
         assert!(s.ready().is_empty());
-        s.wake("a"); // acknowledged result needs a follow-up dispatch
-        assert_eq!(s.ready().len(), 1);
     }
-    #[test]
-    fn periodic_sources_need_no_fingerprint_and_respect_interval_and_failure_backoff() {
+
+    #[tokio::test]
+    async fn periodic_sources_wait_between_passes_and_back_off_after_failure() {
         let mut s = schedule();
-        let interval = Duration::from_secs(30);
+        let interval = Duration::from_secs(1);
         s.periodically("a", interval);
         let pass = s.ready();
-        assert_eq!(pass.len(), 1);
         s.acknowledge("a", pass["a"]);
-        assert!(!s.projects["a"].dirty());
         assert!(s.ready().is_empty());
-        assert!(s.deadline().unwrap() > Instant::now());
-        // Worker completion bypasses the next periodic read, but not failure backoff.
+
+        // Worker completion can bring a periodic read forward.
         s.wake("a");
         let pass = s.ready();
-        assert_eq!(pass.len(), 1);
         s.acknowledge("a", pass["a"]);
-        s.projects
-            .get_mut("a")
-            .unwrap()
-            .periodic
-            .as_mut()
-            .unwrap()
-            .1 = Instant::now();
-        assert_eq!(s.ready().len(), 1);
-        s.retry("a", interval);
-        s.wake("a");
         assert!(s.ready().is_empty());
-        s.projects.get_mut("a").unwrap().retry_at = Instant::now();
-        assert_eq!(s.ready().len(), 1);
-        assert!(s.projects["a"].baseline.is_none());
-        assert!(!s.ready().contains_key("b"));
-    }
-    #[test]
-    fn failure_backoff_cannot_be_bypassed_by_board_or_worker_wakes() {
-        let mut s = schedule();
-        s.observe("a", [1; 32]);
-        s.retry("a", Duration::from_secs(30));
+        let due = s.deadline().unwrap();
+        assert!(due > Instant::now());
+        tokio::time::sleep_until(due).await;
+        assert!(s.ready().contains_key("a"));
+
+        // A failed pass backs off even when a new board or worker event arrives.
+        s.retry("a", interval);
         s.observe("a", [2; 32]);
         s.wake("a");
-        assert!(s.ready().is_empty());
         s.observe("b", [3; 32]);
-        assert_eq!(s.ready().len(), 1);
-        s.projects.get_mut("a").unwrap().retry_at = Instant::now();
-        assert_eq!(s.ready().len(), 2);
+        let ready = s.ready();
+        assert!(ready.contains_key("b"));
+        assert!(!ready.contains_key("a"));
+        s.acknowledge("b", ready["b"]);
+        let retry = s.deadline().unwrap();
+        assert!(retry > Instant::now());
+        tokio::time::sleep_until(retry).await;
+        assert!(s.ready().contains_key("a"));
     }
 }

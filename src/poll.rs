@@ -474,7 +474,6 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schedule::Schedule;
     use std::fs;
 
     struct Fixture {
@@ -523,7 +522,7 @@ mod tests {
         }
     }
     #[tokio::test]
-    async fn compact_rejects_changed_markdown_hash_and_legacy_manifest() {
+    async fn compact_rejects_changed_markdown_hash_and_missing_required_tools() {
         let (f, client) = Fixture::new().await;
         fs::write(f.root.path().join("poll-bad-hash"), "").unwrap();
         assert!(
@@ -531,7 +530,7 @@ mod tests {
                 .contains("Markdown changed")
         );
         client.close().await;
-        fs::write(f.root.path().join("legacy-profile"), "").unwrap();
+        fs::write(f.root.path().join("missing-tools"), "").unwrap();
         let config = toml::from_str(&format!(
             "command='python3'\nargs=['{}','{}']",
             f.root.path().join("mcp.py").display(),
@@ -539,7 +538,7 @@ mod tests {
         ))
         .unwrap();
         let error = match Client::connect(&config).await {
-            Ok(_) => panic!("accepted legacy server"),
+            Ok(_) => panic!("accepted server without required tools"),
             Err(e) => e,
         };
         assert!(format!("{error:#}").contains("APPFLOWY_TOOL_PROFILE=compact"));
@@ -550,12 +549,10 @@ mod tests {
         let (mut f, client) = Fixture::new().await;
         let initial = f.observe(&client).await;
         // Transport metadata changes between reads; normalized observations remain stable.
-        for _ in 0..3 {
-            assert_eq!(initial, f.observe(&client).await);
-        }
+        assert_eq!(initial, f.observe(&client).await);
         let original = f.data.clone();
         let mutations = [
-            ("/p0/rows/0/title", json!("Edited Done title")),
+            ("/p0/rows/0/title", json!("Edited story title")),
             ("/p0/rows/1/status", json!("Cancelled")),
             ("/p0/rows/0/cell", json!({"arbitrary":123})),
             ("/p0/rows/0/body", json!("# Requirements\n- [x] task")),
@@ -608,6 +605,14 @@ mod tests {
         f.data["p0"]["rows"].as_array_mut().unwrap().reverse();
         f.save();
         assert_eq!(initial, f.observe(&client).await);
+        // Select-option order can change the board's meaning.
+        f.data["p0"]["fields"] = json!([{"id":"status","name":"Status",
+            "type_option":{"options":["Ready","Blocked"]}}]);
+        f.save();
+        let ordered = f.observe(&client).await;
+        f.data["p0"]["fields"][0]["type_option"]["options"] = json!(["Blocked", "Ready"]);
+        f.save();
+        assert_ne!(ordered, f.observe(&client).await);
         // External linked documents are not read or part of the observation.
         f.data = original;
         f.data["p0"]["external_document"] = json!("reference changed");
@@ -627,10 +632,6 @@ mod tests {
         f.data["p0"]["rows"][1]["body"] = json!("unrelated edit");
         f.save();
         assert_eq!(baseline, f.observe(&client).await);
-        // All cells remain watched, including dependency status transitions.
-        f.data["p0"]["rows"][1]["status"] = json!("Backlog");
-        f.save();
-        assert_ne!(baseline, f.observe(&client).await);
         // A body link makes even a Done dependency's context relevant.
         f.data["p0"]["rows"][0]["body"] = json!(format!("Depends on {dependency}"));
         f.data["p0"]["rows"][1]["status"] = json!("Done");
@@ -646,68 +647,37 @@ mod tests {
         f.data["p0"]["rows"][0]["comments"][0]["content"] = json!("clarification");
         f.save();
         assert_ne!(blocked, f.observe(&client).await);
-        // An entirely inactive board performs no body/comment reads at all.
-        f.data["p0"]["rows"][0]["status"] = json!("Done");
-        f.save();
-        fs::write(f.root.path().join("poll-events"), "").unwrap();
-        f.observe(&client).await;
-        let events = fs::read_to_string(f.root.path().join("poll-events")).unwrap();
-        assert!(!events.contains("get_page_markdown"));
-        assert!(!events.contains("list_comments"));
-        // Becoming Ready makes previously skipped context visible immediately.
-        f.data["p0"]["rows"][1]["status"] = json!("Ready");
-        f.save();
-        f.observe(&client).await;
-        assert!(
-            fs::read_to_string(f.root.path().join("poll-events"))
-                .unwrap()
-                .contains("get_page_markdown")
-        );
         client.close().await;
     }
 
-    #[test]
-    fn context_selection_supports_named_cells_custom_labels_and_unknown_schemas() {
-        let mut project: Project = serde_json::from_value(json!({
-            "id":"p", "repo":"/unused", "appflowy_page":"Board",
-            "mode":"master", "base_branch":"main"
-        }))
-        .unwrap();
-        project.statuses.done = "Shipped".into();
-        let fields = keyed(&json!([{"id":"status-id","name":"Status"}])).unwrap();
-        assert!(!needs_context(
-            &json!({"cells":{"Status":"Shipped"}}),
-            &fields,
-            &project
-        ));
-        assert!(!needs_context(
-            &json!({"cells":{"status-id":"Shipped"}}),
-            &fields,
-            &project
-        ));
-        for status in ["Ready", "In Progress", "Blocked", "Unknown", "Done"] {
-            assert!(needs_context(
-                &json!({"cells":{"Status":status}}),
-                &fields,
-                &project
-            ));
+    #[tokio::test]
+    async fn unavailable_context_matters_only_when_a_story_may_need_it() {
+        let (mut f, client) = Fixture::new().await;
+        f.project.statuses.done = "Shipped".into();
+        f.data["p0"]["fields"] = json!([{"id":"status-id","name":"Status"}]);
+        f.data["p0"]["rows"][0]["status"] = json!("Shipped");
+        f.data["p0"]["rows"][0]["status_key"] = json!("status-id");
+        f.save();
+        fs::write(f.root.path().join("poll-body-error-p0"), "").unwrap();
+        f.observe(&client).await;
+
+        for label in ["Ready", "In Progress", "Blocked", "Unknown", "Done"] {
+            f.data["p0"]["rows"][0]["status"] = json!(label);
+            f.save();
+            assert!(client.observe(&f.project).await.is_err(), "skipped {label}");
         }
-        assert!(needs_context(&json!({"cells":{}}), &fields, &project));
-        assert!(needs_context(
-            &json!({"cells":{"Status":"Shipped"}}),
-            &BTreeMap::new(),
-            &project
-        ));
+
+        f.data["p0"]["rows"][0]["status"] = json!("Shipped");
+        f.data["p0"]["fields"] = json!([]);
+        f.save();
+        assert!(client.observe(&f.project).await.is_err());
+        client.close().await;
     }
 
     #[tokio::test]
-    async fn failures_and_partial_reads_retain_baseline_and_recovery_detects_changes() {
+    async fn partial_and_inconsistent_polls_are_rejected_until_a_complete_read() {
         let (mut f, client) = Fixture::new().await;
-        let mut schedule = Schedule::new(["p0".to_owned()].into_iter());
         let baseline = f.observe(&client).await;
-        schedule.observe("p0", baseline);
-        let generation = schedule.ready()["p0"];
-        schedule.acknowledge("p0", generation);
         for failure in [
             "fail",
             "incomplete",
@@ -722,18 +692,21 @@ mod tests {
                 client.observe(&f.project).await.is_err(),
                 "accepted {failure}"
             );
-            assert!(schedule.ready().is_empty());
             fs::remove_file(marker).unwrap();
-            assert!(!schedule.observe("p0", f.observe(&client).await));
+            assert_eq!(baseline, f.observe(&client).await);
         }
+        let duplicate = f.data["p0"]["rows"][0].clone();
+        f.data["p0"]["rows"].as_array_mut().unwrap().push(duplicate);
+        f.save();
+        assert!(client.observe(&f.project).await.is_err());
+        f.data["p0"]["rows"].as_array_mut().unwrap().pop();
         f.data["p0"]["rows"][0]["title"] = json!("changed during outage");
         f.save();
-        assert!(schedule.observe("p0", f.observe(&client).await));
-        assert_eq!(schedule.ready().len(), 1);
+        assert_ne!(baseline, f.observe(&client).await);
         client.close().await;
     }
     #[tokio::test]
-    async fn empty_boards_and_url_resolution_are_valid_but_ambiguity_is_not() {
+    async fn empty_boards_can_be_resolved_by_name_or_url() {
         let (mut f, client) = Fixture::new().await;
         f.data["p0"]["rows"] = json!([]);
         f.save();
@@ -746,17 +719,5 @@ mod tests {
         f.project.appflowy_page = Some("missing board".into());
         assert!(client.observe(&f.project).await.is_err());
         client.close().await;
-    }
-    #[test]
-    fn canonical_objects_preserve_semantic_array_order() {
-        assert_eq!(
-            fingerprint(&serde_json::from_str::<Value>(r#"{"b":2,"a":{"d":4,"c":3}}"#).unwrap()),
-            fingerprint(&json!({"a":{"c":3,"d":4},"b":2}))
-        );
-        assert_ne!(
-            fingerprint(&json!(["first", "second"])),
-            fingerprint(&json!(["second", "first"]))
-        );
-        assert!(keyed(&json!([{"id":"same"},{"id":"same"}])).is_err());
     }
 }

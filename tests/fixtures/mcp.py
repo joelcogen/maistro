@@ -12,12 +12,6 @@ ROOT = Path(sys.argv[1])
 sequence = 0
 
 
-def event(name, **fields):
-    with (ROOT / 'poll-events').open('a') as out:
-        fcntl.flock(out, fcntl.LOCK_EX)
-        out.write(json.dumps(dict(tool=name, **fields)) + '\n')
-
-
 def call(name, args):
     global sequence
     sequence += 1
@@ -27,7 +21,6 @@ def call(name, args):
     project = args.get('database_id', args.get('view_id', ''))
     if project.startswith('view-'):
         project = project[5:]
-    event(name, project=project)
     if (ROOT / ('poll-fail-' + project)).exists():
         raise RuntimeError('simulated read failure')
     if (ROOT / ('poll-slow-' + project)).exists():
@@ -50,7 +43,10 @@ def call(name, args):
     if name == 'get_database_row_details':
         if (ROOT / ('poll-incomplete-' + project)).exists():
             return []
-        return [dict(id=s['id'], cells=dict(title=sequence if (ROOT / ('poll-churn-' + project)).exists() else s.get('title', 'Story'), status=s.get('status', 'Backlog'), extra=s.get('cell')),
+        return [dict(id=s['id'], cells={
+                     'title': sequence if (ROOT / ('poll-churn-' + project)).exists() else s.get('title', 'Story'),
+                     s.get('status_key', 'status'): s.get('status', 'Backlog'),
+                     'extra': s.get('cell')},
                      has_doc='body' in s, doc=None)
                 for s in reversed(story.get('rows', [story])) if s['id'] in args['row_ids'].split(',')]
     for p, s in board.items():
@@ -80,6 +76,8 @@ def call(name, args):
 def compact(name, arguments):
     assert set(arguments) == {'request'}
     r = arguments['request']
+    if name != 'appflowy_fetch' or r.get('kind') != 'workspaces':
+        assert r['workspace_id'] == 'workspace'
     args = dict(r)
     if name == 'appflowy_fetch':
         kind = r.get('kind', 'page')
@@ -132,7 +130,7 @@ for line in sys.stdin:
             result = dict(protocolVersion=request['params']['protocolVersion'], capabilities={'tools': {}},
                           serverInfo=dict(name='fixture-appflowy', version='1'))
         elif method == 'tools/list':
-            result = {'tools': []} if (ROOT / 'legacy-profile').exists() else {'tools': [dict(name=n, inputSchema={'type': 'object'}) for n in ['appflowy_fetch', 'appflowy_database', 'appflowy_rows', 'appflowy_update']]}
+            result = {'tools': []} if (ROOT / 'missing-tools').exists() else {'tools': [dict(name=n, inputSchema={'type': 'object'}) for n in ['appflowy_fetch', 'appflowy_database', 'appflowy_rows', 'appflowy_update']]}
         elif method == 'tools/call':
             args = request['params']
             data = compact(args['name'], args.get('arguments', {}))

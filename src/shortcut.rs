@@ -735,18 +735,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fingerprints_wake_only_for_changes_including_comments_dependencies_and_membership() {
+    async fn fingerprints_track_comments_checklists_dependencies_and_membership() {
         let f = Fixture::new().await;
         f.board();
         let p = f.project();
-        let mut schedule = crate::schedule::Schedule::new(["p".into()].into_iter());
         let baseline = f.client.observe(&p).await.unwrap();
-        schedule.observe("p", baseline);
-        let generation = schedule.ready()["p"];
-        schedule.acknowledge("p", generation);
         assert_eq!(baseline, f.client.observe(&p).await.unwrap());
-        assert!(!schedule.observe("p", baseline));
-        assert!(schedule.ready().is_empty());
         f.set(
             "stories/7/comments",
             page(vec![
@@ -756,14 +750,14 @@ mod tests {
         );
         let comments = f.client.observe(&p).await.unwrap();
         assert_ne!(baseline, comments);
-        assert!(schedule.observe("p", comments));
         f.set(
             "stories/7/checklist-items",
             page(vec![
                 json!({"id":10,"description":"New acceptance criterion","completed":false}),
             ]),
         );
-        assert_ne!(comments, f.client.observe(&p).await.unwrap());
+        let checklist = f.client.observe(&p).await.unwrap();
+        assert_ne!(comments, checklist);
         f.set(
             "stories/7/story-links",
             page(vec![
@@ -775,16 +769,19 @@ mod tests {
             json!({"entity":{"id":99,"workflow_state":{"id":20},"updated_at":"one"}}),
         );
         let blocked = f.client.observe(&p).await.unwrap();
+        assert_ne!(checklist, blocked);
         f.set(
             "stories/99",
             json!({"entity":{"id":99,"workflow_state":{"id":21},"updated_at":"two"}}),
         );
-        assert_ne!(blocked, f.client.observe(&p).await.unwrap());
+        let unblocked = f.client.observe(&p).await.unwrap();
+        assert_ne!(blocked, unblocked);
         // Moving/archiving/removing a story removes it from the scoped list.
         f.set("workflow-states/2/stories", page(vec![]));
-        assert_ne!(baseline, f.client.observe(&p).await.unwrap());
+        let empty = f.client.observe(&p).await.unwrap();
+        assert_ne!(unblocked, empty);
         f.set("workflow-states/3/stories", page(vec![story(3)]));
-        assert_ne!(baseline, f.client.observe(&p).await.unwrap());
+        assert_ne!(empty, f.client.observe(&p).await.unwrap());
     }
     #[tokio::test]
     async fn board_reads_all_states_and_rejects_cross_state_races_or_failed_pages() {

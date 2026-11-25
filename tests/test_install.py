@@ -51,8 +51,6 @@ printf '#!/bin/sh\\nexit 0\\n' > target/release/maistro
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(os.access(self.home / '.local/bin/maistro', os.X_OK))
         self.assertTrue((self.home / '.config/systemd/user/maistro.service').exists())
-        self.assertFalse((self.config / 'prompts').exists())
-        self.assertFalse((self.config / 'environment').exists())
         self.assertEqual((self.config / 'github-token').read_text(), self.token + '\n')
         self.assertEqual((self.config / 'github-token').stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o700)

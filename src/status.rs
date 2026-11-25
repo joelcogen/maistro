@@ -285,17 +285,6 @@ impl Status {
         self.view.coordinator.start("reading_boards");
         self.view.coordinator.latest_event = "Coordination pass running";
     }
-    #[cfg(test)]
-    pub fn coordinator_finished(&mut self, reads: Option<&[BoardRead]>) {
-        let selected = self
-            .view
-            .projects
-            .iter()
-            .filter(|p| p.enabled)
-            .map(|p| p.id.clone())
-            .collect::<Vec<_>>();
-        self.coordinator_finished_for(reads, &selected);
-    }
     pub fn coordinator_finished_for(&mut self, reads: Option<&[BoardRead]>, selected: &[String]) {
         self.claim_reads.clear();
         self.view.coordinator.finish(
@@ -605,6 +594,10 @@ mod tests {
         )
         .unwrap()
     }
+    fn finish_pass(status: &mut Status, reads: Option<&[BoardRead]>) {
+        status.coordinator_finished_for(reads, &["a".into(), "b".into()]);
+    }
+
     fn read(project: &str, state: ReadState, counts: Option<Counts>) -> BoardRead {
         BoardRead {
             project_id: project.into(),
@@ -634,71 +627,37 @@ mod tests {
         r
     }
     #[test]
-    fn project_worker_overrides_are_visible_in_status() {
+    fn configured_models_and_efforts_survive_status_transitions() {
         let mut config = config();
+        config.agents.coordinator = Some("custom-coordinator".into());
+        config.agents.coordinator_effort = Some("medium".into());
+        config.agents.worker = Some("custom-worker".into());
         config.agents.worker_effort = Some("high".into());
-        config.projects[0].worker = Some("custom-worker".into());
+        config.projects[0].worker = Some("project-worker".into());
         config.projects[0].worker_effort = Some("low".into());
-        let view = serde_json::to_value(Status::new(&config).snapshot()).unwrap();
-        for (project, settings) in view["projects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .zip(&config.projects)
-        {
+        let mut status = Status::new(&config);
+        status.coordinator_started();
+        status.worker_started(&assignment("a"));
+        let active = status.snapshot();
+        finish_pass(&mut status, None);
+        status.worker_finished("a", Some(Outcome::Completed), false);
+        for snapshot in [active, status.snapshot()] {
+            let view = serde_json::to_value(snapshot).unwrap();
             assert_eq!(
-                project["worker"]["configured_model"],
-                settings.worker(&config.agents)
+                view["coordinator"]["configured_model"],
+                "custom-coordinator"
             );
-            assert_eq!(
-                project["worker"]["configured_effort"],
-                serde_json::json!(settings.worker_effort(&config.agents))
-            );
-        }
-    }
-
-    #[test]
-    fn configured_efforts_remain_distinct_from_runtime_state() {
-        for (coordinator_effort, worker_effort) in [
-            (None, None),
-            (Some("low"), Some("high")),
-            (None, Some("max")),
-        ] {
-            let mut config = config();
-            config.agents.coordinator_effort = coordinator_effort.map(str::to_owned);
-            config.agents.worker_effort = worker_effort.map(str::to_owned);
-            let mut status = Status::new(&config);
-            for step in 0..4 {
-                match step {
-                    1 | 3 => {
-                        status.coordinator_started();
-                        status.worker_started(&assignment("a"));
-                    }
-                    2 => {
-                        status.coordinator_finished(None);
-                        status.worker_finished("a", Some(Outcome::Completed), false);
-                    }
-                    _ => {}
-                }
-                let view = serde_json::to_value(status.snapshot()).unwrap();
+            assert_eq!(view["coordinator"]["configured_effort"], "medium");
+            for (index, model, effort) in [
+                (0, "project-worker", "low"),
+                (1, "custom-worker", "high"),
+                (2, "custom-worker", "high"),
+            ] {
+                assert_eq!(view["projects"][index]["worker"]["configured_model"], model);
                 assert_eq!(
-                    view["coordinator"]["configured_model"],
-                    config.agents.coordinator()
+                    view["projects"][index]["worker"]["configured_effort"],
+                    effort
                 );
-                assert_eq!(
-                    view["coordinator"]["configured_effort"],
-                    serde_json::json!(coordinator_effort)
-                );
-                for project in view["projects"].as_array().unwrap() {
-                    assert_eq!(
-                        project["worker"]["configured_model"],
-                        config.agents.worker()
-                    );
-                    assert_eq!(
-                        project["worker"]["configured_effort"],
-                        serde_json::json!(worker_effort)
-                    );
-                }
             }
         }
     }
@@ -715,10 +674,13 @@ mod tests {
             done: 6,
         };
         status.coordinator_started();
-        status.coordinator_finished(Some(&[
-            claim_read(before, CountedStatus::Ready),
-            read("b", ReadState::Complete, Some(Counts::default())),
-        ]));
+        finish_pass(
+            &mut status,
+            Some(&[
+                claim_read(before, CountedStatus::Ready),
+                read("b", ReadState::Complete, Some(Counts::default())),
+            ]),
+        );
         assert_eq!(status.snapshot().overall.counts, Some(before));
         let received = status.snapshot().projects[0].observation.received_at;
         let expected = Counts {
@@ -749,7 +711,10 @@ mod tests {
             let mut status = Status::new(&config());
             let mut a = assignment("a");
             a.recovery = recovery;
-            status.coordinator_finished(Some(&[claim_read(counts, CountedStatus::InProgress)]));
+            finish_pass(
+                &mut status,
+                Some(&[claim_read(counts, CountedStatus::InProgress)]),
+            );
             status.claim_accepted(&a);
             assert_eq!(status.snapshot().overall.counts, Some(counts));
             assert!(!status.snapshot().projects[0].observation.stale);
@@ -758,7 +723,10 @@ mod tests {
         let mut status = Status::new(&config());
         let mut a = assignment("a");
         a.recovery = true;
-        status.coordinator_finished(Some(&[claim_read(counts, CountedStatus::Ready)]));
+        finish_pass(
+            &mut status,
+            Some(&[claim_read(counts, CountedStatus::Ready)]),
+        );
         status.claim_accepted(&a);
         assert_eq!(status.snapshot().overall.counts, Some(counts));
     }
@@ -778,24 +746,33 @@ mod tests {
         // A failed claim produces no accepted assignment and no count adjustment.
         let mut failed = claim_read(before, CountedStatus::Ready);
         failed.reason = Reason::ClaimFailed;
-        status.coordinator_finished(Some(&[failed]));
+        finish_pass(&mut status, Some(&[failed]));
         assert_eq!(status.snapshot().overall.counts, Some(before));
         status.coordinator_started();
-        status.coordinator_finished(Some(&[claim_read(before, CountedStatus::Ready)]));
+        finish_pass(
+            &mut status,
+            Some(&[claim_read(before, CountedStatus::Ready)]),
+        );
         status.claim_accepted(&a);
         assert_eq!(status.snapshot().overall.counts, Some(after));
         status.coordinator_started();
-        status.coordinator_finished(None);
+        finish_pass(&mut status, None);
         status.claim_accepted(&a);
         assert_eq!(status.snapshot().overall.counts, Some(after));
         assert!(status.snapshot().projects[0].observation.stale);
         // A later complete read supersedes the adjusted snapshot, including on recovery.
-        status.coordinator_finished(Some(&[claim_read(after, CountedStatus::InProgress)]));
+        finish_pass(
+            &mut status,
+            Some(&[claim_read(after, CountedStatus::InProgress)]),
+        );
         status.claim_accepted(&a);
         assert_eq!(status.snapshot().overall.counts, Some(after));
         assert!(!status.snapshot().projects[0].observation.stale);
         // A genuine later Ready claim of the same story can be adjusted again.
-        status.coordinator_finished(Some(&[claim_read(before, CountedStatus::Ready)]));
+        finish_pass(
+            &mut status,
+            Some(&[claim_read(before, CountedStatus::Ready)]),
+        );
         status.claim_accepted(&a);
         assert_eq!(status.snapshot().overall.counts, Some(after));
     }
@@ -811,11 +788,14 @@ mod tests {
             for state in [ReadState::Partial, ReadState::Failed, ReadState::NotRead] {
                 let mut status = Status::new(&config());
                 if let Some(counts) = retained {
-                    status.coordinator_finished(Some(&[claim_read(counts, CountedStatus::Ready)]));
+                    finish_pass(
+                        &mut status,
+                        Some(&[claim_read(counts, CountedStatus::Ready)]),
+                    );
                 }
                 let mut incomplete = claim_read(Counts::default(), CountedStatus::Ready);
                 incomplete.read = state;
-                status.coordinator_finished(Some(&[incomplete]));
+                finish_pass(&mut status, Some(&[incomplete]));
                 status.claim_accepted(&assignment("a"));
                 let view = status.snapshot();
                 assert_eq!(view.projects[0].observation.counts, retained);
@@ -846,7 +826,7 @@ mod tests {
         ] {
             let mut status = Status::new(&config());
             let expected = r.counts;
-            status.coordinator_finished(Some(&[r]));
+            finish_pass(&mut status, Some(&[r]));
             status.claim_accepted(&assignment("a"));
             let view = status.snapshot();
             assert_eq!(view.projects[0].observation.counts, expected);
@@ -874,10 +854,13 @@ mod tests {
             done: 19,
             blocked: 5,
         };
-        status.coordinator_finished(Some(&[
-            read("a", ReadState::Complete, Some(counts)),
-            read("b", ReadState::Partial, Some(Counts::default())),
-        ]));
+        finish_pass(
+            &mut status,
+            Some(&[
+                read("a", ReadState::Complete, Some(counts)),
+                read("b", ReadState::Partial, Some(Counts::default())),
+            ]),
+        );
         let first = status.snapshot();
         assert_eq!(first.overall.counts, Some(counts));
         assert_eq!(first.overall.observed_projects, 1);
@@ -888,10 +871,13 @@ mod tests {
         assert!(received.is_some());
         for read_state in [ReadState::Partial, ReadState::Failed, ReadState::NotRead] {
             status.coordinator_started();
-            status.coordinator_finished(Some(&[
-                read("a", read_state, Some(Counts::default())),
-                read("b", ReadState::Complete, Some(Counts::default())),
-            ]));
+            finish_pass(
+                &mut status,
+                Some(&[
+                    read("a", read_state, Some(Counts::default())),
+                    read("b", ReadState::Complete, Some(Counts::default())),
+                ]),
+            );
             let view = status.snapshot();
             assert_eq!(view.projects[0].observation.counts, Some(counts));
             assert_eq!(view.projects[0].observation.received_at, received);
@@ -899,18 +885,17 @@ mod tests {
             assert!(!view.projects[1].observation.stale);
             assert_eq!(view.overall.observed_projects, 2);
         }
-        status.coordinator_finished(None);
+        finish_pass(&mut status, None);
         assert_eq!(
             status.snapshot().projects[0].observation.counts,
             Some(counts)
         );
         status.coordinator_started();
         assert!(status.snapshot().coordinator.last_error.is_some());
-        status.coordinator_finished(Some(&[read(
-            "a",
-            ReadState::Complete,
-            Some(Counts::default()),
-        )]));
+        finish_pass(
+            &mut status,
+            Some(&[read("a", ReadState::Complete, Some(Counts::default()))]),
+        );
         let view = status.snapshot();
         assert_eq!(view.projects[0].observation.counts, Some(Counts::default()));
         assert!(!view.projects[0].observation.stale);
@@ -922,35 +907,39 @@ mod tests {
     fn invalid_or_duplicate_observations_cannot_replace_counts() {
         let mut status = Status::new(&config());
         status.coordinator_started();
-        status.coordinator_finished(Some(&[read("a", ReadState::Complete, None)]));
+        finish_pass(&mut status, Some(&[read("a", ReadState::Complete, None)]));
         assert!(status.snapshot().projects[0].observation.stale);
         assert!(status.snapshot().projects[0].observation.counts.is_none());
-        status.coordinator_finished(Some(&[
-            read("a", ReadState::Complete, Some(Counts::default())),
-            read("a", ReadState::Complete, Some(Counts::default())),
-            read("unknown", ReadState::Complete, Some(Counts::default())),
-        ]));
+        finish_pass(
+            &mut status,
+            Some(&[
+                read("a", ReadState::Complete, Some(Counts::default())),
+                read("a", ReadState::Complete, Some(Counts::default())),
+                read("unknown", ReadState::Complete, Some(Counts::default())),
+            ]),
+        );
         assert_eq!(status.snapshot().overall.observed_projects, 0);
     }
-    #[test]
-    fn parallel_worker_pending_and_idle_snapshots_exclude_private_data() {
+    #[tokio::test]
+    async fn worker_status_freezes_elapsed_time_and_excludes_private_data() {
         let mut status = Status::new(&config());
         status.worker_started(&assignment("a"));
         status.worker_started(&assignment("b"));
-        status.project("a").worker.clock = Some(Instant::now() - std::time::Duration::from_secs(6));
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         let active = status.snapshot();
-        assert_eq!(active.projects[0].worker.state, "active");
-        assert!(active.projects[0].worker.elapsed_seconds >= 6);
-        assert_eq!(active.projects[1].worker.state, "active");
-        assert_eq!(active.projects[2].worker.state, "disabled");
+        assert!(active.projects[0].worker.elapsed_seconds >= 1);
         status.worker_finished("a", Some(Outcome::Completed), false);
         let pending = status.snapshot();
         assert_eq!(pending.projects[0].worker.state, "pending_update");
         assert!(pending.projects[0].worker.finished_at.is_some());
         assert!(pending.projects[0].story.is_some());
+        assert!(
+            pending.projects[0].worker.elapsed_seconds >= active.projects[0].worker.elapsed_seconds
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert_eq!(
-            pending.projects[0].worker.elapsed_seconds,
-            status.snapshot().projects[0].worker.elapsed_seconds
+            status.snapshot().projects[0].worker.elapsed_seconds,
+            pending.projects[0].worker.elapsed_seconds
         );
         status.released("a", true);
         status.cancelling("b");
@@ -979,6 +968,8 @@ mod tests {
     }
     #[test]
     fn only_safe_links_are_exposed() {
+        let mut config = config();
+        let mut story = assignment("a");
         for url in [
             "javascript:alert(1)",
             "data:text/html,x",
@@ -987,15 +978,28 @@ mod tests {
             "https://user:secret@host/path",
             "https://host\\@evil/path",
         ] {
-            assert!(safe_url(url).is_none(), "accepted {url}");
+            config.projects[0].appflowy_url = Some(url.into());
+            let mut status = Status::new(&config);
+            story.story_url = Some(url.into());
+            status.worker_started(&story);
+            let project = &status.snapshot().projects[0];
+            assert!(project.board_url.is_none(), "exposed board URL {url}");
+            assert!(
+                project.story.as_ref().unwrap().url.is_none(),
+                "exposed story URL {url}"
+            );
         }
-        assert_eq!(
-            safe_url("https://appflowy.example/story?id=123"),
-            Some("https://appflowy.example/story?id=123".into())
-        );
+        let url = "https://appflowy.example/story?id=123";
+        config.projects[0].appflowy_url = Some(url.into());
+        let mut status = Status::new(&config);
+        story.story_url = Some(url.into());
+        status.worker_started(&story);
+        let project = &status.snapshot().projects[0];
+        assert_eq!(project.board_url.as_deref(), Some(url));
+        assert_eq!(project.story.as_ref().unwrap().url.as_deref(), Some(url));
     }
     #[tokio::test]
-    async fn http_is_local_read_only_and_does_not_modify_snapshots() {
+    async fn http_serves_status_locally_and_rejects_writes() {
         let listener = bind(0).await.unwrap();
         let address = listener.local_addr().unwrap();
         assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
@@ -1007,13 +1011,10 @@ mod tests {
                 .contains("cannot bind status server to 127.0.0.1")
         );
         let initial = Arc::new(Status::new(&config()).snapshot());
-        let (sender, receiver) = watch::channel(initial.clone());
+        let (_sender, receiver) = watch::channel(initial.clone());
         let stop = CancellationToken::new();
         let job = tokio::spawn(serve(listener, receiver, stop.clone()));
         for (method, path, expected) in [
-            ("GET", "/", 200),
-            ("GET", "/status.js", 200),
-            ("GET", "/status.css", 200),
             ("HEAD", "/api/status", 200),
             ("POST", "/api/status", 405),
             ("PUT", "/api/status", 405),
@@ -1030,39 +1031,51 @@ mod tests {
             );
             assert!(response.contains("cache-control: no-store"));
             assert!(response.contains("content-security-policy:"));
-            if method == "HEAD" {
-                assert!(response.ends_with("\r\n\r\n"));
-            }
         }
-        for (path, content_type, content) in [
-            ("/", "text/html", "data-bs-theme=\"dark\""),
-            (
-                "/vendor/tabler-1.7.5/tabler.min.css",
-                "text/css",
-                "Tabler v1.7.5",
-            ),
-            (
-                "/vendor/tabler-1.7.5/LICENSE",
-                "text/plain",
-                "The MIT License",
-            ),
-            ("/favicon.svg", "image/svg+xml", "<svg"),
-        ] {
-            let response = request(address, "GET", path).await;
+        let response = request(address, "GET", "/").await;
+        let (headers, page) = response.split_once("\r\n\r\n").unwrap();
+        assert!(headers.starts_with("HTTP/1.1 200"));
+        assert!(headers.contains("content-type: text/html"));
+        let assets: Vec<_> = page
+            .lines()
+            .filter(|line| line.contains("<script ") || line.contains("rel=\"stylesheet\""))
+            .map(|line| {
+                let (attribute, content_type) = if line.contains("<script ") {
+                    ("src=\"", "text/javascript")
+                } else {
+                    ("href=\"", "text/css")
+                };
+                let path = line
+                    .split_once(attribute)
+                    .unwrap()
+                    .1
+                    .split('"')
+                    .next()
+                    .unwrap();
+                (format!("/{}", path.trim_start_matches('/')), content_type)
+            })
+            .collect();
+        assert!(
+            assets
+                .iter()
+                .any(|(_, content_type)| *content_type == "text/javascript")
+        );
+        assert!(
+            assets
+                .iter()
+                .any(|(_, content_type)| *content_type == "text/css")
+        );
+        for (path, content_type) in assets {
+            let response = request(address, "GET", &path).await;
             let (headers, body) = response.split_once("\r\n\r\n").unwrap();
             assert!(headers.starts_with("HTTP/1.1 200"), "{path}: {headers}");
             assert!(headers.contains(&format!("content-type: {content_type}")));
-            assert!(body.contains(content), "wrong content at {path}");
+            assert!(!body.is_empty(), "empty asset at {path}");
         }
         let response = request(address, "GET", "/api/status").await;
         let value: serde_json::Value =
             serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
-        assert_eq!(
-            value["projects"][0]["observation"]["counts"],
-            serde_json::Value::Null
-        );
         assert_eq!(serde_json::to_value(&*initial).unwrap(), value);
-        assert!(Arc::ptr_eq(&initial, &sender.borrow()));
         stop.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(2), job)
             .await

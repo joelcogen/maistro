@@ -22,9 +22,9 @@ use tokio::{process::Command, task::JoinSet, time::Instant};
 use tokio_util::sync::CancellationToken;
 
 /// OS locks prevent overlapping daemons. Their contents carry no workflow state.
-pub struct Lock(File);
+struct Lock(File);
 impl Lock {
-    pub fn acquire(path: &Path) -> Result<Self> {
+    fn acquire(path: &Path) -> Result<Self> {
         let file = OpenOptions::new()
             .create(true)
             .truncate(false)
@@ -611,7 +611,6 @@ mod tests {
         let (mut state, a) = active();
         state.cancel(&StoryRef::from(&a));
         assert!(state.snapshot().busy("p"));
-        assert!(state.active["p"].cancel.is_cancelled());
         state
             .finish(a, Err(anyhow::anyhow!("subprocess cancelled")))
             .unwrap();

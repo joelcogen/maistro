@@ -1,7 +1,16 @@
 use maistro::process;
-use std::{fs, time::Duration};
+use std::{fs, io, time::Duration};
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
+
+fn assert_reaped(pid: i32) {
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        -1,
+        "process {pid} is still present"
+    );
+    assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ESRCH));
+}
 
 #[tokio::test]
 async fn cancellation_escalates_and_reaps_a_worker_ignoring_sigterm() {
@@ -27,9 +36,9 @@ async fn cancellation_escalates_and_reaps_a_worker_ignoring_sigterm() {
         .unwrap()
         .unwrap();
     assert!(started.is_ok());
-    let pid: u32 = fs::read_to_string(pid_path).unwrap().parse().unwrap();
+    let pid = fs::read_to_string(pid_path).unwrap().parse().unwrap();
     assert!(result.err().unwrap().to_string().contains("cancelled"));
-    assert!(!process::group_exists(pid));
+    assert_reaped(pid);
 }
 
 #[tokio::test]
@@ -62,6 +71,7 @@ async fn cancellation_stops_worker_and_its_child_command() {
         .split_whitespace()
         .map(|p| p.parse().unwrap())
         .collect();
-    assert!(!process::group_exists(pids[0] as u32));
-    assert_eq!(unsafe { libc::kill(pids[1], 0) }, -1);
+    for pid in pids {
+        assert_reaped(pid);
+    }
 }

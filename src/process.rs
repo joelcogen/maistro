@@ -40,7 +40,7 @@ impl std::fmt::Display for UnconfirmedTermination {
     }
 }
 impl std::error::Error for UnconfirmedTermination {}
-pub fn group_exists(pid: u32) -> bool {
+fn group_exists(pid: u32) -> bool {
     let result = unsafe { libc::kill(-(pid as i32), 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }

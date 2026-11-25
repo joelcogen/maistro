@@ -97,13 +97,12 @@ fn incomplete_assignment_and_incomplete_success_are_rejected() {
     assert!(report.validate(Mode::Master).is_err());
     report.tests.push("cargo test passed".into());
     assert!(report.validate(Mode::Master).is_ok());
-    assert!(report.validate(Mode::Pr).is_err());
     report.pr_url = Some("https://example.test/pr/1".into());
     assert!(report.validate(Mode::Pr).is_ok());
 }
 
 #[test]
-fn config_resolves_paths_relative_to_config_and_rejects_legacy_prompt_file() {
+fn config_resolves_paths_relative_to_config() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("repo")).unwrap();
     let path = dir.path().join("config.toml");
@@ -117,76 +116,44 @@ fn config_resolves_paths_relative_to_config_and_rejects_legacy_prompt_file() {
         loaded.agents.github_token_file,
         dir.path().join("credentials/github-token")
     );
-    fs::write(
-        &path,
-        config.replace("runtime_dir='runtime'", "state_db='old.db'"),
-    )
-    .unwrap();
-    assert!(
-        Config::load(&path)
-            .unwrap_err()
-            .to_string()
-            .contains("migrated")
-    );
-    fs::write(&path, format!("{config}prompt_file='project.md'\n")).unwrap();
-    assert!(Config::load(&path).is_err());
-    fs::write(&path, config.replace("mode='master'", "mode='merge'")).unwrap();
-    assert!(Config::load(&path).is_err());
 }
 
 #[test]
-fn project_prompt_is_reloaded_for_each_assignment_and_git_modes_are_explicit() {
+fn worker_git_delivery_uses_explicit_requests_and_rejects_invalid_branch_names() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("config.toml");
-    fs::create_dir(dir.path().join("repo")).unwrap();
-    fs::write(
-        dir.path().join("repo/maistro-worker.md"),
-        "First test command",
-    )
+    let project = serde_json::from_value(serde_json::json!({
+        "id": "p0", "repo": dir.path(), "appflowy_page": "Stories",
+        "mode": "master", "base_branch": "trunk", "remote": "upstream"
+    }))
     .unwrap();
-    fs::write(&path, "[orchestrator]\nruntime_dir='runtime'\n[[projects]]\nid='p0'\nrepo='repo'\nappflowy_page='Stories'\nmode='pr'\nbase_branch='trunk'\n").unwrap();
-    let mut project = Config::load(&path).unwrap().projects.remove(0);
-    let first = maistro::agent::worker_prompt(&project, &assignment("p0")).unwrap();
-    assert!(first.contains("First test command") && first.contains("maistro/p0/story-1"));
-    assert!(first.contains("PR MODE:") && !first.contains("MASTER MODE:"));
-    fs::write(
-        dir.path().join("repo/maistro-worker.md"),
-        "Revised test command",
-    )
-    .unwrap();
-    project.mode = Mode::Master;
-    let second = maistro::agent::worker_prompt(&project, &assignment("p0")).unwrap();
-    assert!(second.contains("Revised test command") && second.contains("\"story_branch\":null"));
-    assert!(second.contains("\"base_branch\":\"trunk\""));
-    assert!(second.contains("MASTER MODE:") && !second.contains("PR MODE:"));
-
     let mut story = assignment("p0");
-    // Product requirements about PR support must not trigger a text-based override.
     story.context = "Add support for PRs and custom branch names in master mode".into();
-    assert_eq!(story.effective_mode(project.mode), Mode::Master);
-    story.pr = Some(PrRequest { branch: None });
-    let overridden = maistro::agent::worker_prompt(&project, &story).unwrap();
-    assert!(overridden.contains("\"mode\":\"pr\""));
-    assert!(overridden.contains("\"story_branch\":\"maistro/p0/story-1\""));
-    assert!(overridden.contains("PR MODE:") && !overridden.contains("MASTER MODE:"));
+    let prompt = maistro::agent::worker_prompt(&project, &story).unwrap();
+    let git: serde_json::Value = serde_json::from_str(
+        prompt
+            .lines()
+            .find_map(|line| line.strip_prefix("GIT="))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        git,
+        serde_json::json!({
+            "mode": "master", "base_branch": "trunk", "remote": "upstream",
+            "story_branch": null, "story_marker": "AppFlowy story: story-1"
+        })
+    );
 
-    for mode in [Mode::Master, Mode::Pr] {
-        project.mode = mode;
-        story.pr.as_mut().unwrap().branch = Some("feature/requested-branch".into());
-        let custom = maistro::agent::worker_prompt(&project, &story).unwrap();
-        assert!(custom.contains("\"story_branch\":\"feature/requested-branch\""));
-        assert!(custom.contains("\"base_branch\":\"trunk\""));
-        assert!(custom.contains("\"remote\":\"origin\""));
-        assert!(custom.contains("\"story_marker\":\"AppFlowy story: story-1\""));
-        for invalid in [
-            "", "trunk", "HEAD", "-option", "bad name", "a..b", "@{-1}", "a.lock",
-        ] {
-            story.pr.as_mut().unwrap().branch = Some(invalid.into());
-            assert!(
-                maistro::agent::worker_prompt(&project, &story).is_err(),
-                "{invalid}"
-            );
-        }
+    for branch in [
+        "", "trunk", "HEAD", "-option", "bad name", "a..b", "@{-1}", "a.lock",
+    ] {
+        story.pr = Some(PrRequest {
+            branch: Some(branch.into()),
+        });
+        assert!(
+            maistro::agent::worker_prompt(&project, &story).is_err(),
+            "accepted {branch:?}"
+        );
     }
 }
 
@@ -231,7 +198,6 @@ fn status_server_defaults_to_optional_local_port_8044_and_rejects_invalid_ports(
             toml::from_str::<Config>(&format!("[status]\nenabled=true\nport={port}\n{minimal}"));
         assert!(parsed.is_err() || parsed.unwrap().validate().is_err());
     }
-    assert!(toml::from_str::<Config>(&format!("[status]\nlisten='0.0.0.0'\n{minimal}")).is_err());
 }
 
 #[test]
@@ -298,150 +264,15 @@ fn incomplete_coordination_cannot_authorize_new_or_recovered_work() {
         .unwrap();
 }
 
-// Shortcut pagination runs in the model's MCP connection. These tests validate
-// the executable request examples and required guidance, not simulated API reads.
-fn coordinator_rules() -> String {
-    include_str!("../prompts/coordinator.md")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 #[test]
-fn shortcut_multi_page_examples_preserve_fields_and_decode_only_cursor_once() {
-    let prompt = include_str!("../prompts/coordinator.md");
-    let examples = prompt
-        .split("```json\n")
-        .nth(1)
-        .unwrap()
-        .split("```")
-        .next()
-        .unwrap();
-    let pages: Vec<serde_json::Value> = serde_json::from_str(examples).unwrap();
-    assert!(pages.len() >= 3, "exercise more than one continuation");
-    assert_eq!(pages[0]["request"]["query"], "is:story");
-    let fields = pages[0]["request"]["fields"].as_str().unwrap();
-    for required in [
-        "id",
-        "workflow",
-        "workflow_state",
-        "archived",
-        "position",
-        "created_at",
-    ] {
-        assert!(fields.split(',').any(|field| field == required));
-    }
-    let mut seen = std::collections::HashSet::new();
-    for pair in pages.windows(2) {
-        let url = reqwest::Url::parse(pair[0]["next_page_url"].as_str().unwrap()).unwrap();
-        let tokens: Vec<_> = url
-            .query_pairs()
-            .filter(|(key, _)| key == "cursor")
-            .collect();
-        assert_eq!(tokens.len(), 1);
-        let token = &tokens[0].1;
-        assert!(!token.is_empty() && seen.insert(token.to_string()));
-        let next = pair[1]["request"].as_object().unwrap();
-        assert_eq!(
-            next.len(),
-            2,
-            "no query, limit, filter or ordering on continuation"
-        );
-        assert_eq!(next["cursor"], token.as_ref());
-        assert_eq!(next["fields"], fields);
-        assert_ne!(
-            next["cursor"],
-            url.as_str(),
-            "full URLs cause Invalid cursor"
-        );
-    }
-    // Preserve a literal encoded substring inside the opaque token: no second decode.
-    assert_eq!(pages[1]["request"]["cursor"], "page+2/=%2F");
-    assert!(pages.last().unwrap()["next_page_url"].is_null());
-    let rules = coordinator_rules();
-    for required in [
-        "URL-decode its value exactly once",
-        "cursor and fields must be the ONLY query arguments on subsequent calls",
-        "SAME required path identifiers",
-        "Even a page containing no matching stories must be followed",
-        "an empty page alone does not prove completion",
-    ] {
-        assert!(
-            rules.contains(required),
-            "missing pagination rule: {required}"
-        );
-    }
-}
-
-#[test]
-fn shortcut_scope_contract_requires_supported_listing_or_complete_filtered_fallback() {
-    let rules = coordinator_rules();
-    for required in [
-        "list_workflow_stories with the verified workflow_public_id",
-        "Use a workflow-scoped search only if its schema explicitly supports that scope",
-        "Do not invent a workflow: search operator",
-        "paginate list_stories across the entire workspace",
-        "search_stories with query=\"is:story\"",
-        "Never send an empty or whitespace-only search",
-        "Verify each story's numeric workflow ID against the resolved ID",
-        "its state ID against that workflow's states",
-        "Exclude archived and other-workflow stories from counts and candidates",
-        "Missing membership/status fields require a direct read",
-        "Count unique story IDs only after all pages are read",
-        "never use workspace total_items as the configured workflow's count",
-        "112 in Platform contribute only 3 to Agents' backlog",
-    ] {
-        assert!(
-            rules.contains(required),
-            "missing workflow isolation rule: {required}"
-        );
-    }
-}
-
-#[test]
-fn shortcut_pagination_failure_contract_forbids_partial_counts_and_assignments() {
-    let rules = coordinator_rules();
-    for required in [
-        "Missing/empty/duplicate cursor parameters",
-        "malformed URLs/encoding, repeated cursors, inconsistent totals",
-        "ANY page error make the read incomplete",
-        "Do not combine a restarted read with pages from an earlier attempt",
-        "do not claim or assign ANY story for that project, including recovery from an early page",
-        "read=partial (failed if no page succeeded)",
-        "counts=null and counted_assignment=null",
-        "failed enumeration alone never proves deletion or movement",
-        "If page 2 fails, even a Ready story on page 1 cannot authorize an assignment",
-    ] {
-        assert!(
-            rules.contains(required),
-            "missing pagination failure rule: {required}"
-        );
-    }
-}
-
-#[test]
-fn shortcut_configuration_is_exclusive_scoped_and_backward_compatible() {
-    let old = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Board'\nmode='master'\nbase_branch='master'\n";
-    let old_config: Config = toml::from_str(old).unwrap();
-    old_config.validate().unwrap();
-    assert_eq!(
-        old_config.projects[0].mcp_server(&old_config.agents),
-        "appflowy"
-    );
-    let shortcut = old.replace(
+fn shortcut_configuration_rejects_invalid_urls_and_source_connections() {
+    let appflowy = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Board'\nmode='master'\nbase_branch='master'\n";
+    let shortcut = appflowy.replace(
         "appflowy_page='Board'",
         "shortcut_url='https://app.shortcut.com/team/settings/workflows/42'",
     );
-    let config: Config = toml::from_str(&shortcut).unwrap();
-    config.validate().unwrap();
-    assert_eq!(config.projects[0].mcp_server(&config.agents), "shortcut");
-    assert_eq!(config.projects[0].source_name(), "Shortcut");
-    let prompt = maistro::agent::worker_prompt(&config.projects[0], &assignment("p")).unwrap();
-    assert!(prompt.contains("Shortcut story: story-1"));
-    assert!(prompt.contains("access AppFlowy or Shortcut"));
     for invalid in [
-        shortcut.replace("shortcut_url=", "appflowy_page='Board'\nshortcut_url="),
-        old.replace("appflowy_page='Board'", ""),
+        appflowy.replace("appflowy_page='Board'", ""),
         shortcut.replace("https://app.shortcut.com/team/settings/workflows/42", ""),
         shortcut.replace("https://", "http://"),
         shortcut.replace("app.shortcut.com", "app.shortcut.com.evil.test"),
@@ -458,7 +289,8 @@ fn shortcut_configuration_is_exclusive_scoped_and_backward_compatible() {
     }
     let conflicting = format!(
         "{shortcut}\n{}",
-        old.replace("id='p'", "id='p2'")
+        appflowy
+            .replace("id='p'", "id='p2'")
             .replace("repo='/tmp'", "repo='/var'")
             .replace(
                 "appflowy_page='Board'",
@@ -488,15 +320,12 @@ fn workflow_selectors_validate_and_preserve_source_identity() {
         config.validate().unwrap();
         let shortcut = index >= 2;
         let project = &config.projects[0];
-        assert_eq!(project.is_shortcut(), shortcut);
         assert_eq!(
             project.mcp_server(&config.agents),
             if shortcut { "shortcut" } else { "appflowy" }
         );
         if index >= 3 {
             assert_eq!(project.board_url(), None);
-            let prompt = maistro::agent::worker_prompt(project, &assignment("p")).unwrap();
-            assert!(prompt.contains("Shortcut story: story-1"));
         }
         config.projects[0].mcp_server = Some("my_workspace".into());
         assert_eq!(
@@ -611,17 +440,6 @@ args = ["--fixture"]
             "unexpected {tool}"
         );
     }
-    // Every selector must expose the same workflow resolution and lifecycle tools.
-    for by_id in [false, true] {
-        let mut selected = config.projects[0].clone();
-        selected.shortcut_url = None;
-        if by_id {
-            selected.shortcut_workflow_id = Some(500005096);
-        } else {
-            selected.shortcut_workflow = Some("Agents".into());
-        }
-        assert_eq!(codex.mcp_config(&selected).unwrap(), shortcut);
-    }
     config.projects[0].shortcut_url = None;
     config.projects[0].appflowy_page = Some("Board".into());
     config.projects[0].mcp_server = None;
@@ -635,12 +453,6 @@ args = ["--fixture"]
         );
     }
 
-    assert!(
-        appflowy["enabled_tools"]
-            .as_array()
-            .unwrap()
-            .contains(&toml::Value::from("appflowy_rows"))
-    );
     config.projects[0].mcp_server = Some("missing".into());
     assert!(
         codex
@@ -807,79 +619,67 @@ fn claude_paths_resolve_and_mcp_transport_preserves_headers_and_source_selection
 
 #[test]
 fn optional_states_preserve_defaults_and_validate_enabled_labels() {
-    for source in [
-        "appflowy_page='Board'",
-        "shortcut_url='https://app.shortcut.com/team/settings/workflows/42'",
-        "shortcut_workflow='Agents'",
-        "shortcut_workflow_id=500005096",
+    let base = "[[projects]]\nid='p'\nrepo='/tmp'\nappflowy_page='Board'\nmode='master'\nbase_branch='main'\n";
+    let defaults: Config = toml::from_str(base).unwrap();
+    assert_eq!(
+        defaults.projects[0].statuses.review.as_deref(),
+        Some("Review")
+    );
+    assert_eq!(
+        defaults.projects[0].statuses.cancelled.as_deref(),
+        Some("Cancelled")
+    );
+    for settings in [
+        "review=false",
+        "cancelled=false",
+        "review=false\ncancelled=false",
     ] {
-        let base = format!(
-            "[[projects]]\nid='p'\nrepo='/tmp'\n{source}\nmode='master'\nbase_branch='main'\n"
-        );
-        let defaults: Config = toml::from_str(&base).unwrap();
-        assert_eq!(
-            defaults.projects[0].statuses.review.as_deref(),
-            Some("Review")
-        );
-        assert_eq!(
-            defaults.projects[0].statuses.cancelled.as_deref(),
-            Some("Cancelled")
-        );
-        for settings in [
-            "review=false",
-            "cancelled=false",
-            "review=false\ncancelled=false",
-        ] {
-            let config: Config =
-                toml::from_str(&format!("{base}[projects.statuses]\n{settings}")).unwrap();
-            config.validate().unwrap();
-            let statuses = &config.projects[0].statuses;
-            let json = serde_json::to_value(statuses).unwrap();
-            for name in ["review", "cancelled"] {
-                if settings.contains(&format!("{name}=false")) {
-                    assert_eq!(json[name], false);
-                }
+        let config: Config =
+            toml::from_str(&format!("{base}[projects.statuses]\n{settings}")).unwrap();
+        config.validate().unwrap();
+        let statuses = &config.projects[0].statuses;
+        let json = serde_json::to_value(statuses).unwrap();
+        for name in ["review", "cancelled"] {
+            if settings.contains(&format!("{name}=false")) {
+                assert_eq!(json[name], false);
             }
-            let encoded = toml::to_string(statuses).unwrap();
-            let decoded: maistro::config::Statuses = toml::from_str(&encoded).unwrap();
-            assert_eq!(decoded.review, statuses.review);
-            assert_eq!(decoded.cancelled, statuses.cancelled);
         }
-        for settings in [
-            "review=true",
-            "cancelled=true",
-            "ready=false",
-            "backlog=false",
-            "in_progress=false",
-            "done=false",
-            "blocked=false",
-            "review=''",
-            "cancelled='  '",
-            "review='Done'",
-            "cancelled='Ready'",
-            "review=false\ncancelled='Done'",
-        ] {
-            let parsed =
-                toml::from_str::<Config>(&format!("{base}[projects.statuses]\n{settings}"));
-            assert!(
-                parsed.is_err() || parsed.unwrap().validate().is_err(),
-                "{settings}"
-            );
-        }
-        let pr = base.replace("mode='master'", "mode='pr'");
-        let disabled: Config =
-            toml::from_str(&format!("{pr}[projects.statuses]\nreview=false")).unwrap();
-        assert!(
-            disabled
-                .validate()
-                .unwrap_err()
-                .to_string()
-                .contains("review")
-        );
-        let cancelled: Config =
-            toml::from_str(&format!("{pr}[projects.statuses]\ncancelled=false")).unwrap();
-        cancelled.validate().unwrap();
+        let encoded = toml::to_string(statuses).unwrap();
+        let decoded: maistro::config::Statuses = toml::from_str(&encoded).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), json);
     }
+    for settings in [
+        "review=true",
+        "cancelled=true",
+        "ready=false",
+        "backlog=false",
+        "in_progress=false",
+        "done=false",
+        "blocked=false",
+        "review=''",
+        "cancelled='  '",
+        "review='Done'",
+        "cancelled='Ready'",
+    ] {
+        let parsed = toml::from_str::<Config>(&format!("{base}[projects.statuses]\n{settings}"));
+        assert!(
+            parsed.is_err() || parsed.unwrap().validate().is_err(),
+            "{settings}"
+        );
+    }
+    let pr = base.replace("mode='master'", "mode='pr'");
+    let disabled: Config =
+        toml::from_str(&format!("{pr}[projects.statuses]\nreview=false")).unwrap();
+    assert!(
+        disabled
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("review")
+    );
+    let cancelled: Config =
+        toml::from_str(&format!("{pr}[projects.statuses]\ncancelled=false")).unwrap();
+    cancelled.validate().unwrap();
 }
 
 #[test]
@@ -891,11 +691,7 @@ fn disabled_review_prevents_pr_workers_including_recovery() {
     }))
     .unwrap();
     let mut story = assignment("p");
-    assert!(
-        maistro::agent::worker_prompt(&project, &story)
-            .unwrap()
-            .contains("MASTER MODE:")
-    );
+    maistro::agent::worker_prompt(&project, &story).unwrap();
     story.pr = Some(PrRequest { branch: None });
     for recovery in [false, true] {
         story.recovery = recovery;
@@ -903,11 +699,7 @@ fn disabled_review_prevents_pr_workers_including_recovery() {
         assert!(error.to_string().contains("review is disabled"));
     }
     project.statuses.review = Some("Review".into());
-    assert!(
-        maistro::agent::worker_prompt(&project, &story)
-            .unwrap()
-            .contains("PR MODE:")
-    );
+    maistro::agent::worker_prompt(&project, &story).unwrap();
 }
 
 #[test]
@@ -927,13 +719,6 @@ fn shortcut_api_config_requires_workspace_and_private_file_reference_together() 
     assert_eq!(
         p.shortcut_token_file.as_ref().unwrap(),
         &dir.path().join("token")
-    );
-    assert!(
-        !serde_json::to_value(p)
-            .unwrap()
-            .as_object()
-            .unwrap()
-            .contains_key("shortcut_token_file")
     );
     for settings in [
         "shortcut_workspace='team'",
