@@ -12,9 +12,11 @@ const reasons = {
   read_failed: 'Board read failed', ambiguous_board: 'Board could not be resolved uniquely', incomplete_read: 'Board read incomplete',
   claim_failed: 'Could not confirm a story claim', requirements_blocked: 'Story requirements blocked', update_failed: 'Board result update failed', work_selected: 'Work selected'
 };
-const states = { active: 'Worker active', pending_update: 'Result waiting for board', idle: 'Idle', disabled: 'Disabled', stopping: 'Worker stopping', reading_boards: 'Coordinating' };
-const activityColors = { active: 'green', stopping: 'green', reading_boards: 'green', pending_update: 'yellow' };
+const states = { active: 'Worker active', dreaming: 'Dreaming', pending_update: 'Result waiting for board', idle: 'Idle', disabled: 'Disabled', stopping: 'Worker stopping', reading_boards: 'Coordinating' };
+const activityColors = { active: 'green', dreaming: 'purple', stopping: 'green', reading_boards: 'green', pending_update: 'yellow' };
 const failedBoardActions = new Set(['read_failed', 'claim_failed', 'update_failed']);
+const pendingDreams = new Set();
+let lastSnapshot;
 function element(tag, text, className) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = String(text);
@@ -32,7 +34,7 @@ function link(label, value, className, focusKey) {
     const node = element('a', label, className);
     node.href = url.href;
     node.rel = 'noreferrer';
-    if (focusKey) node.dataset.statusLink = JSON.stringify(focusKey);
+    if (focusKey) node.dataset.statusFocus = JSON.stringify(focusKey);
     return node;
   } catch { return element('span', label); }
 }
@@ -91,15 +93,51 @@ function agentRow(name, activity, enabled = true) {
   row.append(card);
   return row;
 }
+async function requestDream(id) {
+  if (pendingDreams.has(id)) return;
+  pendingDreams.add(id);
+  const feedback = document.getElementById('dream-feedback');
+  feedback.className = 'small mb-2 text-secondary';
+  feedback.textContent = `Checking dream eligibility for ${id}…`;
+  render(lastSnapshot);
+  try {
+    const response = await fetch('api/dream', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      referrerPolicy: 'same-origin',
+      body: JSON.stringify({ project_id: id })
+    });
+    if (!response.ok) throw new Error(await response.text());
+    feedback.className = 'small mb-2 text-secondary';
+    feedback.textContent = `Dreaming started for ${id}.`;
+  } catch (error) {
+    feedback.className = 'small mb-2 text-danger-emphasis';
+    feedback.textContent = `Could not start dreaming for ${id}. ${error.message}`;
+  } finally {
+    pendingDreams.delete(id);
+    render(lastSnapshot);
+  }
+}
 function projectCard(project) {
   const card = element('article', undefined, 'card');
   const heading = element('header', undefined, 'card-header d-flex flex-wrap justify-content-between gap-2 py-2 px-3');
   heading.append(element('h3', project.id, 'card-title mb-0'));
+  const actions = element('div', undefined, 'd-flex flex-wrap gap-2');
+  if (project.enabled) {
+    const checking = pendingDreams.has(project.id);
+    const dream = element('button', checking ? 'Checking…' : 'Dream now', 'btn btn-sm btn-outline-primary');
+    dream.type = 'button';
+    dream.disabled = checking || project.worker.state !== 'idle';
+    dream.dataset.statusFocus = JSON.stringify([project.id, 'dream']);
+    dream.setAttribute('aria-label', `Dream now for ${project.id}`);
+    dream.addEventListener('click', () => requestDream(project.id));
+    actions.append(dream);
+  }
   if (project.board_url) {
     const board = link('Open board', project.board_url, 'btn btn-sm btn-outline-secondary', [project.id, 'board']);
     if (board.href) board.setAttribute('aria-label', `Open board for ${project.id}`);
-    heading.append(board);
+    actions.append(board);
   }
+  if (actions.childElementCount) heading.append(actions);
 
   const body = element('div', undefined, 'card-body p-3');
   const worker = project.worker;
@@ -138,6 +176,7 @@ function projectCard(project) {
   return card;
 }
 function render(snapshot) {
+  lastSnapshot = snapshot;
   const daemon = document.getElementById('daemon');
   const workers = element('ul', undefined, 'row row-deck row-cols-1 row-cols-sm-2 row-cols-lg-3 g-2 g-sm-3 ps-0 mb-0');
   workers.append(agentRow('Coordinator', snapshot.coordinator));
@@ -157,14 +196,14 @@ function render(snapshot) {
   if (coverage.length) overview.append(element('p', coverage.join(' · '), 'small text-warning-emphasis mt-2 mb-0'));
 
   const projects = document.getElementById('projects');
-  const focusedLink = document.activeElement?.dataset.statusLink;
+  const focusedControl = document.activeElement?.dataset.statusFocus;
   const cards = snapshot.projects.map(projectCard);
   if (!cards.length) cards.push(element('p', 'No projects configured yet.', 'text-secondary mb-0'));
   projects.replaceChildren(...cards);
   document.getElementById('projects-section').hidden = false;
-  if (focusedLink) {
-    const replacement = Array.from(projects.querySelectorAll('a[data-status-link]'))
-      .find(node => node.dataset.statusLink === focusedLink);
+  if (focusedControl) {
+    const replacement = Array.from(projects.querySelectorAll('[data-status-focus]'))
+      .find(node => node.dataset.statusFocus === focusedControl);
     replacement?.focus({ preventScroll: true });
   }
 }

@@ -76,10 +76,10 @@ allowed within those tools and set the scope of the work.
 ## Status page and counts
 
 The page refreshes `GET /api/status` every three seconds and marks retained data
-stale on failure. It supports GET/HEAD and gives local users unauthenticated access
-to project IDs, story titles/IDs, safe board/workflow and story links, and concise
-diagnostics. Titles render as text; links allow only HTTP(S). Detailed failure
-output stays in private logs and the story source.
+stale on failure. The status endpoint supports GET/HEAD and gives local users
+unauthenticated access to project IDs, story titles/IDs, safe board/workflow and
+story links, and concise diagnostics. Titles render as text and links allow
+only HTTP(S). Detailed failure output stays in private logs and the story source.
 
 The compact Agents box lists Coordinator and each project with its status and
 configured effort, followed by uptime and time since the latest coordination pass
@@ -117,6 +117,11 @@ The coordinator needs a complete, fresh read that shows no Ready or In Progress
 stories. Active work, pending results, and new assignments take precedence. A
 project with work queued can become eligible later that day. Incomplete reads
 retry on the usual coordination schedule.
+
+The dashboard's **Dream now** button requests a phase for one project over a
+local POST. The request skips the configured start time and uses a new
+coordination pass to check the project's board. The daily limit and input
+requirements apply. A rejected request leaves no pending manual phase.
 
 The phase holds the project's worker slot until all of its dreams finish. Polling
 continues. Maistro handles newly queued stories in a fresh coordinator pass after

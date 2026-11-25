@@ -5,17 +5,20 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 class Node {
   constructor(tag, document) {
-    this.tag = tag; this.document = document; this.children = []; this.textContent = ''; this.dataset = {};
+    this.tag = tag; this.document = document; this.children = []; this.textContent = ''; this.dataset = {}; this.events = {};
   }
   setAttribute(name, value) { this[name] = value; }
+  addEventListener(name, callback) { this.events[name] = callback; }
+  click() { if (!this.disabled) return this.events.click?.(); }
   append(...children) { this.children.push(...children); }
+  get childElementCount() { return this.children.length; }
   replaceChildren(...children) {
     if (this.all().includes(this.document.activeElement)) this.document.activeElement = null;
     this.children = children;
   }
   querySelectorAll(selector) {
     const [tag] = selector.split('[');
-    return this.all().filter(node => (!tag || node.tag === tag) && node.dataset.statusLink);
+    return this.all().filter(node => (!tag || node.tag === tag) && node.dataset.statusFocus);
   }
   focus() { this.document.activeElement = this; }
   set innerHTML(_) { throw new Error('Unsafe HTML rendering'); }
@@ -41,7 +44,7 @@ function snapshot() {
 }
 function harness(fetch) {
   const document = { activeElement: null, createElement: tag => new Node(tag, document), getElementById: id => nodes[id] };
-  const ids = ['connection', 'connection-state', 'connection-detail', 'uptime', 'daemon', 'overall', 'projects', 'agents-section', 'projects-section'];
+  const ids = ['connection', 'connection-state', 'connection-detail', 'uptime', 'daemon', 'overall', 'projects', 'agents-section', 'projects-section', 'dream-feedback'];
   const nodes = Object.fromEntries(ids.map(id => [id, new Node('div', document)]));
   nodes.connection.className = 'status status-yellow';
   nodes['connection-state'].textContent = 'Connecting…';
@@ -148,25 +151,66 @@ test('refresh restores keyboard focus for the same story on the same project', a
 test('agents list starts with the coordinator followed by each project and its status', async () => {
   const data = snapshot();
   data.coordinator.state = 'idle';
-  data.projects.push(...['active', 'stopping', 'idle'].map(state => ({
+  data.projects.push(...['active', 'stopping', 'idle', 'dreaming'].map(state => ({
     ...data.projects[0], id: state, worker: { state, latest_event: 'Verbose event' }
   })));
   const { nodes } = harness(async () => ({ ok: true, json: async () => data }));
   await flush();
   assert.match(nodes.uptime.text, /Uptime 0h 2m 3s/);
   const rows = nodes.daemon.all().filter(node => node.tag === 'li');
-  assert.equal(rows.length, 6);
+  assert.equal(rows.length, 7);
   for (const [index, name, status] of [
     [0, 'Coordinator', 'Idle'],
     [1, '<img onerror=evil()>', 'Result waiting for board'],
     [2, 'disabled', 'Disabled'],
     [3, 'active', 'Worker active'],
     [4, 'stopping', 'Worker stopping'],
-    [5, 'idle', 'Idle']
+    [5, 'idle', 'Idle'],
+    [6, 'dreaming', 'Dreaming']
   ]) {
     assert.ok(rows[index].text.startsWith(name + '\n'));
     assert.ok(rows[index].text.includes('\n' + status));
   }
+});
+
+test('Dream now submits the project, shows rejection or success, and disables while dreaming', async () => {
+  const data = snapshot();
+  const project = data.projects[0];
+  project.worker.state = 'idle';
+  const requests = [];
+  const { nodes, timers } = harness(async (path, options) => {
+    if (path === 'api/status') return { ok: true, json: async () => data };
+    assert.equal(path, 'api/dream');
+    assert.equal(options.method, 'POST');
+    assert.equal(options.headers['Content-Type'], 'application/json');
+    assert.equal(options.referrerPolicy, 'same-origin');
+    assert.deepEqual(JSON.parse(options.body), { project_id: project.id });
+    return new Promise(resolve => requests.push(resolve));
+  });
+  await flush();
+  const buttons = () => nodes.projects.all().filter(node => node.tag === 'button');
+  assert.equal(buttons().length, 1);
+  assert.equal(buttons()[0].text, 'Dream now');
+  const first = buttons()[0].click();
+  assert.equal(buttons()[0].disabled, true);
+  await timers.shift().fn();
+  assert.equal(buttons()[0].text, 'Checking…');
+  assert.equal(buttons()[0].disabled, true);
+  buttons()[0].click();
+  assert.equal(requests.length, 1);
+  requests.shift()({ ok: false, text: async () => 'There are Ready or In Progress stories.' });
+  await first;
+  assert.match(nodes['dream-feedback'].text, /Could not start dreaming.*Ready or In Progress/);
+  assert.equal(buttons()[0].disabled, false);
+
+  const second = buttons()[0].click();
+  requests.shift()({ ok: true });
+  await second;
+  assert.match(nodes['dream-feedback'].text, /Dreaming started/);
+  project.worker.state = 'dreaming';
+  await timers.shift().fn();
+  assert.match(nodes.projects.text, /Dreaming/);
+  assert.equal(buttons()[0].disabled, true);
 });
 
 test('agents show configured models and effort as text with defaults for omitted settings', async () => {

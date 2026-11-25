@@ -6,7 +6,7 @@ use crate::{
     model::{Assignment, Completion, Coordination, Outcome, Report, Snapshot, StoryRef},
     poll, process,
     schedule::Schedule,
-    status::{self, Status},
+    status::{self, DreamRejection, DreamRequest, Status},
 };
 use anyhow::{Context, Result, ensure};
 use chrono::Local;
@@ -192,11 +192,18 @@ impl Engine {
         let stop = shutdown.child_token();
         let mut diagnostics = Status::new(&self.config);
         let (published, receiver) = tokio::sync::watch::channel(Arc::new(diagnostics.snapshot()));
+        let (request_sender, mut dream_requests) =
+            tokio::sync::mpsc::channel(self.config.projects.len());
         let mut server = JoinSet::new();
         if self.config.status.enabled {
             let listener = status::bind(self.config.status.port).await?;
-            tracing::info!(address=%listener.local_addr()?, "read-only status server listening");
-            server.spawn(status::serve(listener, receiver, stop.child_token()));
+            tracing::info!(address=%listener.local_addr()?, "status server listening");
+            server.spawn(status::serve(
+                listener,
+                receiver,
+                request_sender,
+                stop.child_token(),
+            ));
         }
         let mut status_tick = tokio::time::interval(Duration::from_secs(1));
         status_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -245,6 +252,8 @@ impl Engine {
         drop(poll_sender);
         let mut pass = BTreeMap::new();
         let mut dream_pass = BTreeMap::new();
+        let mut requested_dreams = BTreeMap::new();
+        let mut manual_pass = BTreeMap::new();
         // Briefly coalesce independent startup observations and simultaneous events.
         let mut coalesce_until = Instant::now() + Duration::from_millis(100);
         tracing::info!(projects = repo_locks.len(), "maistro started");
@@ -255,6 +264,7 @@ impl Engine {
                     pass = schedule.ready();
                     if !pass.is_empty() {
                         dream_pass = pass.keys().filter_map(|id| dreams.candidate(id).map(|day| (id.clone(), day))).collect();
+                        manual_pass = pass.keys().filter_map(|id| requested_dreams.remove(id).map(|reply| (id.clone(), reply))).collect();
                         diagnostics.coordinator_started();
                         let mut snapshot = state.snapshot();
                         snapshot.active.retain(|s| pass.contains_key(&s.project_id));
@@ -276,6 +286,25 @@ impl Engine {
                         anyhow::bail!("status server stopped unexpectedly");
                     }
                     _ = status_tick.tick() => {},
+                    Some(DreamRequest { project_id: id, reply }) = dream_requests.recv(), if self.config.status.enabled => {
+                        if reply.is_closed() {
+                            continue;
+                        }
+                        let rejection = match self.config.projects.iter().find(|p| p.id == id) {
+                            None => Some(DreamRejection::UnknownProject),
+                            Some(p) if !p.enabled => Some(DreamRejection::Disabled),
+                            Some(_) if schedule.is_paused(&id) || state.busy(&id) => Some(DreamRejection::Busy),
+                            Some(_) if requested_dreams.contains_key(&id) || manual_pass.contains_key(&id) => Some(DreamRejection::AlreadyRequested),
+                            Some(_) => None,
+                        };
+                        if let Some(reason) = rejection {
+                            let _ = reply.send(Err(reason));
+                        } else {
+                            // A request must use a pass started after it arrived.
+                            schedule.wake(&id);
+                            requested_dreams.insert(id, reply);
+                        }
+                    }
                     _ = dream_tick.tick() => {
                         let day = dreams.day(Local::now().naive_local());
                         for project in self.config.projects.iter().filter(|p| p.enabled) {
@@ -298,38 +327,59 @@ impl Engine {
                                     .filter(|c| update.acknowledged.contains(&c.id) || update.cancel.contains(&c.story))
                                     .map(|c| c.story.project_id.clone()).collect();
                                 let mut dream_starts = Vec::new();
-                                let day = dreams.day(Local::now().naive_local());
+                                let now = Local::now().naive_local();
+                                let day = dreams.day(now);
                                 for (id, generation) in &pass {
+                                    let manual = manual_pass.remove(id).filter(|reply| !reply.is_closed());
                                     if update.retry_projects.contains(id) {
                                         schedule.retry(id, interval);
+                                        if let Some(reply) = manual {
+                                            let _ = reply.send(Err(DreamRejection::BoardUnavailable));
+                                        }
                                         continue;
                                     }
                                     schedule.acknowledge(id, *generation);
-                                    if dream_pass.get(id).copied() != day || day.is_none()
-                                        || dreams.candidate(id) != day || !schedule.is_current(id, *generation)
-                                        || state.busy(id)
-                                        || update.assignments.iter().any(|a| &a.project_id == id)
-                                    {
+                                    let scheduled = day.is_some() && dream_pass.get(id).copied() == day && dreams.candidate(id) == day;
+                                    if manual.is_none() && !scheduled {
                                         continue;
                                     }
-                                    match dream::empty_queue(&update, id) {
-                                        Some(true) => dream_starts.push(id.clone()),
-                                        Some(false) => {},
-                                        None => {
+                                    let queue = dream::empty_queue(&update, id);
+                                    let reason = if queue == Some(false) || update.assignments.iter().any(|a| &a.project_id == id) {
+                                        DreamRejection::StoriesQueued
+                                    } else if state.busy(id) {
+                                        DreamRejection::Busy
+                                    } else if !schedule.is_current(id, *generation) {
+                                        DreamRejection::BoardChanged
+                                    } else if queue.is_none() {
+                                        if scheduled {
                                             schedule.wake(id);
                                             schedule.retry(id, interval);
                                         }
+                                        DreamRejection::BoardUnavailable
+                                    } else {
+                                        dream_starts.push((id.clone(), manual));
+                                        continue;
+                                    };
+                                    if let Some(reply) = manual {
+                                        let _ = reply.send(Err(reason));
                                     }
                                 }
                                 self.apply(update, &mut state, &mut workers, &stop, &mut diagnostics)?;
-                                for id in dream_starts {
+                                for (id, manual) in dream_starts {
                                     let project = self.config.projects.iter().find(|p| p.id == id).unwrap().clone();
+                                    let phase_day = if manual.is_some() { Some(now.date()) } else { day };
                                     // The instructions may have changed while the coordinator was reading the board.
-                                    if let Err(error) = dreams.refresh(&project, day) {
+                                    if let Err(error) = dreams.refresh(&project, phase_day) {
                                         tracing::warn!(project=%id, error=%format!("{error:#}"), "dream discovery failed");
+                                        if let Some(reply) = manual {
+                                            let _ = reply.send(Err(DreamRejection::DiscoveryFailed));
+                                        }
                                         continue;
                                     }
                                     if dreams.candidate(&id).is_none() {
+                                        if let Some(reply) = manual {
+                                            let _ = reply.send(Err(DreamRejection::Ineligible));
+                                        }
                                         continue;
                                     }
                                     let tasks = dreams.start(&id)
@@ -343,6 +393,9 @@ impl Engine {
                                         let result = run_dreams(&agents, &project, tasks, &token_file, &cancel).await;
                                         (id, result)
                                     });
+                                    if let Some(reply) = manual {
+                                        let _ = reply.send(Ok(()));
+                                    }
                                 }
                                 for id in released { schedule.wake(&id); }
                                 for id in state.pending.keys().filter(|id| pass.contains_key(*id)) {
@@ -356,6 +409,9 @@ impl Engine {
                                 if e.downcast_ref::<process::UnconfirmedTermination>().is_some() { return Err(e); }
                                 tracing::warn!(error=%format!("{e:#}"), "coordinator failed; retrying without releasing pending work");
                                 for id in pass.keys() { schedule.retry(id, interval); }
+                                for (_, reply) in std::mem::take(&mut manual_pass) {
+                                    let _ = reply.send(Err(DreamRejection::BoardUnavailable));
+                                }
                             }
                         }
                     }

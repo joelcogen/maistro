@@ -275,7 +275,7 @@ it must be outside managed repositories. Normal completion deletes result/schema
 files. Crash leftovers can be removed while the service is stopped. Recovery uses
 the story source and Git repository.
 
-## Read-only status page
+## Dashboard
 
 Enable the server in `~/.config/maistro/config.toml`, then restart Maistro:
 
@@ -288,6 +288,11 @@ port = 8044
 Open `http://127.0.0.1:8044/`. The server binds only to **127.0.0.1**. It starts
 disabled and defaults to port 8044. A bind failure stops startup with the address
 and OS error. Port binding happens at startup; `validate` checks configuration.
+
+Workers show **Dreaming** while they run a dream phase. Use **Dream now** on an
+enabled project's card to request a phase without waiting for the schedule. Maistro
+checks the board and reports whether the phase started or why it was rejected.
+The usual [dream conditions](HOW_IT_WORKS.md#daily-dream-phases) still apply.
 
 The dashboard uses a dark blue palette. Cargo embeds the precompiled CSS and
 MIT license from `src/vendor/tabler-1.7.5` in the Maistro executable.

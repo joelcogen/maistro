@@ -5,11 +5,12 @@ use crate::{
 };
 use anyhow::{Context, Result};
 use axum::{
-    Router,
+    Json, Router,
     body::{Body, Bytes},
-    extract::State,
-    http::{Method, StatusCode, Uri},
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
+    http::{HeaderMap, Method, StatusCode, Uri, header},
     response::Response,
+    routing::post,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -17,7 +18,10 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tokio::{net::TcpListener, sync::watch};
+use tokio::{
+    net::TcpListener,
+    sync::{mpsc, oneshot, watch},
+};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -399,15 +403,14 @@ impl Status {
     }
     pub fn dream_started(&mut self, id: &str) {
         let worker = &mut self.project(id).worker;
-        worker.start("active");
-        worker.latest_event = "Running daily dreams";
+        worker.start("dreaming");
+        worker.latest_event = "Running dreams";
         worker.last_error = None;
     }
     pub fn dream_finished(&mut self, id: &str, completed: bool) {
         let worker = &mut self.project(id).worker;
-        worker.finish("idle", "Daily dream phase finished");
-        worker.last_error =
-            (!completed).then_some("Daily dream phase failed; see private daemon logs");
+        worker.finish("idle", "Dream phase finished");
+        worker.last_error = (!completed).then_some("Dream phase failed; see private daemon logs");
     }
     pub fn worker_finished(&mut self, id: &str, outcome: Option<Outcome>, failed: bool) {
         if outcome.is_some() {
@@ -473,29 +476,163 @@ fn safe_url(value: &str) -> Option<String> {
 }
 
 pub type Published = watch::Receiver<Arc<StatusSnapshot>>;
+
+pub(crate) enum DreamRejection {
+    UnknownProject,
+    Disabled,
+    Busy,
+    AlreadyRequested,
+    StoriesQueued,
+    BoardUnavailable,
+    BoardChanged,
+    Ineligible,
+    DiscoveryFailed,
+}
+
+pub(crate) type DreamReply = oneshot::Sender<Result<(), DreamRejection>>;
+
+pub(crate) struct DreamRequest {
+    pub project_id: String,
+    pub reply: DreamReply,
+}
+
+#[derive(Clone)]
+struct DreamApi {
+    requests: mpsc::Sender<DreamRequest>,
+    port: u16,
+    stop: CancellationToken,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DreamInput {
+    project_id: String,
+}
+
 pub async fn bind(port: u16) -> Result<TcpListener> {
     TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port))
         .await
         .with_context(|| format!("cannot bind status server to 127.0.0.1:{port}"))
 }
-pub async fn serve(
+pub(crate) async fn serve(
     listener: TcpListener,
     status: Published,
+    requests: mpsc::Sender<DreamRequest>,
     stop: CancellationToken,
 ) -> Result<()> {
-    // The router receives only a display snapshot, with no engine/agent handles.
-    let app = Router::new().fallback(handle).with_state(status);
+    let dream = post(dream_request).with_state(DreamApi {
+        requests,
+        port: listener.local_addr()?.port(),
+        stop: stop.clone(),
+    });
+    let app = Router::new()
+        .route("/api/dream", dream.layer(DefaultBodyLimit::max(4096)))
+        .fallback(handle)
+        .with_state(status);
     axum::serve(listener, app)
         .with_graceful_shutdown(stop.cancelled_owned())
         .await?;
     Ok(())
 }
+
+async fn dream_request(
+    State(api): State<DreamApi>,
+    headers: HeaderMap,
+    input: Result<Json<DreamInput>, JsonRejection>,
+) -> Response {
+    let port_suffix = if api.port == 80 {
+        String::new()
+    } else {
+        format!(":{}", api.port)
+    };
+    let local = headers
+        .get(header::HOST)
+        .and_then(|host| host.to_str().ok())
+        .is_some_and(|host| {
+            // Require a loopback Host to prevent DNS rebinding, and a matching browser Origin.
+            (host == format!("127.0.0.1{port_suffix}") || host == format!("localhost{port_suffix}"))
+                && headers
+                    .get(header::ORIGIN)
+                    .is_none_or(|origin| *origin == format!("http://{host}"))
+        });
+    if !local {
+        return dream_response(
+            StatusCode::FORBIDDEN,
+            "Dream requests must come from the local dashboard.",
+        );
+    }
+    let Json(input) = match input {
+        Ok(input) => input,
+        Err(error) => return dream_response(error.status(), "Send a JSON body with a project_id."),
+    };
+    let (reply, result) = oneshot::channel();
+    let request = DreamRequest {
+        project_id: input.project_id,
+        reply,
+    };
+    let result = if api.requests.try_send(request).is_ok() {
+        tokio::select! {
+            _ = api.stop.cancelled() => None,
+            result = result => result.ok(),
+        }
+    } else {
+        None
+    };
+    use DreamRejection::*;
+    let (code, message) = match result {
+        Some(Ok(())) => (StatusCode::ACCEPTED, "Dreaming started."),
+        Some(Err(UnknownProject)) => (StatusCode::NOT_FOUND, "Project not found."),
+        Some(Err(Disabled)) => (StatusCode::CONFLICT, "This project is disabled."),
+        Some(Err(Busy)) => (
+            StatusCode::CONFLICT,
+            "This project already has active work or a pending result.",
+        ),
+        Some(Err(AlreadyRequested)) => {
+            (StatusCode::CONFLICT, "A dream request is already pending.")
+        }
+        Some(Err(StoriesQueued)) => (
+            StatusCode::CONFLICT,
+            "There are Ready or In Progress stories.",
+        ),
+        Some(Err(BoardUnavailable)) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Could not confirm a complete board read. Try again.",
+        ),
+        Some(Err(BoardChanged)) => (
+            StatusCode::CONFLICT,
+            "The project changed during the board check. Try again.",
+        ),
+        Some(Err(Ineligible)) => (
+            StatusCode::CONFLICT,
+            "Dreaming requires dream files and new dream input or story activity. Only one phase can start per day.",
+        ),
+        Some(Err(DiscoveryFailed)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Could not read dream files. See private daemon logs.",
+        ),
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Dream requests are currently unavailable. Try again.",
+        ),
+    };
+    dream_response(code, message)
+}
+
+fn dream_response(code: StatusCode, message: &'static str) -> Response {
+    status_response(
+        Method::POST,
+        code,
+        "text/plain; charset=utf-8",
+        Bytes::from_static(message.as_bytes()),
+    )
+}
+
 async fn handle(State(status): State<Published>, method: Method, uri: Uri) -> Response {
     let (code, content_type, body) = if method != Method::GET && method != Method::HEAD {
         (
             StatusCode::METHOD_NOT_ALLOWED,
             "text/plain; charset=utf-8",
-            Bytes::from_static(b"Read-only: GET or HEAD only"),
+            Bytes::from_static(b"GET or HEAD only"),
         )
     } else {
         match uri.path() {
@@ -545,6 +682,10 @@ async fn handle(State(status): State<Published>, method: Method, uri: Uri) -> Re
             ),
         }
     };
+    status_response(method, code, content_type, body)
+}
+
+fn status_response(method: Method, code: StatusCode, content_type: &str, body: Bytes) -> Response {
     let mut response = Response::builder().status(code)
         .header("Content-Type", content_type).header("Cache-Control", "no-store")
         .header("X-Content-Type-Options", "nosniff")
@@ -999,7 +1140,7 @@ mod tests {
         assert_eq!(project.story.as_ref().unwrap().url.as_deref(), Some(url));
     }
     #[tokio::test]
-    async fn http_serves_status_locally_and_rejects_writes() {
+    async fn http_serves_status_locally_and_limits_writes_to_dream_requests() {
         let listener = bind(0).await.unwrap();
         let address = listener.local_addr().unwrap();
         assert_eq!(address.ip(), std::net::Ipv4Addr::LOCALHOST);
@@ -1013,7 +1154,8 @@ mod tests {
         let initial = Arc::new(Status::new(&config()).snapshot());
         let (_sender, receiver) = watch::channel(initial.clone());
         let stop = CancellationToken::new();
-        let job = tokio::spawn(serve(listener, receiver, stop.clone()));
+        let (requests, mut queued) = mpsc::channel(1);
+        let job = tokio::spawn(serve(listener, receiver, requests, stop.clone()));
         for (method, path, expected) in [
             ("HEAD", "/api/status", 200),
             ("POST", "/api/status", 405),
@@ -1076,6 +1218,46 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(response.split_once("\r\n\r\n").unwrap().1).unwrap();
         assert_eq!(serde_json::to_value(&*initial).unwrap(), value);
+
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let endpoint = format!("http://{address}/api/dream");
+        let post = || {
+            client
+                .post(&endpoint)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(r#"{"project_id":"a"}"#)
+        };
+        assert_eq!(
+            client.get(&endpoint).send().await.unwrap().status(),
+            StatusCode::METHOD_NOT_ALLOWED
+        );
+        for (name, value) in [
+            (header::HOST, format!("untrusted.test:{}", address.port())),
+            (header::ORIGIN, "http://untrusted.test".into()),
+        ] {
+            let response = post().header(name, value).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert_eq!(
+            client.post(&endpoint).send().await.unwrap().status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE
+        );
+        assert!(matches!(
+            queued.try_recv(),
+            Err(mpsc::error::TryRecvError::Empty)
+        ));
+
+        let (response, ()) = tokio::join!(
+            post()
+                .header(header::ORIGIN, format!("http://{address}"))
+                .send(),
+            async {
+                let request = queued.recv().await.unwrap();
+                assert_eq!(request.project_id, "a");
+                assert!(request.reply.send(Ok(())).is_ok());
+            }
+        );
+        assert_eq!(response.unwrap().status(), StatusCode::ACCEPTED);
         stop.cancel();
         tokio::time::timeout(std::time::Duration::from_secs(2), job)
             .await

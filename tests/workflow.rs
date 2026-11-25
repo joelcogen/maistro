@@ -523,6 +523,97 @@ async fn dream_phase_holds_its_projects_worker_slot_until_it_finishes() {
 }
 
 #[tokio::test]
+async fn dashboard_dream_checks_live_board_and_uses_the_daily_checkpoint() {
+    let mut f = Fixture::new(&[Mode::Master]);
+    f.enable_status();
+    f.config.orchestrator.dream_time = "23:59".into();
+    f.config.orchestrator.poll_interval_seconds = 30;
+    f.touch("hold-story-p0");
+    f.touch("hold-dream-p0");
+    let (stop, job) = f.start();
+    assert!(
+        f.wait(|| f.events().iter().any(|e| e["kind"] == "coordinator_read"))
+            .await
+    );
+
+    // Add a file after the first scheduler tick, so only the dashboard can start it during this test.
+    write_dream(&f.config.projects[0], "manual.md", "no changes");
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let request = || async {
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{}/api/dream",
+                f.config.status.port
+            ))
+            .header("Content-Type", "application/json")
+            .body(r#"{"project_id":"p0"}"#)
+            .send()
+            .await
+            .unwrap();
+        (response.status().as_u16(), response.text().await.unwrap())
+    };
+    for status in ["Ready", "In Progress"] {
+        f.status("p0", status);
+        let (code, message) = request().await;
+        assert_eq!(code, 409);
+        assert!(message.contains("Ready or In Progress"));
+    }
+    f.status("p0", "Backlog");
+    f.touch("missing-observations");
+    let (code, message) = request().await;
+    assert_eq!(code, 503);
+    assert!(message.contains("complete board read"));
+    assert!(!f.events().iter().any(|e| e["kind"] == "dream_start"));
+
+    fs::remove_file(f.temp.path().join("missing-observations")).unwrap();
+    assert_eq!(request().await.0, 202);
+    assert!(
+        f.wait(|| f.events().iter().any(|e| e["kind"] == "dream_start"))
+            .await
+    );
+    assert_eq!(
+        f.status_snapshot().await["projects"][0]["worker"]["state"],
+        "dreaming"
+    );
+    assert_eq!(request().await.0, 409);
+
+    let previous_reads = f
+        .events()
+        .iter()
+        .filter(|e| e["kind"] == "coordinator_read")
+        .count();
+    fs::remove_file(f.temp.path().join("hold-dream-p0")).unwrap();
+    assert!(
+        f.wait(|| f
+            .events()
+            .iter()
+            .filter(|e| e["kind"] == "coordinator_read")
+            .count()
+            > previous_reads)
+            .await
+    );
+    assert_eq!(
+        f.status_snapshot().await["projects"][0]["worker"]["state"],
+        "idle"
+    );
+    let (code, message) = request().await;
+    assert_eq!(code, 409);
+    assert!(message.contains("Only one phase can start per day"));
+    assert_eq!(
+        f.events()
+            .iter()
+            .filter(|e| e["kind"] == "dream_start")
+            .count(),
+        1
+    );
+    f.stop(stop, job).await;
+}
+
+#[tokio::test]
 async fn workers_reload_rotated_tokens_without_putting_them_in_logs() {
     let f = Fixture::new(&[Mode::Master, Mode::Pr]);
     let codex = maistro::agent::AgentRunner::new(f.config.clone());
