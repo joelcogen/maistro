@@ -156,7 +156,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn compact_http_checks_manifest_wraps_requests_and_redacts_errors() {
+    async fn compact_http_authenticates_wraps_requests_and_redacts_errors() {
         async fn handler(
             headers: HeaderMap,
             Json(request): Json<Value>,

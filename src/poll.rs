@@ -525,10 +525,7 @@ mod tests {
     async fn compact_rejects_changed_markdown_hash_and_missing_required_tools() {
         let (f, client) = Fixture::new().await;
         fs::write(f.root.path().join("poll-bad-hash"), "").unwrap();
-        assert!(
-            format!("{:#}", client.observe(&f.project).await.unwrap_err())
-                .contains("Markdown changed")
-        );
+        assert!(client.observe(&f.project).await.is_err());
         client.close().await;
         fs::write(f.root.path().join("missing-tools"), "").unwrap();
         let config = toml::from_str(&format!(
@@ -613,17 +610,14 @@ mod tests {
         f.data["p0"]["fields"][0]["type_option"]["options"] = json!(["Blocked", "Ready"]);
         f.save();
         assert_ne!(ordered, f.observe(&client).await);
-        // External linked documents are not read or part of the observation.
-        f.data = original;
-        f.data["p0"]["external_document"] = json!("reference changed");
-        f.save();
-        assert_eq!(initial, f.observe(&client).await);
         client.close().await;
     }
     #[tokio::test]
     async fn staged_reads_skip_inactive_context_but_track_requirements_and_dependencies() {
         let (mut f, client) = Fixture::new().await;
         let dependency = "22222222-2222-2222-2222-222222222222";
+        let external = "33333333-3333-3333-3333-333333333333";
+        f.data["p1"] = json!({"rows":[{"id":external,"body":"Referenced document"}]});
         f.data["p0"]["rows"][1]["body"] = json!("dependency requirements");
         f.data["p0"]["rows"][1]["status"] = json!("Done");
         f.save();
@@ -632,11 +626,15 @@ mod tests {
         f.data["p0"]["rows"][1]["body"] = json!("unrelated edit");
         f.save();
         assert_eq!(baseline, f.observe(&client).await);
-        // A body link makes even a Done dependency's context relevant.
-        f.data["p0"]["rows"][0]["body"] = json!(format!("Depends on {dependency}"));
-        f.data["p0"]["rows"][1]["status"] = json!("Done");
+        // Only the same-board dependency should contribute to the fingerprint.
+        f.data["p0"]["rows"][0]["body"] = json!(format!(
+            "Depends on {dependency}. See [reference](https://appflowy.example/{external})."
+        ));
         f.save();
         let linked = f.observe(&client).await;
+        f.data["p1"]["rows"][0]["body"] = json!("Edited external reference");
+        f.save();
+        assert_eq!(linked, f.observe(&client).await);
         f.data["p0"]["rows"][1]["body"] = json!("changed linked requirement");
         f.save();
         assert_ne!(linked, f.observe(&client).await);

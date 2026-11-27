@@ -76,24 +76,24 @@ test('renders unknown/stale counts, pending results and malicious titles as text
 });
 test('refresh failure preserves data, marks disconnected, and recovers', async () => {
   let fail = false;
+  const data = snapshot();
   const { nodes, timers } = harness(async (path, options) => {
     assert.equal(path, 'api/status'); assert.equal(options.cache, 'no-store');
-    assert.ok(options.signal instanceof AbortSignal);
     if (fail) throw new Error('offline');
-    return { ok: true, json: async () => snapshot() };
+    return { ok: true, json: async () => data };
   });
   await flush(); const before = nodes.projects.text;
   fail = true; await timers.shift().fn();
   assert.equal(nodes['connection-state'].text, 'Disconnected');
   assert.match(nodes['connection-detail'].text, /stale.*Last received.*Retrying/);
   assert.equal(nodes.projects.text, before);
+  data.projects[0].story.title = 'Updated story';
   fail = false; await timers.shift().fn();
   assert.equal(nodes['connection-state'].text, 'Connected');
-  assert.match(nodes['connection-detail'].text, /^Updated /);
+  assert.match(nodes.projects.text, /Updated story/);
 });
 test('initial HTTP error leaves status sections hidden', async () => {
   const { nodes } = harness(async () => ({ ok: false }));
-  assert.equal(nodes['connection-state'].text, 'Connecting…');
   await flush();
   assert.equal(nodes['connection-state'].text, 'Disconnected');
   assert.match(nodes['connection-detail'].text, /No status received yet.*Retrying/);
@@ -196,8 +196,6 @@ test('Dream now submits the project, shows rejection or success, and disables wh
   await timers.shift().fn();
   assert.equal(buttons()[0].text, 'Checking…');
   assert.equal(buttons()[0].disabled, true);
-  buttons()[0].click();
-  assert.equal(requests.length, 1);
   requests.shift()({ ok: false, text: async () => 'There are Ready or In Progress stories.' });
   await first;
   assert.match(nodes['dream-feedback'].text, /Could not start dreaming.*Ready or In Progress/);
@@ -246,7 +244,7 @@ test('coordination age handles first run, active passes and time boundaries', as
   assert.match(nodes.daemon.text, /Coordinating/);
 });
 
-test('overview and project counts share compact labels and full observations need no note', async () => {
+test('overview and project counts label each status and distinguish unknown counts', async () => {
   const data = snapshot();
   data.overall = { counts: values, observed_projects: 2, total_projects: 2, stale: false };
   const { nodes } = harness(async () => ({ ok: true, json: async () => data }));

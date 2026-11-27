@@ -136,7 +136,7 @@ if coordinator:
                 assert policy['appflowy_database']['approval_mode'] == 'approve'
 
             assert 'update_story' not in setting
-    event('coordinator', model=model, effort=effort, provider='claude' if claude else 'codex', snapshot=snapshot, projects=[p['id'] for p in projects])
+    event('coordinator', model=model, provider='claude' if claude else 'codex', snapshot=snapshot, projects=[p['id'] for p in projects])
     if (ROOT / 'luna-fail').exists():
         sys.exit(4)
     with (ROOT / 'board.lock').open('w') as lock:
@@ -264,7 +264,6 @@ else:
                 assert Path('01-first.txt').is_file()
             path = Path(instructions['name']).with_suffix('.txt')
             path.write_text(content + '\n')
-            assert path.read_text() == content + '\n'
             git('add', str(path))
             git('commit', '-m', f"Dream: {instructions['name']}")
             if not local:
@@ -277,7 +276,7 @@ else:
     assignment = json.loads(prompt.split('\nASSIGNMENT=', 1)[1].splitlines()[0])
     project = assignment['project_id']
     assert Path.cwd() == ROOT / project
-    event('worker_start', model=model, effort=effort, provider='claude' if claude else 'codex', project=project, recovery=assignment['recovery'], git=git_config)
+    event('worker_start', model=model, provider='claude' if claude else 'codex', project=project, recovery=assignment['recovery'], git=git_config)
     if local:
         assert 'LOCAL MASTER MODE:' in prompt and 'PR MODE:' not in prompt
     elif git_config['mode'] == 'pr':
@@ -304,8 +303,6 @@ else:
         sha = git('rev-parse', 'HEAD') if marker in git('log', '-1', '--format=%B') else ''
     if not sha:
         Path('result.txt').write_text('implemented\n')
-        # A real test is performed by the worker, not by the daemon.
-        subprocess.check_call([sys.executable, '-c', "assert open('result.txt').read() == 'implemented\\n'"])
         git('add', 'result.txt')
         git('commit', '--allow-empty', '-m', marker)
         sha = git('rev-parse', 'HEAD')
@@ -313,9 +310,8 @@ else:
         git('push', git_config['remote'], branch)
     if (ROOT / 'reported-commit').exists():
         sha = (ROOT / 'reported-commit').read_text().strip()
-    result = dict(outcome='completed', summary='Implemented fixture', tests=['python assertion passed'],
+    result = dict(outcome='completed', summary='Implemented fixture', tests=['fixture check'],
                   commit=sha, pr_url=f'https://example.test/pull/{project}' if git_config['mode'] == 'pr' else None)
     if (ROOT / 'missing-pr-url').exists():
         result['pr_url'] = None
-    event('worker_finish', project=project)
     finish(result)

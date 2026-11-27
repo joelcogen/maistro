@@ -63,6 +63,7 @@ EOF
         self.assertEqual((self.config / 'github-token').stat().st_mode & 0o777, 0o600)
         self.assertEqual(self.config.stat().st_mode & 0o777, 0o700)
         self.assertNotIn(self.token, result.stdout + result.stderr)
+        self.assertNotIn('unexpected-service-operation', result.stderr)
         for permission in ('Contents', 'Workflows', 'Pull requests'):
             self.assertIn(permission + ': Read and write', result.stdout)
         self.assertEqual((self.config / 'config.toml').stat().st_mode & 0o777, 0o600)
@@ -126,7 +127,9 @@ remote = false
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((self.config / 'github-token').read_text(), replacement + '\n')
         self.assertNotIn(replacement, result.stdout + result.stderr)
-        self.assertEqual(list(self.config.glob('.github-token.*')), [])
+        for path in self.config.rglob('*'):
+            if path.is_file() and path != self.config / 'github-token':
+                self.assertNotIn(replacement.encode(), path.read_bytes(), path)
 
     def test_refuses_symlink_without_overwriting_target(self):
         self.config.mkdir(parents=True)

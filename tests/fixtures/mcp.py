@@ -112,7 +112,7 @@ def compact(name, arguments):
         end = min(offset + 3, len(data))
         return dict(data={'markdown': data[offset:end]}, offset=offset,
                     next_offset=end if end < len(data) else None, has_more=end < len(data),
-                    truncated=end < len(data), content_hash=('changed' if offset and (ROOT / 'poll-bad-hash').exists() else hashlib.sha256(data.encode()).hexdigest()))
+                    truncated=end < len(data), content_hash=('changed' if offset == 0 and (ROOT / 'poll-bad-hash').exists() else hashlib.sha256(data.encode()).hexdigest()))
     offset = r.get('offset', 0)
     end = min(offset + 2, len(data))
     return {('data' if old == 'get_workspaces' else 'items'): data[offset:end],
