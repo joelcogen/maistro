@@ -1,29 +1,34 @@
 # How Maistro works
 
-See [README.md](README.md) for setup and run instructions.
+See the README to [install and configure Maistro](README.md#install-and-configure)
+and [run the service](README.md#start-stop-and-logs).
 
 ## Project modes and delivery
 
 A story in a `master` project can request PR delivery in its body or a human
 comment. For example, write “Open a PR for this story” or “Implement this on
 branch `feature/new-export`.” PR projects can request custom branches too.
-Custom names must be valid Git branch names distinct from `base_branch`.
+Custom names must be valid Git branch names distinct from `base_branch`. See
+[project modes](README.md#project-modes) for the default delivery in each mode.
 
 PR mode defaults to the stable branch `maistro/<project>/<story-id>`. Both modes
 use `AppFlowy story: <story-id>` or `Shortcut story: <numeric-id>` commit/PR
 markers to recover interrupted work. The repository, remote and PR target come
 from project configuration.
 
-PR overrides need a named remote, `gh` and a token that can create PRs. A PR
-override on a local-only project moves the story to Blocked with an explanation.
+PR overrides need a named remote, `gh`, a token that can create PRs, and the
+Review status. A PR override moves the story to Blocked if the project is
+local-only or [Review is disabled](README.md#story-statuses). This also applies
+during recovery.
+
 For local delivery, the worker checks the configured base branch for the story's
 commit marker during recovery. Maistro verifies the reported SHA is reachable
 from that local branch before recording success.
 
 PR or branch mentions in requirements keep the project default unless they
 explicitly request a different delivery mode or branch. The coordinator fixes
-the mode before assigning the story and uses its configured success status.
-[Project modes](README.md#project-modes)
+the mode before assigning the story and uses the success status for that mode.
+
 A blocked result goes to Blocked. The coordinator preserves human status changes,
 uses completion markers to avoid duplicate comments, and reads back its comments
 and status updates before acknowledging delivery.
@@ -87,12 +92,11 @@ unauthenticated access to project IDs, story titles/IDs, safe board/workflow and
 story links, and concise diagnostics. Titles render as text and links allow
 only HTTP(S). Detailed failure output stays in private logs and the story source.
 
-The compact Agents box lists Coordinator and each project with its status and
-configured effort, followed by uptime and time since the latest coordination pass
-began. Disabled projects remain visible. Project cards show worker status, duration
-and latest start/finish time, the current story, board and story links, and concise errors. Pending results
-remain visible until source recording completes. Observations live in memory and
-reset on restart.
+The Agents box shows coordinator and worker status, configured effort, uptime,
+and time since the last coordination pass started. Disabled projects stay visible.
+Project cards show the current story, board and story links, worker timing, and
+errors. Pending results stay visible until the coordinator records them in the
+source. Dashboard observations reset on restart.
 
 Counts come from coordinator reads and may lag Rust polling. Viewing the page
 reads in-memory data. Ready counts queued work; In Progress includes active and
@@ -126,8 +130,8 @@ retry on the usual coordination schedule.
 
 The dashboard's **Dream now** button requests a phase for one project via
 `POST /api/dream`. The request skips the configured start time and uses a new
-coordination pass to check the project's board. The daily limit and input
-requirements apply. A rejected request leaves no pending manual phase.
+coordination pass to check the project's board or workflow. The daily limit and
+input requirements apply. A rejected request leaves no pending manual phase.
 
 The phase holds the project's worker slot until all of its dreams finish. Polling
 continues. Maistro handles newly queued stories in a fresh coordinator pass after
@@ -155,44 +159,49 @@ configured base on the GitHub push remote. It reuses that PR or opens one if
 `dreams` is ahead of the base. The worker slot stays occupied until publication
 finishes. Maistro logs the PR URL or any publication error privately.
 
-## Shortcut API polling
+## Shortcut polling
 
-Rust resolves the workflow and reads only that workflow's non-archived stories
-by listing all of its states and reading
-`GET /api/v4/{workspace}/workflow-states/{state-id}/stories` for each state,
-including states not mapped in Maistro. Reads use compact fields, exclude archived
-stories, and follow every page. This avoids the workflow-wide story endpoint,
-which timed out in live checks. Results must match the expected workflow and
-state; duplicate story IDs or a changed state list invalidate the whole read.
-The poller still compares two complete scans to detect changes during observation.
-Request errors identify the endpoint and distinguish timeouts from connection
-failures without logging credentials or cursor values. It validates configured state labels and numeric membership.
-Polling compares complete fingerprints; unchanged boards do not invoke the
-coordinator. Story metadata and membership changes wake it. Ready, In Progress,
-and Blocked stories also have comments, checklist items, and story links checked explicitly, along
-with linked story statuses, so these changes do not depend solely on parent
-`updated_at` timestamps. Edits only to separately linked documents are not
-independently polled; those documents are read when a story is coordinated.
+Maistro can poll through the [read-only Shortcut API](README.md#read-only-api-polling-recommended)
+or through the configured MCP connection.
+
+### Shortcut API polling
+
+The poller resolves the workflow and validates its state labels and IDs. To avoid
+timeouts on the workflow-wide endpoint, it reads
+`GET /api/v4/{workspace}/workflow-states/{state-id}/stories` for every state,
+including states outside Maistro's mapping. It requests compact fields, excludes
+archived stories, and follows every page. Duplicate story IDs, stories outside
+the expected workflow or state, or a changed state list invalidate the read.
+The poller compares two complete workflow scans to catch changes during the
+read. Errors name the endpoint and distinguish timeouts from connection
+failures. Credentials and cursor values stay out of logs.
+
+Changes to story metadata or membership wake the coordinator. The poller also
+checks comments, checklist items, story links, and linked story statuses for
+Ready, In Progress, and Blocked stories, even when the parent story's `updated_at`
+timestamp stays the same. The coordinator reads linked documents when it handles
+a story. Edits to those documents alone do not wake it.
 
 Before each coordination pass Rust obtains a fresh compact workflow snapshot and
 supplies it directly to the agent. MCP workflow/state/workspace enumeration tools
 are disabled when a connection serves only API-configured projects in that pass.
 When sharing a connection with a legacy project, the coordinator is instructed
-to use the supplied API snapshot for the API-configured project. The agent still uses MCP for individual
-story requirements, comments, linked documents, current active/pending checks, and
-verified writes. Incomplete API reads isolate the affected project and retry without assigning,
-cancelling, acknowledging, or writing its stories; other projects can proceed.
+to use the supplied API snapshot for the API-configured project. The agent still
+uses MCP for story requirements, comments, linked documents, active story and
+pending result checks, and verified writes. If an API read is incomplete, Maistro
+retries without assigning, cancelling, acknowledging, or writing stories in
+that project. Other projects can continue.
 Credentials are never included in prompts or dashboard data.
 
-## Shortcut scheduling
+### Shortcut scheduling
 
 With API polling, `poll_interval_seconds` controls the delay between Rust polls.
 Worker completion and retries can also wake coordination. Failed polls retain
 the last complete fingerprint; unchanged successful polls do not erase a pending
 retry or worker-completion event. Polling remains active while workers run so
-archiving or moving a story can trigger cancellation checks. As with AppFlowy,
-the coordinator verifies the current story before acting; cancellation checks
-pause while the source is unavailable.
+archiving or moving a story can trigger cancellation checks. The coordinator
+verifies the current story before acting. Cancellation checks pause while the
+source is unavailable.
 
 Without API polling, the coordinator reads Shortcut through the configured MCP
 connection at each polling interval, including while idle. If the connection
@@ -202,10 +211,6 @@ numeric public ID to identify it across restarts.
 
 ## Story behavior and recovery
 
-Map any custom status labels in `[projects.statuses]` using their exact spelling
-and case. For example, if your board uses `In progress`, set
-`in_progress = "In progress"`.
-
 - Ready authorizes new work. The coordinator honors dependencies and priority and
   gathers the full story body, human comments and linked references.
 - Interrupted In Progress stories take priority over new work. Workers inspect
@@ -213,24 +218,36 @@ and case. For example, if your board uses `In progress`, set
   and reuse completed work.
 - Moving an active story out of In Progress stops its worker when the coordinator
   observes the change. Files, commits, PRs and the user-selected status are
-  preserved. Requirement edits take effect on the next assignment.
+  preserved. Archiving a Shortcut story also stops its worker, even when
+  Cancelled is disabled. Requirement edits take effect on the next assignment.
 - Worker failures or unresolved obstacles become Blocked with an explanation.
   Resolve the obstacle and move the story to Ready to retry.
 - Completed results remain in memory and occupy the project until the coordinator
   confirms the source update or observes a user status change. Other projects
-  continue. Failed coordination retries after the polling interval.
+  continue.
 
-For AppFlowy, Rust polls enabled boards over each project's MCP connection.
-`orchestrator.poll_interval_seconds` (default 30) sets the delay between completed
-poll attempts per project. After initial observation and coordination, an unchanged
-idle board waits for a change before calling the coordinator again. Changes to any
-story, including Done or Backlog stories and Maistro's own writes, wake coordination.
+The same rules apply if you [change the status labels](README.md#story-statuses).
 
 One global coordinator pass combines pending projects while polling and workers
-continue. It acknowledges the observed generation at its start; changes during
-the pass stay pending for the next pass. Worker completion, failure, cancellation
-completion and result acknowledgement also wake coordination. Failed or incomplete
-coordination and unacknowledged results retry after the interval per project.
+continue. It records the changes observed before it starts and handles changes
+that arrive during the pass on the next one. Worker completion, failure,
+cancellation completion, and result acknowledgement also wake coordination.
+Failed or incomplete coordination and unacknowledged results retry after the
+polling interval for that project.
+
+Restart clears assignments and pending results from memory. Maistro uses the
+source and repository to recover work, including when it stopped after Git
+delivery and before a source update. Human edits can race with reads and status
+writes. Run one daemon per board, even across separate clones. Agents verify
+claims and delivery. Rust validates responses and enforces one worker per project.
+
+## AppFlowy polling
+
+Maistro polls enabled boards over each project's MCP connection.
+`orchestrator.poll_interval_seconds` (default 30) sets the delay between completed
+poll attempts per project. After the first read and coordination pass, an idle
+board waits for a change before calling the coordinator again. Monitored changes
+include Done or Backlog story cells and Maistro's own writes.
 
 The coordinator reads fresh data, checks active-story statuses, authorizes work,
 writes results and decides cancellation. Cancellation usually takes up to one
@@ -255,12 +272,12 @@ same-board rows referenced by ID in their cells, bodies, or comments (transitive
 This preserves requirement edits on waiting/active stories and dependency status
 changes across the board. Unresolvable status schemas and free-form dependency
 cells without known row IDs conservatively retain fuller reads. Unreferenced
-Backlog/Done/Review/Cancelled body-only edits do not wake coordination; moving
-those stories into an actionable state does. Rows,
-fields and comments are keyed by ID, JSON objects by key; semantic array order
-and Markdown are preserved. MCP request metadata and pagination offsets are
-excluded. **External linked reference edits alone are outside detection scope.**
-The coordinator reads relevant references when processing a story.
+Backlog, Done, Review, and Cancelled stories wake the coordinator when they move
+to an actionable status. Edits to their bodies alone do not wake it. The
+fingerprint uses IDs for rows, fields, and comments, and keys for JSON objects.
+It preserves semantic array order and Markdown and omits MCP request metadata
+and pagination offsets. The coordinator reads external references when it
+processes a story. Edits to those references alone do not wake it.
 
 Before each AppFlowy coordination pass, Rust resolves the configured board using
 its MCP connection and supplies `appflowy_board` with workspace, database and view
@@ -274,10 +291,10 @@ The poller uses AppFlowy MCP's compact API with typed `request` arguments.
 Board metadata uses a folder fetch scoped to the view ID, avoiding the page
 endpoint's oversized embedded board payload. Workspace, database, field and row
 lists follow returned continuation offsets.
-Rows marked unavailable or omitted invalidate the observation. Markdown is read
-separately in chunks with a stable content hash, checked against the assembled body.
-AppFlowy's `has_doc` flag
-identifies bodies; failed body reads reject the observation. Row comments use row
+Rows marked unavailable or omitted invalidate the observation. AppFlowy's
+`has_doc` flag identifies rows with Markdown bodies. The poller reads those
+bodies in chunks and checks the assembled Markdown against a stable content
+hash. A failed body read invalidates the observation. Row comments use row
 collabs, while inline comments use the derived document UUID.
 
 Comments are fully paginated. Malformed or nonadvancing pages, truncated or
@@ -288,9 +305,3 @@ and edits reverted between observations can escape detection. Ongoing edits may
 defer acceptance until a stable read. Rejections preserve the last valid
 fingerprint and dirty state. Retries wait the configured interval. Polls are
 bounded by `coordinator_timeout_seconds`, with a 60-second limit per MCP read.
-
-Restart clears assignments and pending results from memory. Recovery reconstructs
-work from the source and repository, including crashes between remote operations
-and source updates. Human edits can race with reads and status writes. Use a
-single daemon per board, even across separate clones. Agents verify claims and
-remote outcomes; Rust validates response shape and concurrency.

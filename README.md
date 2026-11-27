@@ -5,7 +5,8 @@ coordinator picks stories and records results on the board or workflow. A Codex
 or Claude Code worker implements, tests, and delivers each change.
 Projects run in parallel, with one active story per project.
 
-See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
+Start with [installation and configuration](#install-and-configure). See
+[How Maistro works](HOW_IT_WORKS.md) for scheduling, delivery, and recovery.
 
 ## Project modes
 
@@ -15,12 +16,11 @@ See [HOW_IT_WORKS.md](HOW_IT_WORKS.md) for behavior and recovery details.
 | `master` | Implement, test, and commit directly on `base_branch`. Push when a remote is configured. | Done, with commit SHA or link |
 
 `base_branch` can be `main`, `master`, or another branch. You handle CI, merge PRs,
-and move reviewed stories to Done. To request PR delivery for an individual story,
-see [delivery overrides](HOW_IT_WORKS.md#project-modes-and-delivery).
+and move reviewed stories to Done.
 
-Projects use `origin` by default. Set `remote` to a string to select another
-named remote. For local-only story and dream delivery, set the following in
-the project and make sure its configured `base_branch` already exists locally.
+Projects use `origin` by default. Set `remote` to the name of another Git remote
+if needed. For local-only story and dream delivery, use these project settings
+and make sure `base_branch` already exists locally.
 
 ```toml
 mode = "master"
@@ -28,8 +28,8 @@ remote = false
 ```
 
 Maistro tests and commits changes on the local base branch without fetching or
-pushing. Completed stories move to Done with the commit SHA. A PR request on a
-local-only project moves the story to Blocked.
+pushing. See [delivery overrides](HOW_IT_WORKS.md#project-modes-and-delivery) for
+how to request a PR for an individual story and when Maistro can honor it.
 
 ## Dreams
 
@@ -77,9 +77,12 @@ configuration while preserving an existing `config.toml`. Edit
 `~/.config/maistro/config.toml` using [config.example.toml](config.example.toml),
 then start the service as described below.
 
-Each project needs a stable ID, a dedicated local Git checkout, exactly one
-`appflowy_page`, `appflowy_url`, `shortcut_workflow`, `shortcut_workflow_id`, or
-`shortcut_url`, a `mode`, and a `base_branch`.
+Each project needs a stable ID, a dedicated local Git checkout, a `mode`, and a
+`base_branch`. Set exactly one source selector. For AppFlowy, use `appflowy_page`
+or `appflowy_url`. For Shortcut, use one of the
+[workflow selectors](#shortcut-projects). Both sources support
+[custom status labels](#story-statuses).
+
 Each repository and its linked worktrees must belong to a single project. Maistro
 locks each repository for the daemon's lifetime. Reserve these checkouts for
 Maistro and preserve interrupted work when restarting.
@@ -112,6 +115,9 @@ MCP entry because the poller connects directly.
 
 Codex stdio inherits the process environment. Maistro expands `${VAR}` and
 `${VAR:-default}` in Claude MCP settings.
+
+See [AppFlowy polling](HOW_IT_WORKS.md#appflowy-polling) for which changes trigger
+a coordinator pass.
 
 ### GitHub token
 
@@ -315,9 +321,8 @@ checks the board and reports whether the phase started or why it was rejected.
 **Dream now** also works when the dashboard is served through a private reverse proxy.
 The usual [dream conditions](HOW_IT_WORKS.md#daily-dream-phases) still apply.
 
-The dashboard uses a dark blue palette. Cargo embeds the precompiled CSS and
-MIT license from `src/vendor/tabler-1.7.5` in the Maistro executable.
-[Tabler 1.7.5 package](https://www.npmjs.com/package/@tabler/core/v/1.7.5)
+See [dashboard data and counts](HOW_IT_WORKS.md#status-page-and-counts) for how
+Maistro updates the dashboard and what stale counts mean.
 
 ## Shortcut projects
 
@@ -383,8 +388,7 @@ blocked = "Blocked"
 cancelled = "Cancelled"
 ```
 
-Use the exact names from the Shortcut workflow's state list in
-`[projects.statuses]`.
+See [story statuses](#story-statuses) for defaults and optional states.
 
 Configure and authorize the hosted Shortcut MCP in your selected CLI using
 [Shortcut's MCP setup](https://www.shortcut.com/help/integrations/mcp-server/).
@@ -393,7 +397,15 @@ Maistro's `agents.codex_home`; for Claude, use a user-scoped entry. Maistro uses
 the server's configured name and the CLI's login. Complete authorization before
 starting the service; remote access is checked during operation.
 
-Optional states can be explicitly disabled with TOML booleans:
+## Story statuses
+
+In `[projects.statuses]`, use the exact labels from your AppFlowy board or
+Shortcut workflow. For example, set `in_progress = "In progress"` if that's how
+your source spells it. Use a distinct, nonempty name for each enabled status.
+Omitted entries keep the defaults shown in [config.example.toml](config.example.toml).
+
+Set `cancelled = false` to disable Cancelled. In master mode, you can also set
+`review = false` to disable Review.
 
 ```toml
 [projects.statuses]
@@ -401,12 +413,10 @@ review = false
 cancelled = false
 ```
 
-Omitted entries retain their default labels. Only Review and Cancelled can be
-disabled; enabled labels must remain distinct and nonempty. Review can only be
-disabled in master mode. A story requesting PR delivery while Review is disabled
-is marked Blocked with an explanation, including during recovery. Shortcut
-archiving still cancels active work regardless of the Cancelled setting. These
-optional settings also apply to AppFlowy.
+See [story behavior and recovery](HOW_IT_WORKS.md#story-behavior-and-recovery)
+for what triggers work or stops it, and
+[delivery overrides](HOW_IT_WORKS.md#project-modes-and-delivery) for how disabling
+Review affects PR requests.
 
 ## Migrating the previous version
 
@@ -436,3 +446,7 @@ cargo build --release --locked
 
 UI tests use Node.js 20+ and its built-in test runner. Tests use simulated Codex
 and Claude Code agents, stdio/HTTP MCP fixtures and local Git remotes.
+
+The dashboard uses [Tabler 1.7.5](https://www.npmjs.com/package/@tabler/core/v/1.7.5).
+Cargo embeds the precompiled CSS and MIT license from `src/vendor/tabler-1.7.5`
+in the Maistro executable.
